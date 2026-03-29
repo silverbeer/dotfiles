@@ -8,15 +8,20 @@ Complete setup for a new Mac. Follow steps in order.
 
 - 1Password desktop app installed and signed in
 - Homebrew installed: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
-- GitHub CLI authenticated: `brew install gh && gh auth login`
 
 ---
 
 ## Step 1 — Install tools
 
 ```bash
-brew install chezmoi
+brew install chezmoi gh
 brew install --cask 1password-cli
+```
+
+Authenticate GitHub CLI:
+```bash
+gh auth login
+# Select: GitHub.com → HTTPS → Login with a web browser
 ```
 
 ---
