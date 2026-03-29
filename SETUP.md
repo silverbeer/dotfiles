@@ -2,19 +2,26 @@
 
 Complete setup for a new Mac. Follow steps in order.
 
+> **Platform:** macOS only. Requires Claude Code CLI installed and licensed.
+> Install Claude Code: https://claude.ai/code
+
 ---
 
 ## Prerequisites
 
+- macOS with [Homebrew](https://brew.sh) installed:
+  ```bash
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  ```
+- Claude Code CLI installed and signed in
 - 1Password desktop app installed and signed in
-- Homebrew installed: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
 
 ---
 
 ## Step 1 — Install tools
 
 ```bash
-brew install chezmoi gh
+brew install chezmoi gh rtk
 brew install --cask 1password-cli
 ```
 
@@ -63,13 +70,36 @@ source ~/.zshrc
 
 ---
 
-## Step 5 — Verify
+## Step 5 — Set up RTK (Rust Token Killer)
+
+RTK is a Claude Code hook that intercepts every Bash command and strips unnecessary output before it hits Claude's context window. **Saves 60-90% of tokens on git, gh, kubectl, ls, pytest, and more — transparently, with zero behavior change.**
+
+The RTK hook is already configured in `~/.claude/settings.json` (applied by chezmoi in Step 3). Verify it's wired correctly:
 
 ```bash
+rtk --version        # Should show: rtk 0.x.x
+rtk gain             # Shows cumulative token savings
+rtk init --show      # Confirms hook is installed
+```
+
+If the hook isn't active, re-initialize it:
+```bash
+rtk init -g          # Installs hook + RTK.md into ~/.claude
+# Then restart Claude Code
+```
+
+---
+
+## Step 6 — Verify everything
+
+```bash
+# RTK working
+rtk gain
+
 # 1Password CLI working
 op item get "Supabase MSA" --fields credential --reveal
 
-# Claude config in place
+# Claude agents and commands in place
 ls ~/.claude/agents/
 ls ~/.claude/commands/
 
@@ -80,9 +110,9 @@ grep -i "token\|password\|secret\|credential" ~/.zshrc
 
 ---
 
-## Day-to-day: making changes
+## Day-to-day: making changes to dotfiles
 
-Edit dotfiles via chezmoi — never edit `~/.zshrc` directly:
+Never edit `~/.zshrc` or `~/.claude/` files directly — always go through chezmoi:
 
 ```bash
 # Edit a file
@@ -94,9 +124,9 @@ chezmoi diff
 # Apply changes to home directory
 chezmoi apply
 
-# Commit and push to GitHub
+# Commit and push to GitHub (syncs to all machines)
 cd ~/.local/share/chezmoi
-git add -A && git commit -m "your message" && git push
+git add -A && git commit -m "chore: describe change" && git push
 ```
 
 ---
@@ -105,16 +135,24 @@ git add -A && git commit -m "your message" && git push
 
 ```bash
 chezmoi update
-# Pulls latest from GitHub and applies
+# Pulls latest from GitHub and applies in one step
 ```
 
 ---
 
 ## Adding a new secret
 
-1. Add to 1Password: `op item create --category="API Credential" --title="My Service" --vault="Personal" "credential=abc123"`
-2. Reference in template: `{{ onepasswordRead "op://Personal/My Service/credential" }}`
-3. Apply: `chezmoi apply`
+```bash
+# Store in 1Password
+op item create --category="API Credential" --title="My Service" \
+  --vault="Personal" "credential=abc123"
+
+# Reference in a template file (.tmpl extension)
+{{ onepasswordRead "op://Personal/My Service/credential" }}
+
+# Apply
+chezmoi apply
+```
 
 ---
 
@@ -133,11 +171,12 @@ cd ~/.local/share/chezmoi && git add -A && git commit -m "add someconfig" && git
 |------|-------|
 | `~/.zshrc` | Templated — secrets via 1Password |
 | `~/.claude/CLAUDE.md` | Global Claude instructions |
-| `~/.claude/RTK.md` | RTK token-saving config |
-| `~/.claude/settings.json` | Hooks, statusline, permissions |
+| `~/.claude/RTK.md` | RTK config — loaded by Claude Code automatically |
+| `~/.claude/settings.json` | Hooks (RTK rewrite), statusline, permissions |
 | `~/.claude/mcp.json` | Templated — paths use homeDir |
 | `~/.claude/agents/qe-engineer.md` | Global QE agent baseline |
-| `~/.claude/commands/qe.md` | `/qe` slash command |
+| `~/.claude/commands/cppp.md` | `/cppp` slash command — commit/PR workflow |
+| `~/.claude/commands/qe.md` | `/qe` slash command — coverage audit |
 
 ## Files NOT managed (intentionally ignored)
 
@@ -145,4 +184,4 @@ cd ~/.local/share/chezmoi && git add -A && git commit -m "add someconfig" && git
 - `~/.claude/history.jsonl` — conversation history
 - `~/.claude/projects/` — per-project memory
 - `~/.claude/skills/` — installed skills
-- `~/.claude/settings.local.json` — machine-specific overrides
+- `~/.claude/settings.local.json` — machine-specific permission overrides

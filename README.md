@@ -2,11 +2,13 @@
 
 Personal Claude Code configuration, shell setup, and development standards managed with [chezmoi](https://www.chezmoi.io/) + [1Password CLI](https://developer.1password.com/docs/cli/).
 
+> **Platform:** macOS only. Requires [Claude Code](https://claude.ai/code) installed and licensed.
+
 ## Quick start (new machine)
 
 ```bash
 # 1. Install tools
-brew install chezmoi gh
+brew install chezmoi gh rtk
 brew install --cask 1password-cli
 
 # 2. Enable 1Password CLI desktop integration
@@ -35,6 +37,53 @@ source ~/.zshrc
 | `~/.claude/mcp.json` | MCP server config (Gmail) |
 | `~/.claude/agents/` | Global Claude subagents |
 | `~/.claude/commands/` | Global slash commands |
+
+---
+
+## RTK — Rust Token Killer
+
+[RTK](https://github.com/rtk-ai/rtk) is the single highest-impact tool in this setup. It's a Claude Code `PreToolUse` hook that transparently intercepts every Bash command and strips unnecessary output before it reaches Claude's context window.
+
+**Result: 60-90% token savings on every git, gh, kubectl, ls, pytest, curl call — zero behavior change.**
+
+```
+git status   →   rtk git status    (Claude sees clean diff, not decorators)
+ls           →   rtk ls            (72% savings — biggest win)
+gh pr create →   rtk gh pr create  (filtered JSON output)
+kubectl get  →   rtk kubectl get   (trimmed pod tables)
+pytest       →   rtk pytest        (structured test results only)
+```
+
+If you rely on Claude Code to run git commands — and you should, it's the right workflow — RTK is non-negotiable. Every commit, diff, log, push, and PR creation goes through it automatically.
+
+### Install
+
+```bash
+brew install rtk
+```
+
+### Wire to Claude Code (one-time per machine)
+
+The hook is pre-configured in `~/.claude/settings.json` via this dotfiles repo. Verify after applying:
+
+```bash
+rtk init --show    # Confirm hook is registered
+rtk gain           # See cumulative savings
+```
+
+If not active:
+```bash
+rtk init -g        # Re-install hook + RTK.md
+# Restart Claude Code
+```
+
+### Check your savings
+
+```bash
+rtk gain             # Total savings summary
+rtk gain --history   # Per-session breakdown
+rtk discover         # Finds commands Claude ran that missed RTK coverage
+```
 
 ---
 
