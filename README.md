@@ -3,6 +3,8 @@
 Personal Claude Code configuration, shell setup, and development standards managed with [chezmoi](https://www.chezmoi.io/) + [1Password CLI](https://developer.1password.com/docs/cli/).
 
 > **Platform:** macOS only. Requires [Claude Code](https://claude.ai/code) installed and licensed.
+>
+> **Note:** This is a personal dotfiles repo. The `zshrc` and `mcp.json` reference personal tooling (`mcp-gmail`, `openclaw`, `antigravity`) that you won't have. Use them as reference — adapt to your own stack. The Claude agents, commands, RTK setup, and chezmoi patterns are fully portable.
 
 ---
 
