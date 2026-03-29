@@ -1,0 +1,25 @@
+### MANAGED BY RANCHER DESKTOP START (DO NOT EDIT)
+export PATH="{{ .chezmoi.homeDir }}/.rd/bin:$PATH"
+### MANAGED BY RANCHER DESKTOP END (DO NOT EDIT)
+
+[[ "$TERM_PROGRAM" == "kiro" ]] && . "$(kiro --locate-shell-integration-path zsh)"
+
+# Added by CodeRabbit CLI installer
+export PATH="{{ .chezmoi.homeDir }}/.local/bin:$PATH"
+
+# Google Cloud SDK
+export PATH="/opt/homebrew/share/google-cloud-sdk/bin:$PATH"
+
+# Supabase PostgreSQL connection for MCP
+export SUPABASE_PG_URL="{{ onepasswordRead "op://Personal/Supabase MSA/credential" }}"
+
+alias k='kubectl'
+export RESUME_DATA_DIR="{{ .chezmoi.homeDir }}/iCloud/resume-data"
+
+# Added by Antigravity
+export PATH="{{ .chezmoi.homeDir }}/.antigravity/antigravity/bin:$PATH"
+
+# OpenClaw Completion
+autoload -Uz compinit && compinit
+source "{{ .chezmoi.homeDir }}/.openclaw/completions/openclaw.zsh"
+export APP_ENV=prod

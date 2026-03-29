@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "gmail": {
+      "command": "{{ .chezmoi.homeDir }}/.local/bin/uv",
+      "args": [
+        "run",
+        "--directory",
+        "{{ .chezmoi.homeDir }}/gitrepos/mcp-gmail",
+        "mcp",
+        "run",
+        "{{ .chezmoi.homeDir }}/gitrepos/mcp-gmail/mcp_gmail/server.py"
+      ],
+      "env": {
+        "MCP_GMAIL_CREDENTIALS_PATH": "{{ .chezmoi.homeDir }}/gitrepos/mcp-gmail/credentials.json",
+        "MCP_GMAIL_TOKEN_PATH": "{{ .chezmoi.homeDir }}/gitrepos/mcp-gmail/token.json"
+      }
+    }
+  }
+}

@@ -1,0 +1,28 @@
+# Claude Code runtime data — never commit
+.claude/cache
+.claude/sessions
+.claude/history.jsonl
+.claude/stats-cache.json
+.claude/telemetry
+.claude/tasks
+.claude/todos
+.claude/plans
+.claude/debug
+.claude/paste-cache
+.claude/image-cache
+.claude/shell-snapshots
+.claude/session-env
+.claude/ide
+.claude/plugins
+.claude/file-history
+.claude/backups
+.claude/projects
+.claude/skills
+.claude/worktrees
+.claude/settings.json.bak
+.claude/settings.local.json
+
+# Secrets — never commit
+.env
+.env.*
+*.secret

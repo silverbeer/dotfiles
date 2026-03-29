@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Glob",
+      "Grep",
+      "Edit",
+      "Write",
+      "mcp__supabase-sql__run_sql"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/silverbeer/.claude/hooks/rtk-rewrite.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "input=$(cat); model=$(echo \"$input\" | jq -r '.model.display_name'); cwd=$(echo \"$input\" | jq -r '.workspace.current_dir'); used=$(echo \"$input\" | jq -r '.context_window.used_percentage // \"0\"'); tin=$(echo \"$input\" | jq -r '.context_window.total_input_tokens // 0'); tout=$(echo \"$input\" | jq -r '.context_window.total_output_tokens // 0'); cost=$(echo \"scale=3; ($tin * 15 + $tout * 75) / 1000000\" | bc 2>/dev/null || echo \"0.000\"); branch=$(cd \"$cwd\" 2>/dev/null && git --no-optional-locks rev-parse --abbrev-ref HEAD 2>/dev/null); output=\"$model\"; [ \"$used\" != \"0\" ] && [ -n \"$used\" ] && output=\"$output | ctx: $(printf '%.0f' $used)%\"; [ -n \"$branch\" ] && output=\"$output | $branch\"; output=\"$output | \\$$cost\"; echo \"$output\""
+  },
+  "model": "opusplan"
+}
