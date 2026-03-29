@@ -291,39 +291,6 @@ The same pattern works at team scale. The key insight: **anything committed to `
 
 ---
 
-## What is 1Password CLI — and is it required?
-
-[1Password CLI](https://developer.1password.com/docs/cli/) (`op`) lets chezmoi templates pull secrets from your 1Password vault at apply time, so API keys and tokens never get committed to git.
-
-**Is it required?** No — but without it, any `.tmpl` files that reference `onepasswordRead` will fail when you run `chezmoi apply`. This repo's `dot_zshrc.tmpl` uses it.
-
-**If you don't use 1Password**, you have two options:
-- Replace the `{{ onepasswordRead "..." }}` calls in `.tmpl` files with literal values (but don't commit secrets)
-- Use chezmoi's built-in support for other secret managers — it supports [Bitwarden, LastPass, Keychain, plain env vars, and more](https://www.chezmoi.io/user-guide/password-managers/)
-
-**If you do use 1Password**, enable the desktop integration so the CLI can auth without a separate login:
-> 1Password app → Settings (⌘,) → Developer → "Integrate with 1Password CLI"
-
----
-
-## What is chezmoi?
-
-[chezmoi](https://www.chezmoi.io/) is a dotfiles manager. "Dotfiles" are the config files that live in your home directory — things like `~/.zshrc`, `~/.claude/settings.json`, etc. — and keeping them in sync across multiple Macs is normally a pain.
-
-chezmoi solves this by:
-
-1. **Storing your dotfiles in a git repo** — so they're versioned and shareable
-2. **Applying them to the right places** — `chezmoi apply` writes the files into your home directory
-3. **Supporting templates** — files ending in `.tmpl` can reference secrets or machine-specific values, so your actual `~/.zshrc` gets generated from a template that pulls passwords from 1Password rather than hardcoding them
-
-**Why chezmoi instead of a plain symlink approach?**
-
-Plain symlink setups (symlinking `~/dotfiles/.zshrc` → `~/.zshrc`) break the moment a file needs to be different per machine or contain a secret. chezmoi handles both — the source stays clean in git, the rendered output lands in the right place with secrets injected at apply time.
-
-**The tradeoff:** chezmoi hides its source in `~/.local/share/chezmoi`, which isn't obvious. This repo includes a symlink at `~/dotfiles` so you can find it easily.
-
----
-
 ## Day-to-day Chezmoi Workflow
 
 ```bash
