@@ -91,6 +91,21 @@ rtk discover         # Finds commands Claude ran that missed RTK coverage
 
 This is the pattern for managing Claude Code intelligence across all personal and professional projects.
 
+### Three types — know the difference
+
+| Type | Invoked by | Model control | Lives in |
+|------|-----------|--------------|----------|
+| **Slash command** | `/cppp`, `/qe` | No — runs in current session model | `~/.claude/commands/*.md` or `.claude/commands/*.md` |
+| **Subagent** | `@qe-engineer` | Yes — `model:` in frontmatter | `~/.claude/agents/*.md` or `.claude/agents/*.md` |
+| **Skill** | `/load-tournament-matches` | No — runs in current session model | `~/.claude/skills/*/SKILL.md` |
+
+**Key implications:**
+- Slash commands and skills are cheap to invoke — they run in the session you're already paying for
+- Subagents spin up their own context and model — choose the model intentionally
+- For subagents that write code or need to understand business logic, use `sonnet` — the quality difference is real
+- For subagents doing mechanical work (formatting, summarizing), `haiku` saves cost
+- There is no per-command model override for slash commands — if cost matters, switch the whole session model
+
 ### The layering model
 
 ```
