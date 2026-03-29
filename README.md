@@ -4,6 +4,22 @@ Personal Claude Code configuration, shell setup, and development standards manag
 
 > **Platform:** macOS only. Requires [Claude Code](https://claude.ai/code) installed and licensed.
 
+---
+
+## What this repo is
+
+If you're new to Claude Code, this repo is a working example of how to get serious about it. It covers:
+
+- **RTK** — a hook that cuts token usage 60-90% on every CLI command Claude runs
+- **Subagents** — specialized AI personas (e.g. a QE engineer) that Claude delegates to automatically
+- **Slash commands** — reusable workflows you invoke with `/command`
+- **Secrets management** — no plaintext tokens, ever, using 1Password
+- **Multi-machine sync** — one command to bootstrap a new Mac identically
+
+If you're evaluating whether to invest in this kind of setup: the answer is yes. The productivity gains compound fast, and the pattern scales from solo developer to a full engineering team.
+
+---
+
 ## Quick start (new machine)
 
 ```bash
@@ -12,16 +28,19 @@ brew install chezmoi gh rtk
 brew install --cask 1password-cli
 
 # 2. Enable 1Password CLI desktop integration
-# 1Password app → Settings (⌘,) → Developer → Enable "Integrate with 1Password CLI"
+# 1Password app → Settings (⌘,) → Developer → "Integrate with 1Password CLI"
 
 # 3. Authenticate GitHub
 gh auth login
 
-# 4. Apply everything
+# 4. Apply dotfiles (clones this repo, renders templates, writes all config)
 chezmoi init --apply https://github.com/silverbeer/dotfiles
 
 # 5. Reload shell
 source ~/.zshrc
+
+# 6. Verify RTK hook is active
+rtk init --show && rtk gain
 ```
 
 ---
@@ -30,279 +49,268 @@ source ~/.zshrc
 
 | File | Purpose |
 |------|---------|
-| `~/.zshrc` | Shell config — secrets via 1Password |
+| `~/.zshrc` | Shell config — secrets pulled from 1Password at apply time |
 | `~/.claude/CLAUDE.md` | Global Claude instructions (branch protection, GitOps standards) |
-| `~/.claude/RTK.md` | RTK token-saving proxy config |
-| `~/.claude/settings.json` | Hooks, statusline, global permissions |
-| `~/.claude/mcp.json` | MCP server config (Gmail) |
-| `~/.claude/agents/` | Global Claude subagents |
-| `~/.claude/commands/` | Global slash commands |
+| `~/.claude/RTK.md` | RTK config — owned by RTK, do not edit manually |
+| `~/.claude/settings.json` | Hooks (RTK rewrite), statusline, global permissions |
+| `~/.claude/mcp.json` | MCP server config — paths templated, no hardcoding |
+| `~/.claude/agents/` | Global Claude subagents (available in every project) |
+| `~/.claude/commands/` | Global slash commands (available in every project) |
 
 ---
 
-## RTK — Rust Token Killer
+## RTK — The Single Highest-Impact Tool Here
 
-[RTK](https://github.com/rtk-ai/rtk) is the single highest-impact tool in this setup. It's a Claude Code `PreToolUse` hook that transparently intercepts every Bash command and strips unnecessary output before it reaches Claude's context window.
+[RTK (Rust Token Killer)](https://github.com/rtk-ai/rtk) is a Claude Code `PreToolUse` hook that transparently intercepts every Bash command and strips unnecessary output before it reaches Claude's context window.
 
-**Result: 60-90% token savings on every git, gh, kubectl, ls, pytest, curl call — zero behavior change.**
+**Real numbers from this setup: 1.7M tokens saved across 2,843 commands — 39% reduction.**
+
+### Why it matters
+
+Every time Claude runs a CLI command, the raw output comes back full of decorators, progress bars, padding, and noise that Claude doesn't need. RTK filters it out automatically — Claude gets clean, structured output and you burn far fewer tokens.
 
 ```
-git status   →   rtk git status    (Claude sees clean diff, not decorators)
-ls           →   rtk ls            (72% savings — biggest win)
-gh pr create →   rtk gh pr create  (filtered JSON output)
+git status   →   rtk git status    (clean diff, no decorators)
+ls           →   rtk ls            (72% savings — biggest single win)
+gh pr create →   rtk gh pr create  (filtered output)
 kubectl get  →   rtk kubectl get   (trimmed pod tables)
 pytest       →   rtk pytest        (structured test results only)
 ```
 
-If you rely on Claude Code to run git commands — and you should, it's the right workflow — RTK is non-negotiable. Every commit, diff, log, push, and PR creation goes through it automatically.
+The rewrite is invisible. Claude asks to run `git status`, RTK silently rewrites it to `rtk git status`, Claude gets clean output. Zero behavior change.
 
-### Install
+**If you let Claude Code handle your git workflow — and you should — RTK is non-negotiable.**
+
+### Install and wire up
 
 ```bash
 brew install rtk
-```
-
-### Wire to Claude Code (one-time per machine)
-
-The hook is pre-configured in `~/.claude/settings.json` via this dotfiles repo. Verify after applying:
-
-```bash
-rtk init --show    # Confirm hook is registered
-rtk gain           # See cumulative savings
-```
-
-If not active:
-```bash
-rtk init -g        # Re-install hook + RTK.md
+rtk init -g       # Install hook + RTK.md into ~/.claude
 # Restart Claude Code
 ```
 
-### Check your savings
+This dotfiles repo pre-configures the hook in `~/.claude/settings.json`. After `chezmoi init --apply`, just verify:
 
 ```bash
-rtk gain             # Total savings summary
-rtk gain --history   # Per-session breakdown
-rtk discover         # Finds commands Claude ran that missed RTK coverage
+rtk init --show   # Hook is registered
+rtk gain          # Cumulative savings summary
+rtk discover      # Find commands that slipped past RTK coverage
 ```
 
 ---
 
-## Claude Code Agent & Command System
+## Claude Code Primitives — Know the Difference
 
-This is the pattern for managing Claude Code intelligence across all personal and professional projects.
+Claude Code has three ways to extend its behavior. Understanding the distinction is essential before building your own.
 
-### Three types — know the difference
+| Type | How to invoke | Model control | Isolated context | Lives in |
+|------|--------------|--------------|-----------------|----------|
+| **Slash command** | `/cppp`, `/qe` | No — uses session model | No — shares session | `~/.claude/commands/*.md` |
+| **Subagent** | `@qe-engineer` | Yes — `model:` in frontmatter | Yes — own context window | `~/.claude/agents/*.md` |
+| **Skill** | `/load-tournament-matches` | No — uses session model | No — shares session | `~/.claude/skills/*/SKILL.md` |
 
-| Type | Invoked by | Model control | Lives in |
-|------|-----------|--------------|----------|
-| **Slash command** | `/cppp`, `/qe` | No — runs in current session model | `~/.claude/commands/*.md` or `.claude/commands/*.md` |
-| **Subagent** | `@qe-engineer` | Yes — `model:` in frontmatter | `~/.claude/agents/*.md` or `.claude/agents/*.md` |
-| **Skill** | `/load-tournament-matches` | No — runs in current session model | `~/.claude/skills/*/SKILL.md` |
+### What this means in practice
 
-**Key implications:**
-- Slash commands and skills are cheap to invoke — they run in the session you're already paying for
-- Subagents spin up their own context and model — choose the model intentionally
-- For subagents that write code or need to understand business logic, use `sonnet` — the quality difference is real
-- For subagents doing mechanical work (formatting, summarizing), `haiku` saves cost
-- There is no per-command model override for slash commands — if cost matters, switch the whole session model
+**Slash commands** are the simplest. They're markdown files containing a prompt. When you type `/cppp`, Claude reads the file and executes it in your current session. No overhead, no model selection, instant.
 
-### The layering model
+**Subagents** are specialized AI personas. Claude can delegate to them mid-conversation. They run with their own context window and their own model — you choose which. Use `sonnet` for agents that need to understand code and business logic. Use `haiku` for mechanical agents doing formatting or summarizing.
+
+**Skills** work like slash commands but are packaged differently and can include more structured metadata. Functionally similar for most purposes.
+
+### Cost strategy: home vs. team
+
+| Context | Recommendation |
+|---------|---------------|
+| **Personal ($100/month flat)** | RTK to avoid quota. Model selection on subagents matters less — use Sonnet everywhere for best quality. |
+| **Team (pay-per-token)** | RTK is mandatory — 39% savings for free. Audit every subagent model choice. Mechanical subagents (commit formatting, report generation) → Haiku. Code-understanding subagents → Sonnet. |
+
+The key insight: **slash commands have no model control** — they run in whatever model the session is using. If you want a cheaper model for a specific workflow, it needs to be a subagent, not a slash command.
+
+---
+
+## The Layering Model
+
+Global config applies everywhere. Project config overrides globally. Same filename = project wins.
 
 ```
-~/.claude/agents/          ← GLOBAL baseline (this repo, all projects)
-~/.claude/commands/        ← GLOBAL slash commands (this repo, all projects)
-        ↓ overridden by
-.claude/agents/            ← PROJECT-SPECIFIC (in each repo, same filename wins)
-.claude/commands/          ← PROJECT-SPECIFIC slash commands
+~/.claude/agents/qe-engineer.md     ← universal QE rules (this repo)
+~/.claude/commands/cppp.md          ← universal commit/PR workflow (this repo)
+        ↓ project overrides by same filename
+.claude/agents/qe-engineer.md       ← project test runner, mocking patterns, open issues
+.claude/commands/cppp.md            ← project deployment pipeline awareness
 ```
 
-**Rule:** Global files contain universal rules. Project files contain only what's unique to that project. Never duplicate content between layers.
+**Rule:** Global = universal rules that never change. Project = only what's unique to that repo. Never duplicate content between layers.
 
 ---
 
 ## Global Agents
 
-### `qe-engineer` — Quality Engineering
-
-**File:** `~/.claude/agents/qe-engineer.md`
+### `@qe-engineer` — Quality Engineering
 
 A senior QE engineer embedded in every project. Writes tests, enforces coverage, and won't let gaps slide.
 
-**Trigger phrases:**
-- `@qe-engineer write tests for src/audit/processor.py`
-- `@qe-engineer review what I just changed and write missing tests`
-- `/qe` — runs a full coverage audit report
+**Model:** `sonnet` — needs to understand business logic to write meaningful tests. Haiku would write syntactically correct tests that miss the point.
+
+**How to use:**
+```
+@qe-engineer write tests for src/audit/processor.py
+@qe-engineer review what I just changed and write missing tests
+/qe   ← first — run a coverage audit to find the gaps
+```
 
 **What it does:**
-- Identifies untested functions in any module you point it at
+- Identifies all untested or under-tested functions in any module
 - Writes pytest tests following the project's existing conventions
 - Runs the suite and fixes failures before returning
 - Reports what's covered and what's still open
 
-**Project overrides add:**
-- Project-specific test runner command
-- Stack-specific mocking patterns
-- Open GitHub issues tracking test debt
+**Project overrides add:** test runner command, stack-specific mocking patterns, open GitHub issues tracking test debt.
 
 ---
 
-## Global Commands (Slash Commands)
+## Global Slash Commands
 
 ### `/cppp` — Commit, Push, PR
 
-**File:** `~/.claude/commands/cppp.md`
-
-Standard commit and PR workflow. Enforces conventional commits, branch hygiene, co-authorship, and safe staging practices.
+Standard commit and PR workflow enforcing conventional commits, branch hygiene, co-authorship, and safe staging.
 
 **Usage:** Type `/cppp` when you're ready to commit and open a PR.
 
 **What it does:**
-- Checks git status and diff before staging
-- Enforces conventional commit format (`feat:`, `fix:`, `chore:`, etc.)
+- Checks `git status` and `git diff` before staging anything
+- Enforces conventional commit format (`feat:`, `fix:`, `chore:`, `test:`, etc.)
 - Creates PR with summary + test plan body via `gh pr create`
 - Adds `Co-Authored-By: Claude Sonnet 4.6` to every commit
-- Never touches `main` directly, never skips hooks
+- Never commits to `main` directly, never skips hooks
 
-**Project overrides add:** Deployment pipeline awareness (ArgoCD, K3s, etc.)
+**Project overrides add:** deployment pipeline awareness so Claude knows what happens after merge (ArgoCD, K3s, etc.) and never tries to manually trigger builds.
 
 ---
 
 ### `/qe` — Coverage Audit
 
-**File:** `~/.claude/commands/qe.md`
-
-Runs a test coverage audit and produces a prioritized action list.
+Runs a test coverage report and produces a prioritized action list.
 
 **Usage:** Type `/qe` for a coverage report on the current project.
 
 **Output:**
 - Pass/fail count
-- Module-by-module coverage table (CRITICAL / HIGH / MEDIUM / OK)
-- Cross-reference with open GitHub issues
-- Ends with: "To fix the top gap now, say: @qe-engineer write tests for \<module\>"
+- Module-by-module coverage table: `CRITICAL / HIGH / MEDIUM / OK`
+- Cross-reference with open GitHub issues already tracking gaps
+- Ends with the exact command to fix the top gap: `@qe-engineer write tests for <module>`
 
 ---
 
 ## Per-Project Overrides
 
-Each active repo has a `.claude/` directory with project-specific configuration.
-
-### missing-table (MT)
+### missing-table (MT) — Full-stack FastAPI + Vue.js
 
 | File | Purpose |
 |------|---------|
-| `.claude/skills/cppp/SKILL.md` | ArgoCD + K8s deployment pipeline awareness |
-| `.claude/agents/qe-engineer.md` | MT test conventions (pytest-asyncio, Supabase fixtures) |
+| `.claude/skills/cppp/SKILL.md` | ArgoCD + kubectl deployment awareness |
+| `.claude/agents/qe-engineer.md` | pytest-asyncio, DAO mocking, Supabase fixtures, test structure |
 | `.claude/settings.local.json` | 200+ allowed commands for full-stack dev |
 
-**Deployment:** PR merge → GHA builds Docker → updates `helm/values-prod.yaml` → ArgoCD syncs (~5 min total)
+**Deployment:** PR merge → GHA builds Docker → updates `helm/values-prod.yaml` → ArgoCD syncs (~5 min)
 
-### match-scraper-agent (MSA)
+### match-scraper-agent (MSA) — Python pipeline, K3s
 
 | File | Purpose |
 |------|---------|
-| `.claude/commands/cppp.md` | K3s CronJob deployment pipeline awareness |
-| `.claude/agents/qe-engineer.md` | MSA test conventions (uv/pytest, audit module debt tracked in #49–52) |
+| `.claude/commands/cppp.md` | K3s CronJob deployment awareness |
+| `.claude/agents/qe-engineer.md` | uv/pytest, audit module patterns, open test debt in #49–52 |
 
 **Deployment:** PR merge → GHA builds `linux/amd64` Docker → updates `k3s/cronjob.yaml` → K3s pulls new image
 
 ---
 
-## Adding this pattern to a new repo
+## Adding This Pattern to a New Repo
 
-1. **Copy the QE agent override template:**
-   ```bash
-   mkdir -p .claude/agents
-   cat > .claude/agents/qe-engineer.md << 'EOF'
-   ---
-   name: qe-engineer
-   description: QE engineer for <project>. Writes tests and enforces coverage.
-   tools: Bash, Read, Edit, Write, Grep, Glob
-   model: sonnet
-   ---
+```bash
+# 1. Create the .claude structure
+mkdir -p .claude/agents .claude/commands
 
-   Follows the global qe-engineer rules. Project-specific additions:
+# 2. QE agent override
+cat > .claude/agents/qe-engineer.md << 'EOF'
+---
+name: qe-engineer
+description: QE engineer for <project>. Writes tests and enforces coverage.
+tools: Bash, Read, Edit, Write, Grep, Glob
+model: sonnet
+---
 
-   ## Test runner
-   <how to run tests in this project>
+Follows the global qe-engineer rules. Project-specific additions:
 
-   ## Stack-specific patterns
-   <mocking patterns, fixtures, etc.>
+## Test runner
+<how to run tests in this project>
 
-   ## Open test debt
-   <link to GitHub issues>
-   EOF
-   ```
+## Stack-specific patterns
+<mocking patterns, fixtures, etc.>
 
-2. **Copy the cppp command override template:**
-   ```bash
-   mkdir -p .claude/commands
-   cat > .claude/commands/cppp.md << 'EOF'
-   ---
-   name: commit-pr
-   description: Commit/PR workflow for <project>.
-   ---
+## Open test debt
+<link to GitHub issues>
+EOF
 
-   Follows the standard cppp workflow. Project-specific deployment pipeline:
+# 3. cppp deployment override
+cat > .claude/commands/cppp.md << 'EOF'
+Follows the standard cppp workflow. Project-specific deployment pipeline:
 
-   ## Deployment
-   <what happens after PR merge>
+## Deployment
+<what happens after PR merge>
 
-   ## Verify deployment
-   <commands to check deployment status>
-   EOF
-   ```
+## Verify deployment
+<commands to check status>
+EOF
 
-3. **Commit to the repo** — agents and commands are version-controlled with the code, not stored separately.
+# 4. Commit — everyone who clones the repo gets these instantly
+git add .claude/ && git commit -m "chore: Add Claude Code agents and commands"
+```
 
 ---
 
-## Day-to-day chezmoi workflow
+## Applying This to a Professional Team
+
+The same pattern works at team scale. The key insight: **anything committed to `.claude/` in a repo is automatically shared with every developer who clones it.** Project-level agents and commands are free team productivity wins with zero per-developer setup.
+
+| Personal setup | Team adaptation |
+|----------------|----------------|
+| `~/.claude/agents/` in dotfiles | Team dotfiles repo or onboarding runbook |
+| Secrets in personal 1Password | Team 1Password vault or CI secret manager |
+| Project `.claude/agents/` in repos | Same — commit to repo, whole team benefits immediately |
+| RTK on personal machine | Mandate in team onboarding — immediate cost reduction |
+| Subagents on Sonnet (flat rate) | Audit subagent models — mechanical work → Haiku saves real money |
+
+**Recommended team rollout order:**
+1. RTK for everyone — biggest immediate ROI, zero workflow change
+2. `/cppp` in every repo — consistent commits and PRs across the team
+3. `@qe-engineer` per repo — test coverage improves passively as features ship
+4. Team dotfiles repo — standardizes the baseline across all developers
+
+---
+
+## Day-to-day Chezmoi Workflow
 
 ```bash
-# Edit a dotfile
-chezmoi edit ~/.zshrc
+chezmoi edit ~/.zshrc        # Edit a managed file
+chezmoi diff                 # Preview changes before applying
+chezmoi apply                # Apply to home directory
+chezmoi update               # Pull latest from GitHub and apply (other machine)
 
-# Preview changes before applying
-chezmoi diff
-
-# Apply to home directory
-chezmoi apply
-
-# Save and sync to all machines
+# Commit and push changes
 cd ~/.local/share/chezmoi
-git add -A && git commit -m "chore: <what changed>" && git push
-
-# Pull updates on another machine
-chezmoi update
+git add -A && git commit -m "chore: describe change" && git push
 ```
 
-## Adding a new secret
+## Managing Secrets
 
 ```bash
-# Store in 1Password
+# Add a new secret to 1Password
 op item create --category="API Credential" --title="My Service" \
   --vault="Personal" "credential=abc123"
 
-# Reference in a template file
+# Reference it in any .tmpl file
 {{ onepasswordRead "op://Personal/My Service/credential" }}
 
-# Apply
-chezmoi apply
+chezmoi apply   # Renders template, injects secret at apply time
 ```
-
----
-
-## Applying this to a professional team
-
-The same pattern scales to team use. Key adaptations:
-
-| Personal | Professional |
-|----------|-------------|
-| `~/.claude/agents/` per developer | Shared `.claude/agents/` committed to each repo |
-| Secrets in personal 1Password | Secrets in team 1Password vault or CI secret manager |
-| `silverbeer/dotfiles` | Team dotfiles repo or onboarding runbook |
-| Global `/qe` command | Same — commit to team dotfiles |
-| Project `.claude/agents/qe-engineer.md` | Same — commit to repo, whole team benefits |
-
-**The golden rule for teams:** Anything in `.claude/` that's committed to the repo is automatically shared with every developer who clones it. Project-level agents and commands are free team productivity wins with zero setup.
