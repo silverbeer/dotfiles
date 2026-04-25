@@ -22,4 +22,4 @@ export PATH="{{ .chezmoi.homeDir }}/.antigravity/antigravity/bin:$PATH"
 # OpenClaw Completion
 autoload -Uz compinit && compinit
 source "{{ .chezmoi.homeDir }}/.openclaw/completions/openclaw.zsh"
-export APP_ENV=prod
+export APP_ENV={{ .appEnv | default "prod" }}
