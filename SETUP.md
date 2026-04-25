@@ -18,14 +18,15 @@ Complete setup for a new Mac. Follow steps in order.
 
 ---
 
-## Step 1 — Install tools
+## Step 1 — Install chezmoi
 
 ```bash
-brew install chezmoi gh rtk
-brew install --cask 1password-cli
+brew install chezmoi
 ```
 
-Authenticate GitHub CLI:
+Other tools (`gh`, `jq`, `rtk`, `1password-cli`, `uv`) install automatically via chezmoi run scripts in Step 3.
+
+Authenticate GitHub CLI **after** Step 3:
 ```bash
 gh auth login
 # Select: GitHub.com → HTTPS → Login with a web browser
