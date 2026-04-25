@@ -1,0 +1,26 @@
+{{ if eq .chezmoi.os "darwin" -}}
+#!/bin/bash
+set -euo pipefail
+
+if ! command -v brew &>/dev/null; then
+  echo "Homebrew not found, skipping brew tool install"
+  exit 0
+fi
+
+FORMULAE=(gh jq rtk)
+CASKS=(1password-cli)
+
+for pkg in "${FORMULAE[@]}"; do
+  if ! brew list "$pkg" &>/dev/null; then
+    echo "Installing $pkg"
+    brew install "$pkg"
+  fi
+done
+
+for pkg in "${CASKS[@]}"; do
+  if ! brew list --cask "$pkg" &>/dev/null; then
+    echo "Installing cask $pkg"
+    brew install --cask "$pkg"
+  fi
+done
+{{ end -}}
