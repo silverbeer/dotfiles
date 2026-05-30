@@ -78,7 +78,7 @@ bash scripts/linear.sh audit-unassigned --fix   # assign all to silverbeer.io
 Drop to the raw CLI (`linear issues ...`) but keep conventions #1–#3. Note `linear api` no longer exists. Useful raw recipes:
 - View one issue: `linear issues get SB-N`
 - List labels (to confirm group membership): `linear labels list --team SB`
-- Add a comment from a file: `linear issues comment SB-N --body-file /tmp/c.md`
+- Add a comment: `linear issues comment SB-N --body "text"` or pipe a file: `cat /tmp/c.md | linear issues comment SB-N` (no `--body-file` flag)
 - Unassigned set: diff `linear issues list --team SB --output json` against `... --assignee me --output json`.
 
 ## Phase 2 (not yet built)
