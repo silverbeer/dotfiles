@@ -20,11 +20,18 @@ The helper lives next to this file: `scripts/linear.sh`. Run it with `bash`. It 
 - `type` (pick one, required): `bug` · `feature` · `chore` (maintenance/refactor, no behavior change) · `docs` · `infra` (CI/k8s/helm/terraform) · `security`.
 - area (flat, optional, multi): e.g. `backend`, `frontend`, `db`, `auth`, `qop`, `scraper-integration`. Add with repeated `--label`.
 
-### CLI gotchas (learned the hard way — the helper avoids them)
+### CLI gotchas (verified 2026-05-30 — the helper avoids them)
 
-- `--no-interactive` is valid on `issue create` but **errors on `issue update`**.
-- The `self` keyword is unreliable for `--assignee`; always use the username string `"silverbeer.io"`.
-- `linear issue list` needs a sort flag; prefer `linear issue mine` (what the helper uses).
+The `linear` CLI changed its surface; the helper now targets the current one:
+
+- `issues create` takes the **title positionally** (no `--title`), has **no `--no-interactive`**, takes labels as one comma list `--labels a,b,c` (not repeated `--label`), and reads the body via `-d/--description` (no `--description-file` — the helper `cat`s a `--body-file` into `--description`).
+- **Labels are validated against their group**: `repo`/`type` are mutually-exclusive groups, so you may pass exactly one of each. `docs` lives in the `type` group (it is NOT an area label). Mixing two type labels → GraphQL `labelIds not exclusive child labels`.
+- The `issue mine` subcommand was **removed**; list uses `issues list --assignee me`.
+- `issues list --sort` only accepts `created|updated`; filter state via `--state "Todo,In Progress"` (no `--all-states`, no `-s unstarted`).
+- `issues update` uses `-T/--title`, `--state`, and `--labels`/`--add-labels`/`--remove-labels`.
+- The `linear api` GraphQL escape hatch was **removed**; audit now diffs `issues list --output json` id-sets (all minus assignee=me).
+- The `self` keyword is unreliable for `--assignee`; use the username string `"silverbeer.io"` (or `me` for filters).
+- list-json's `assignee` field is unreliable (sometimes blank); use `issues get SB-N` for the authoritative assignee.
 
 ## Commands
 
@@ -68,10 +75,11 @@ bash scripts/linear.sh audit-unassigned --fix   # assign all to silverbeer.io
 
 ## Anything not covered
 
-Drop to the raw CLI (`linear issue ...`, `linear api '{...}'`) but keep conventions #1–#3. Useful raw recipes:
-- View one issue: `linear issue view SB-N`
-- Add a comment from a file: `linear issue comment add SB-N --body-file /tmp/c.md`
-- Raw unassigned query: `linear api '{ issues(filter:{team:{key:{eq:"SB"}},assignee:{null:true}}){nodes{identifier}} }'`
+Drop to the raw CLI (`linear issues ...`) but keep conventions #1–#3. Note `linear api` no longer exists. Useful raw recipes:
+- View one issue: `linear issues get SB-N`
+- List labels (to confirm group membership): `linear labels list --team SB`
+- Add a comment from a file: `linear issues comment SB-N --body-file /tmp/c.md`
+- Unassigned set: diff `linear issues list --team SB --output json` against `... --assignee me --output json`.
 
 ## Phase 2 (not yet built)
 
