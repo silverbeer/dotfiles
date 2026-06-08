@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/silverbeer/.claude/hooks/rtk-rewrite.sh"
+            "command": "{{ .chezmoi.homeDir }}/.claude/hooks/rtk-rewrite.sh"
           }
         ]
       }
@@ -25,7 +25,7 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "/Users/silverbeer/.claude/statusLine.sh"
+    "command": "{{ .chezmoi.homeDir }}/.claude/statusLine.sh"
   },
   "enabledPlugins": {
     "warp@claude-code-warp": true,
