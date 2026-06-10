@@ -19,6 +19,7 @@
 .claude/projects
 .claude/skills/*
 !.claude/skills/linear-crud
+!.claude/skills/todo
 .claude/worktrees
 .claude/settings.json.bak
 .claude/settings.local.json
