@@ -1,12 +1,14 @@
 ---
 name: todo
 description: >-
-  Capture, review, and complete personal todos via the `todo` CLI (AI-enriched,
-  gamified task manager). Use when the user wants to add/remember a task, see
-  what's on their list, check stats/streak, or mark something done — e.g.
-  "add a todo", "remember to X", "what's on my list", "mark task 12 done",
-  "how many points do I have". Also use proactively to offer capturing a
-  follow-up task that surfaced during a session (ask first).
+  Capture, review, and complete personal todos — and add calendar events with
+  contact-alias invites — via the `todo` CLI (AI-enriched, gamified task
+  manager). Use when the user wants to add/remember a task, see what's on their
+  list, check stats/streak, mark something done (optionally with a note), or
+  add/list a calendar event — e.g. "add a todo", "remember to X", "what's on my
+  list", "mark task 12 done", "add an event dinner friday 7pm", "how many points
+  do I have". Also use proactively to offer capturing a follow-up task that
+  surfaced during a session (ask first).
 ---
 
 # Todo
@@ -80,10 +82,13 @@ User may give an id or a description. If a description:
 
 ```bash
 todo done <id> [<id> ...] --json
+todo done <id> --note "paid $240, conf #8891" --json   # attach a completion note
 ```
 
 Returns `{completed: [ids], failed: [ids], points_earned, achievements: [...]}`.
-Celebrate points/achievements briefly if any were unlocked.
+Celebrate points/achievements briefly if any were unlocked. `--note/-n` stores a
+note on the completed todo (applied to each id); it shows in `todo show` and as
+`completion_note` in JSON.
 
 ## Delete a task
 
@@ -98,6 +103,44 @@ todo delete <id> [<id> ...] --force --json   # --force is required in --json mod
 
 Returns `{deleted: [ids], failed: [ids]}`. Prefer `done` over `delete` when the
 user actually completed the task — only delete on clear intent to discard.
+
+## Calendar events
+
+Events are separate from todos (they have a start time and optional invitees).
+Local-only for now — Google Calendar sync is a later phase.
+
+```bash
+# AI mode (default): parses date/time/location/invitees from natural language
+todo event add "dinner with parents friday 7pm at their place, invite wife and kids" --json
+# Flag mode: explicit, no AI
+todo event add "Soccer" --when "2026-06-13 10:00" --duration 90 --invite kids --no-ai --json
+
+todo event ls --json                 # upcoming (add --all for past + cancelled)
+todo event show <id> --json
+todo event cancel <id> --json        # keeps history, drops from default list
+todo event delete <id> --force --json
+```
+
+- Default to AI mode — give it the user's full phrasing. Dates resolve the same
+  way as due dates (weekday names, `tomorrow`, etc.); times like `7pm` are kept.
+- `--invite` / invitees resolve through contact aliases (see below). Report back
+  the resolved invitee emails.
+- Returns event dicts: `{id, title, start_at, end_at, all_day, location, status,
+  attendees, is_synced, ...}`. `is_synced` is false until Google sync ships.
+
+## Contacts (invite aliases)
+
+Aliases map a name to one or more emails so invites can say "wife"/"kids".
+
+```bash
+todo contact add wife jane@example.com --json
+todo contact add kids sam@example.com alex@example.com --json   # alias -> many
+todo contact ls --json
+todo contact rm <alias> --json
+```
+
+When a user references a person to invite who isn't a known alias, ask for the
+email and offer to `contact add` it for next time.
 
 ## Stats / progress
 
@@ -115,13 +158,12 @@ daily_goal_met, points_earned_today}`.
 todo show <id> --json
 ```
 
-Returns the full todo plus `enrichment` (AI analysis) if present.
+Returns the full todo plus `enrichment` (AI analysis) and `completion_note` if
+present.
 
 ## Notes
 
 - Errors come back as `{"error": "..."}` on stdout with exit 0 — check for an
   `error` key before assuming success.
-- Due dates exist in the data model but `todo add` has no `--due` flag yet, so
-  `due_date` is usually `null`.
 - For anything not covered here (`dashboard`, `achievements`, `goal`, `enrich`),
   the human-readable command works without `--json`.
