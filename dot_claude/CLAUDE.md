@@ -17,4 +17,11 @@ All repositories should have branch protection enabled on the `main` branch:
 - Habit building: Even solo developers benefit from PR workflow
 - GitOps compatibility: Allows automated tag updates while maintaining protection
 
+## Personal Todo Capture
+
+When a session surfaces a concrete follow-up or deferred task that lives beyond
+the current work (not an in-PR TODO), briefly offer to capture it with the
+`todo` skill — one line, ask before adding. Don't nag; skip if the user is
+clearly busy or has declined recently.
+
 @RTK.md
