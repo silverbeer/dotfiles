@@ -23,4 +23,12 @@ for pkg in "${CASKS[@]}"; do
     brew install --cask "$pkg"
   fi
 done
+
+# Tapped formula: install name is tap-qualified and differs from the list name.
+# schpet/tap/linear is the Linear CLI used by the linear-crud skill — NOT the
+# homebrew-core `linear` formula, which is the Linear desktop app (name collision).
+if ! brew list linear &>/dev/null; then
+  echo "Installing schpet/tap/linear (Linear CLI)"
+  brew install schpet/tap/linear
+fi
 {{ end -}}
