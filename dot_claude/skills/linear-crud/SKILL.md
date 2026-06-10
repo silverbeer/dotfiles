@@ -16,22 +16,22 @@ The helper lives next to this file: `scripts/linear.sh`. Run it with `bash`. It 
 
 ### Label vocabulary
 
-- `repo` (pick one, required): `MT` missing-table · `MS` match-scraper · `MSA` match-scraper-agent · `QB` qualityplaybook · `STK` myrunstreak. Auto-detected from the current git repo; pass `--repo` to override.
+- `repo` (pick one, required): `MT` missing-table · `MS` match-scraper · `MSA` match-scraper-agent · `QB` qualityplaybook · `STK` myrunstreak · `TODO` todo (github.com/silverbeer/todo). Auto-detected from the current git repo; pass `--repo` to override. (New repo labels must be created under the `repo` group via `linear api` — see CLI surface below.)
 - `type` (pick one, required): `bug` · `feature` · `chore` (maintenance/refactor, no behavior change) · `docs` · `infra` (CI/k8s/helm/terraform) · `security`.
 - area (flat, optional, multi): e.g. `backend`, `frontend`, `db`, `auth`, `qop`, `scraper-integration`. Add with repeated `--label`.
 
-### CLI gotchas (verified 2026-05-30 — the helper avoids them)
+### CLI surface (linear CLI v2.0.0, verified 2026-06-10)
 
-The `linear` CLI changed its surface; the helper now targets the current one:
+The helper bakes this in; match it when you drop to raw `linear`:
 
-- `issues create` takes the **title positionally** (no `--title`), has **no `--no-interactive`**, takes labels as one comma list `--labels a,b,c` (not repeated `--label`), and reads the body via `-d/--description` (no `--description-file` — the helper `cat`s a `--body-file` into `--description`).
-- **Labels are validated against their group**: `repo`/`type` are mutually-exclusive groups, so you may pass exactly one of each. `docs` lives in the `type` group (it is NOT an area label). Mixing two type labels → GraphQL `labelIds not exclusive child labels`.
-- The `issue mine` subcommand was **removed**; list uses `issues list --assignee me`.
-- `issues list --sort` only accepts `created|updated`; filter state via `--state "Todo,In Progress"` (no `--all-states`, no `-s unstarted`).
-- `issues update` uses `-T/--title`, `--state`, and `--labels`/`--add-labels`/`--remove-labels`.
-- The `linear api` GraphQL escape hatch was **removed**; audit now diffs `issues list --output json` id-sets (all minus assignee=me).
-- The `self` keyword is unreliable for `--assignee`; use the username string `"silverbeer.io"` (or `me` for filters).
-- list-json's `assignee` field is unreliable (sometimes blank); use `issues get SB-N` for the authoritative assignee.
+- Subcommands are **singular**: `issue` and `label` (e.g. `label list`, **not** `labels list`).
+- `issue create`: title via `-t/--title`, labels as **repeated `-l`** (no `--labels` comma list), markdown body via `--description-file` (or `-d`), and `--no-interactive`.
+- **Labels are validated against their group**: `repo`/`type` are mutually-exclusive groups — pass exactly one of each. `docs` lives in the `type` group (NOT an area). Two type labels → GraphQL `labelIds not exclusive child labels`.
+- **`issue mine`** (aka `list`/`l`) = *your* issues; requires an explicit `--sort manual|priority`. **`issue query`** = all issues with filters: `--assignee <user>`, `-U/--unassigned`, `-l <label>` (repeatable), `-s/--state`, `--all-states` (default), `-j/--json`, `--limit 0` (unlimited).
+- State **filter** values are status *types*: `triage|backlog|unstarted|started|completed|canceled` (+ `--all-states`). **Set** state by workflow *name*: `issue update SB-N --state "In Progress"`. ⚠️ `--state` resolves by *type*, so when two states share one type (SB has both **In Progress** and **In Review** as `started`), it silently lands on the wrong one — set those via `api` with the exact `stateId` (`issueUpdate(id, input:{stateId})`).
+- `issue update`: `-t/--title`, `-s/--state` (name or type), `-a/--assignee`.
+- **`linear api '<graphql>'` works.** Use it for label-group ops — e.g. create a repo label under the `repo` group (the `label create` command has no `--parent`, so set `parentId` via the `issueLabelCreate` mutation). The `repo` group label id is `baaca4e0-c497-4383-8161-3c885abb1e7a`.
+- View one issue: `issue view SB-N` (there is no `issue get`). Assignee: pass `silverbeer.io` on create; `me` for `query --assignee me`.
 
 ## Commands
 
@@ -75,11 +75,14 @@ bash scripts/linear.sh audit-unassigned --fix   # assign all to silverbeer.io
 
 ## Anything not covered
 
-Drop to the raw CLI (`linear issues ...`) but keep conventions #1–#3. Note `linear api` no longer exists. Useful raw recipes:
-- View one issue: `linear issues get SB-N`
-- List labels (to confirm group membership): `linear labels list --team SB`
-- Add a comment: `linear issues comment SB-N --body "text"` or pipe a file: `cat /tmp/c.md | linear issues comment SB-N` (no `--body-file` flag)
-- Unassigned set: diff `linear issues list --team SB --output json` against `... --assignee me --output json`.
+Drop to the raw CLI (`linear issue ...`) but keep conventions #1–#3. Useful recipes:
+- View one issue: `linear issue view SB-N`
+- List/inspect labels (confirm group membership): `linear label list --team SB`
+- Add a comment: `linear issue comment add SB-N -b "text"` (or `--body-file /tmp/c.md`)
+- Issues by label: `linear issue query --team SB -l TODO --all-states -j`
+- Unassigned set: `linear issue query --team SB -U -j` (or use `audit-unassigned`)
+- Create a repo label in the `repo` group:
+  `linear api 'mutation { issueLabelCreate(input: {name:"X", parentId:"baaca4e0-c497-4383-8161-3c885abb1e7a", color:"#95a2b3"}) { success } }'`
 
 ## Phase 2 (not yet built)
 
