@@ -107,7 +107,8 @@ user actually completed the task — only delete on clear intent to discard.
 ## Calendar events
 
 Events are separate from todos (they have a start time and optional invitees).
-Local-only for now — Google Calendar sync is a later phase.
+They sync **one-way to Google Calendar** when the user is authenticated
+(`todo calendar auth`); `todo event ls` reads the local DB only (no pull-back).
 
 ```bash
 # AI mode (default): parses date/time/location/invitees from natural language
@@ -117,16 +118,33 @@ todo event add "Soccer" --when "2026-06-13 10:00" --duration 90 --invite kids --
 
 todo event ls --json                 # upcoming (add --all for past + cancelled)
 todo event show <id> --json
-todo event cancel <id> --json        # keeps history, drops from default list
+todo event cancel <id> --json        # keeps history, drops from default list; un-syncs from Google
 todo event delete <id> --force --json
+todo event sync [<id>] --json        # push unsynced events to Google
+todo event invite <id> [aliases] --json   # (re)send invites for an event
 ```
 
 - Default to AI mode — give it the user's full phrasing. Dates resolve the same
   way as due dates (weekday names, `tomorrow`, etc.); times like `7pm` are kept.
-- `--invite` / invitees resolve through contact aliases (see below). Report back
-  the resolved invitee emails.
+- When authenticated, `event add` pushes to Google automatically (use
+  `--no-sync` to keep it local). `is_synced: true` means it's on Google.
+- **Invites email real people.** `--invite` resolves through contact aliases.
+  Sending only happens with `--yes/-y` or an interactive confirm; in JSON/
+  non-interactive mode without `--yes` the event syncs but no email is sent —
+  surface this and let the user confirm before adding `--yes`.
 - Returns event dicts: `{id, title, start_at, end_at, all_day, location, status,
-  attendees, is_synced, ...}`. `is_synced` is false until Google sync ships.
+  attendees, is_synced, google_event_id, ...}`.
+
+## Google Calendar auth
+
+```bash
+todo calendar status --json   # {has_credentials, authenticated, ...}
+todo calendar auth            # one-time OAuth (opens a browser; user runs this)
+```
+
+Needs an OAuth client credentials.json at `~/.config/todo/gcal_credentials.json`
+(per machine). If `authenticated` is false, events stay local — tell the user to
+run `todo calendar auth`.
 
 ## Contacts (invite aliases)
 
