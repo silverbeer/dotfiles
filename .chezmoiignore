@@ -1,4 +1,8 @@
 # Claude Code runtime data — never commit
+#
+# NOTE: .claude/skills/* is ignored wholesale; every skill that should sync
+# MUST have a `!.claude/skills/<name>` exception below, or `chezmoi add`
+# silently skips it. See README "Adding a new skill".
 .claude/cache
 .claude/sessions
 .claude/history.jsonl
