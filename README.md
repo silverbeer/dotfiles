@@ -58,6 +58,33 @@ rtk init --show && rtk gain
 | `~/.claude/mcp.json` | MCP server config — paths templated, no hardcoding |
 | `~/.claude/agents/` | Global Claude subagents (available in every project) |
 | `~/.claude/commands/` | Global slash commands (available in every project) |
+| `~/.claude/skills/` | Global skills — **allowlisted one-by-one in `.chezmoiignore`** (see below) |
+
+### Adding a new skill (the `.chezmoiignore` gotcha)
+
+`~/.claude/skills/` is full of runtime junk and third-party installs, so `.chezmoiignore`
+ignores `.claude/skills/*` wholesale and allowlists each synced skill with a `!` exception:
+
+```gitignore
+.claude/skills/*
+!.claude/skills/linear-crud
+!.claude/skills/todo
+!.claude/skills/session-audit
+```
+
+**Without an exception line, `chezmoi add` silently ignores the skill** — no error, no
+warning beyond a one-line notice, and the skill never reaches other machines.
+
+Flow for a new skill:
+
+1. Create it in `~/.claude/skills/<name>/`
+2. Add `!.claude/skills/<name>` to `.chezmoiignore`
+3. `chezmoi add ~/.claude/skills/<name>/<files...>`
+4. Branch, commit, PR (this repo uses the PR workflow)
+5. Other machines: merge, then `chezmoi update`
+
+Commands and agents need no allowlist step — `~/.claude/commands/` and `~/.claude/agents/`
+are not ignored, so plain `chezmoi add` works.
 
 ---
 
