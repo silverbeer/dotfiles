@@ -1,6 +1,6 @@
 ---
 name: linear-crud
-description: Manage Linear issues from chat via the `linear` CLI — create, list, move, link, and audit issues in the silverbeer (SB) workspace. Use when the user wants to file a ticket, check their issues, change an issue's state, link a PR to an issue, or find unassigned issues. Works in any silverbeer repo on any machine.
+description: Manage Linear issues from chat via the `linear` CLI — create, list, move, link, and audit issues in the silverbeer (SB) workspace, with filtering by repo and by epic (Linear project). Use when the user wants to file a ticket, check their open issues, filter issues by epic/project, list epics, see workspace stats / velocity / momentum, change an issue's state, link a PR to an issue, or find unassigned issues. Works in any silverbeer repo on any machine.
 allowed-tools: Bash, Read
 ---
 
@@ -12,45 +12,68 @@ The helper lives next to this file: `scripts/linear.sh`. Run it with `bash`. It 
 
 1. **Every issue is assigned to `silverbeer.io`. Never leave one unassigned.** The helper does this automatically on `new`; for any raw `linear` call you make, pass `--assignee "silverbeer.io"`.
 2. **Every issue gets a `repo` label and a `type` label** (both are mutually-exclusive groups). The helper sets these on `new`. A ticket without them is incomplete (SB-74 shipped label-less before this skill existed — don't repeat that).
-3. **Confirm before any write.** For `new` and `move`, show the user the exact title / type / repo / area labels / target state you're about to apply and wait for a yes. Reads (`list`) run immediately.
+3. **Confirm before any write.** For `new` and `move`, show the user the exact title / type / repo / epic / area labels / target state you're about to apply and wait for a yes. Reads (`list`, `epics`) run immediately.
+4. **Every epic maps to a repo (its required "project-level label").** Epics are Linear *projects*. The helper holds the epic→repo map in `epic_repo()`; an epic with no mapping is rejected. When you pass `--epic`, the repo label is derived from it (no need to also pass `--repo`; if you do, they must agree).
 
 ### Label vocabulary
 
-- `repo` (pick one, required): `MT` missing-table · `MS` match-scraper · `MSA` match-scraper-agent · `QB` qualityplaybook · `STK` myrunstreak · `TODO` todo (github.com/silverbeer/todo). Auto-detected from the current git repo; pass `--repo` to override. (New repo labels must be created under the `repo` group via `linear api` — see CLI surface below.)
+- `repo` (pick one, required): `MT` missing-table · `MS` match-scraper · `MSA` match-scraper-agent · `QB` qualityplaybook · `STK` myrunstreak · `TODO` todo (github.com/silverbeer/todo) · `TRD` trd (investment tracker). Auto-detected from the current git repo; pass `--repo` to override, or `--epic` to derive it from the epic.
 - `type` (pick one, required): `bug` · `feature` · `chore` (maintenance/refactor, no behavior change) · `docs` · `infra` (CI/k8s/helm/terraform) · `security`.
 - area (flat, optional, multi): e.g. `backend`, `frontend`, `db`, `auth`, `qop`, `scraper-integration`. Add with repeated `--label`.
 
-### CLI surface (linear CLI v2.0.0, verified 2026-06-10)
+### Epics (Linear projects)
 
-The helper bakes this in; match it when you drop to raw `linear`:
+Linear has no native "Epic" — its **Project** is the epic. Run `bash scripts/linear.sh epics` to list them with the repo each maps to. Pass the exact name to `--epic`. Every epic must resolve to a repo in `epic_repo()`; to add a new epic, add a case there (this is the "project-level label" requirement). Current epics are all `STK` except `trd — Investment Tracker` (`TRD`).
 
-- Subcommands are **singular**: `issue` and `label` (e.g. `label list`, **not** `labels list`).
-- `issue create`: title via `-t/--title`, labels as **repeated `-l`** (no `--labels` comma list), markdown body via `--description-file` (or `-d`), and `--no-interactive`.
-- **Labels are validated against their group**: `repo`/`type` are mutually-exclusive groups — pass exactly one of each. `docs` lives in the `type` group (NOT an area). Two type labels → GraphQL `labelIds not exclusive child labels`.
-- **`issue mine`** (aka `list`/`l`) = *your* issues; requires an explicit `--sort manual|priority`. **`issue query`** = all issues with filters: `--assignee <user>`, `-U/--unassigned`, `-l <label>` (repeatable), `-s/--state`, `--all-states` (default), `-j/--json`, `--limit 0` (unlimited).
-- State **filter** values are status *types*: `triage|backlog|unstarted|started|completed|canceled` (+ `--all-states`). **Set** state by workflow *name*: `issue update SB-N --state "In Progress"`. ⚠️ `--state` resolves by *type*, so when two states share one type (SB has both **In Progress** and **In Review** as `started`), it silently lands on the wrong one — set those via `api` with the exact `stateId` (`issueUpdate(id, input:{stateId})`).
-- `issue update`: `-t/--title`, `-s/--state` (name or type), `-a/--assignee`.
-- **`linear api '<graphql>'` works.** Use it for label-group ops — e.g. create a repo label under the `repo` group (the `label create` command has no `--parent`, so set `parentId` via the `issueLabelCreate` mutation). The `repo` group label id is `baaca4e0-c497-4383-8161-3c885abb1e7a`.
-- View one issue: `issue view SB-N` (there is no `issue get`). Assignee: pass `silverbeer.io` on create; `me` for `query --assignee me`.
+### CLI gotchas (linear 2.0.0, verified 2026-06-20 — the helper targets this)
+
+This build differs sharply from the 2026-05-30 surface — the flags flipped back. Do **not** trust older notes.
+
+- Subcommand is `issue` (**singular**); `issues` (plural) just dumps usage and fails.
+- `issue create` takes `-t/--title`, `-l/--label` **repeated** (NOT a comma list), `--description` or `--description-file`, `--project "<epic>"`, and **has** `--no-interactive`. The helper uses all of these.
+- **Labels are validated against their group**: `repo`/`type` are mutually-exclusive groups — exactly one of each. `docs` lives in the `type` group (not an area label). Two type labels → `labelIds not exclusive child labels`.
+- `issue mine` / `issue list` / `issue l` are **the same command** — they all list *my* issues, not the team's. Needs `--team`, requires `--sort manual|priority` (no default), and has **no `--assignee` or `--json/-j`** — text only. Open states = `--state unstarted --state started`; `--all-states` for everything.
+- `issue query` is the real query engine across **all** assignees: `--assignee`, `-U/--unassigned`, `--all-teams`, `--search`, `--project`, `-l/--label`, `--all-states` (its default), and `-j/--json`. The helper's audit uses `issue query --team SB -U`.
+- `issue update <id>` uses `-t/--title`, `-s/--state` (name or type), `-a/--assignee`, `-l/--label`, `--project`, `--description`/`-file`.
+- `project list --team SB [-j]` lists epics (the helper parses the `-j` JSON: `.nodes[].name`); `project view <slug>` shows one.
 
 ## Commands
 
 Run from inside the relevant repo so repo-detection works (or pass `--repo`).
 
+### List epics — `/linear epics`
+```bash
+bash scripts/linear.sh epics    # Linear projects + the repo each maps to
+```
+
+### Stats — `/linear stats [--days N]`
+Momentum dashboard: lifetime shipped/open/canceled, velocity over the last N days (default 7), avg open-ticket age, oldest open, approx ship time, per-repo + per-epic breakdown, a 14-day created-per-day sparkline, and a motivational closer. Read-only — runs immediately.
+```bash
+bash scripts/linear.sh stats            # last 7 days
+bash scripts/linear.sh stats --days 30  # last 30 days
+```
+Computed from `issue query --all-states -j`. **Caveat:** this CLI has no `completedAt`, so "shipped in window" and "avg ship time" use `updatedAt` as the close-time proxy — directional, not exact.
+
 ### Create — `/linear new <free text>`
-Infer a concise title, a short markdown description, and the `type` from the conversation. Detect `repo` from cwd. Then **show the user the proposed title + labels and confirm**, then file:
+Infer a concise title, a short markdown description, and the `type` from the conversation. Detect `repo` from cwd (or pass `--epic` to derive it). Then **show the user the proposed title + labels + epic and confirm**, then file:
 
 ```bash
 # write the description to a temp file (markdown-safe), then:
 bash scripts/linear.sh new --title "Roster CSV import rejects BOM" \
   --type bug --label frontend --body-file /tmp/issue.md
+
+# attach to an epic (project) — repo label is derived from the epic:
+bash scripts/linear.sh new --title "Streak heatmap legend" \
+  --type feature --epic "Goals & Multi-Metric Tracking" --body-file /tmp/issue.md
 ```
 The command prints the new `SB-N` URL — relay it. (`--repo` is optional; omit to auto-detect.)
 
-### List — `/linear list [--all]`
+### List — `/linear list [--all] [--epic E]`
 ```bash
-bash scripts/linear.sh list          # my open issues in the current repo
-bash scripts/linear.sh list --all    # include done/canceled
+bash scripts/linear.sh list                          # my open issues in the current repo
+bash scripts/linear.sh list --all                    # include done/canceled
+bash scripts/linear.sh list --epic "Local Agent Automation"        # open issues in one epic
+bash scripts/linear.sh list --epic "Local Agent Automation" --all  # all states in that epic
 ```
 
 ### Move — `/linear move SB-N <state>`
@@ -75,14 +98,11 @@ bash scripts/linear.sh audit-unassigned --fix   # assign all to silverbeer.io
 
 ## Anything not covered
 
-Drop to the raw CLI (`linear issue ...`) but keep conventions #1–#3. Useful recipes:
+Drop to the raw CLI (`linear issue ...`, **singular**) but keep conventions #1–#4. Note `linear api` no longer exists. Useful raw recipes:
 - View one issue: `linear issue view SB-N`
-- List/inspect labels (confirm group membership): `linear label list --team SB`
-- Add a comment: `linear issue comment add SB-N -b "text"` (or `--body-file /tmp/c.md`)
-- Issues by label: `linear issue query --team SB -l TODO --all-states -j`
-- Unassigned set: `linear issue query --team SB -U -j` (or use `audit-unassigned`)
-- Create a repo label in the `repo` group:
-  `linear api 'mutation { issueLabelCreate(input: {name:"X", parentId:"baaca4e0-c497-4383-8161-3c885abb1e7a", color:"#95a2b3"}) { success } }'`
+- List labels (to confirm group membership): `linear label list --team SB`
+- Add a comment: `linear issue comment add SB-N --body "text"` (or `--body-file /tmp/c.md` for markdown)
+- Unassigned set: `linear issue query --team SB --unassigned --all-states` (or `--assignee <user>` for someone specific; add `-j` for JSON).
 
 ## Phase 2 (not yet built)
 
