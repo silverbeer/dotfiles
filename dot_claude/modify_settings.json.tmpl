@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# chezmoi modify_ script for ~/.claude/settings.json.
+#
+# Why this isn't a plain managed file: Claude Code rewrites settings.json at
+# runtime (enabledPlugins, permissions, theme, tui, skipWorkflowUsageWarning),
+# so whole-file management conflicted on every `chezmoi apply`. This script
+# receives the CURRENT file on stdin and emits a merged result:
+#   - ENFORCE  hooks (rtk) + statusLine        (chezmoi-owned infra, always canonical)
+#   - UNION    permissions.allow               (base ∪ whatever the machine added; never removes)
+#   - SEED     plugins / marketplaces / theme   (defaults only when absent; live wins if present)
+#   - PRESERVE everything else (tui, warnings, future keys) untouched
+# → apply is idempotent; runtime keys never get clobbered.
+set -euo pipefail
+
+cur="$(cat)"; [ -z "$cur" ] && cur='{}'
+
+canonical=$(cat <<'JSON'
+{
+  "permissions": { "allow": ["Bash","Read","Glob","Grep","Edit","Write","mcp__supabase-sql__run_sql"] },
+  "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "{{ .chezmoi.homeDir }}/.claude/hooks/rtk-rewrite.sh" } ] } ] },
+  "statusLine": { "type": "command", "command": "{{ .chezmoi.homeDir }}/.claude/statusLine.sh" },
+  "enabledPlugins": { "warp@claude-code-warp": true, "caveman@caveman": true },
+  "extraKnownMarketplaces": {
+    "claude-code-warp": { "source": { "source": "github", "repo": "warpdotdev/claude-code-warp" } },
+    "caveman": { "source": { "source": "github", "repo": "JuliusBrussee/caveman" } }
+  },
+  "theme": "dark-daltonized"
+}
+JSON
+)
+
+jq -n --argjson cur "$cur" --argjson can "$canonical" '
+  ($can * $cur)                                    # seed defaults; live values win (keeps plugins/theme/tui/warnings)
+  | .hooks = $can.hooks                             # enforce the rtk hook
+  | .statusLine = $can.statusLine                   # enforce the statusline
+  | ($cur.permissions.allow // []) as $have
+  | .permissions.allow = ($have + ($can.permissions.allow - $have))   # union, live order preserved (no sort churn)
+'
