@@ -98,12 +98,31 @@ bash scripts/linear.sh audit-unassigned --fix   # assign all to silverbeer.io
 
 ## Anything not covered
 
-Drop to the raw CLI (`linear issue ...`, **singular**) but keep conventions #1–#4. Note `linear api` no longer exists. Useful raw recipes:
+Drop to the raw CLI (`linear issue ...`, **singular**) but keep conventions #1–#4. Useful raw recipes:
 - View one issue: `linear issue view SB-N`
 - List labels (to confirm group membership): `linear label list --team SB`
 - Add a comment: `linear issue comment add SB-N --body "text"` (or `--body-file /tmp/c.md` for markdown)
 - Unassigned set: `linear issue query --team SB --unassigned --all-states` (or `--assignee <user>` for someone specific; add `-j` for JSON).
 
-## Phase 2 (not yet built)
+For anything the CLI can't do (initiatives, cycles, estimates, team settings, metrics) use the raw GraphQL wrapper `scripts/linear-gql.sh` (reads a personal API key from `~/.config/linear/gql-key`; supports variables as `$2`). The CLI also has a native `linear api '<query>'` that uses its own keychain auth. Verify the whole setup with `scripts/doctor.sh`.
 
-Sub-issues via `linear issue relation`, auto branch↔issue linking on `git checkout -b silverbeer/sb-N-...`, smarter area-label inference. Track under SB-18.
+## The delivery loop (paved road)
+
+State transitions are **automatic** via the connected GitHub integration — do NOT `move` manually for these:
+
+| Git event | → Linear state |
+|-----------|----------------|
+| branch pushed (name contains `sb-N`) | In Progress |
+| PR marked ready for review | In Review |
+| PR merged | Done |
+
+So the loop is:
+```
+linear.sh branch SB-N     # checkout silverbeer/sb-n-<slug>  → auto: In Progress
+# …implement + test…
+/cppp                     # commit, push, open PR (body: "Fixes SB-N")  → auto: In Review
+# merge the PR            #                                             → auto: Done
+```
+`linear.sh move` is only for grooming (Backlog→Todo) or exceptions. Branch names **must** contain the issue id — `linear.sh branch` guarantees it.
+
+**Still open (SB-18):** first-class sub-issues in the CLI (currently done via `linear-gql.sh` `parentId`), and smarter area-label inference from changed files.
