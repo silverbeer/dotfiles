@@ -54,6 +54,12 @@ bash scripts/linear.sh stats --days 30  # last 30 days
 ```
 Computed from `issue query --all-states -j`. **Caveat:** this CLI has no `completedAt`, so "shipped in window" and "avg ship time" use `updatedAt` as the close-time proxy — directional, not exact.
 
+### DORA metrics — `bash scripts/metrics.sh [--days N]`
+Capacity + DORA-style delivery metrics (SB-360). Unlike `stats`, this uses the **Linear API** (`linear-gql.sh`) for real `createdAt/startedAt/completedAt` → true lead time + cycle time, plus deploy frequency (merged-PRs-to-main proxy via `gh search prs`) and a revert/hotfix change-failure proxy. MTTR is not implemented (no incident tracking yet). Read-only.
+```bash
+bash scripts/metrics.sh --days 30
+```
+
 ### Create — `/linear new <free text>`
 Infer a concise title, a short markdown description, and the `type` from the conversation. Detect `repo` from cwd (or pass `--epic` to derive it). Then **show the user the proposed title + labels + epic and confirm**, then file:
 
