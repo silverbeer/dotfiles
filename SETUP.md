@@ -91,7 +91,38 @@ rtk init -g          # Installs hook + RTK.md into ~/.claude
 
 ---
 
+## Step 5b — Linear API + CLI (agentic dev system)
+
+The `linear-crud` skill drives Linear as the system of record. Two auth pieces
+are per-machine:
+
+```bash
+# Linear CLI (issue CRUD) — interactive login, stores creds in the keychain
+linear login
+
+# Linear personal API key (raw GraphQL: initiatives, cycles, estimates, metrics)
+# Auto-created from 1Password by run_once_after_20-linear-api-key.sh on `chezmoi apply`.
+# If op was locked at apply time, create it manually:
+op read 'op://Personal/linear_api_key/password' > ~/.config/linear/gql-key && chmod 600 ~/.config/linear/gql-key
+```
+
+The wrapper lives at `~/.claude/skills/linear-crud/scripts/linear-gql.sh` (synced
+by chezmoi) and only ever talks to `api.linear.app`.
+
+---
+
 ## Step 6 — Verify everything
+
+The agentic-dev **doctor** checks the whole environment (tools, auth, Linear API,
+skills) and is the fastest way to confirm a new machine matches:
+
+```bash
+bash ~/.claude/skills/linear-crud/scripts/doctor.sh
+# Expect: all ✓, "N ok · 0 warn · 0 fail". WARN = a one-time interactive step
+# (gh auth login / linear login / op signin) it prints the fix for.
+```
+
+Additional spot checks:
 
 ```bash
 # RTK working
