@@ -98,7 +98,8 @@ are per-machine:
 
 ```bash
 # Linear CLI (issue CRUD) — interactive login, stores creds in the keychain
-linear login
+linear auth login
+linear auth default silverbeer   # if it isn't already the default
 
 # Linear personal API key (raw GraphQL: initiatives, cycles, estimates, metrics)
 # Auto-created from 1Password by run_once_after_20-linear-api-key.sh on `chezmoi apply`.

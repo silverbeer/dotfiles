@@ -27,7 +27,7 @@ if op account list >/dev/null 2>&1 && [ -n "$(op account list 2>/dev/null)" ]; t
 if [ -f "$HOME/.config/linear/credentials.toml" ] && grep -q '^default' "$HOME/.config/linear/credentials.toml" 2>/dev/null; then
   ok "linear CLI has a default workspace"
 else
-  warnf "linear CLI not logged in" "run: linear login"
+  warnf "linear CLI not logged in" "run: linear auth login"
 fi
 
 echo "── Linear API (raw GraphQL) ─────────────"
