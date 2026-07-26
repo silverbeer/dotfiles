@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# doctor.sh — verify the agentic dev environment is fully set up on THIS machine.
+# Run identically on every machine (MB Air, Mac mini, …) to confirm parity:
+#   bash ~/.claude/skills/linear-crud/scripts/doctor.sh
+#
+# Checks toolchain, auth, and the Linear API wiring. Non-zero exit if anything
+# is a hard FAIL. WARN = works but needs an interactive/one-time step.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GQL="$SCRIPT_DIR/linear-gql.sh"
+KEY_FILE="${LINEAR_KEY_FILE:-$HOME/.config/linear/gql-key}"
+
+pass=0 warn=0 fail=0
+ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; pass=$((pass+1)); }
+warnf(){ printf '  \033[33m!\033[0m %s\n     ↳ %s\n' "$1" "$2"; warn=$((warn+1)); }
+failf(){ printf '  \033[31m✗\033[0m %s\n     ↳ %s\n' "$1" "$2"; fail=$((fail+1)); }
+
+echo "── binaries ─────────────────────────────"
+for bin in git gh jq curl uv node op linear rtk chezmoi; do
+  if command -v "$bin" >/dev/null 2>&1; then ok "$bin"; else failf "$bin missing" "install via chezmoi run_onchange (brew)"; fi
+done
+
+echo "── auth ─────────────────────────────────"
+if gh auth status >/dev/null 2>&1; then ok "gh authenticated"; else warnf "gh not authenticated" "run: gh auth login"; fi
+if op account list >/dev/null 2>&1 && [ -n "$(op account list 2>/dev/null)" ]; then ok "op account configured"; else warnf "op not configured/signed in" "run: op signin (needed to bootstrap the Linear key)"; fi
+if [ -f "$HOME/.config/linear/credentials.toml" ] && grep -q '^default' "$HOME/.config/linear/credentials.toml" 2>/dev/null; then
+  ok "linear CLI has a default workspace"
+else
+  warnf "linear CLI not logged in" "run: linear login"
+fi
+
+echo "── Linear API (raw GraphQL) ─────────────"
+if [ -f "$KEY_FILE" ]; then
+  perms="$(stat -f '%A' "$KEY_FILE" 2>/dev/null || stat -c '%a' "$KEY_FILE" 2>/dev/null)"
+  [ "$perms" = "600" ] && ok "gql-key present (perms 600)" || warnf "gql-key perms $perms" "chmod 600 $KEY_FILE"
+  if resp="$(bash "$GQL" '{ viewer { id name } }' 2>/dev/null)" && printf '%s' "$resp" | jq -e '.data.viewer.id' >/dev/null 2>&1; then
+    who="$(printf '%s' "$resp" | jq -r '.data.viewer.name')"
+    ok "linear-gql.sh authenticates ($who)"
+  else
+    failf "linear-gql.sh API call failed" "key invalid/expired — re-create gql-key from op (see below)"
+  fi
+else
+  failf "gql-key missing at $KEY_FILE" "op read 'op://Personal/linear_api_key/password' > $KEY_FILE  (then chmod 600)"
+fi
+
+echo "── skills + repos ───────────────────────"
+for s in linear-crud todo session-audit; do
+  [ -d "$HOME/.claude/skills/$s" ] && ok "skill: $s" || warnf "skill $s not synced" "run: chezmoi apply"
+done
+[ -d "$HOME/gitrepos" ] && ok "~/gitrepos present" || warnf "~/gitrepos missing" "clone your repos under ~/gitrepos"
+
+echo "─────────────────────────────────────────"
+printf 'summary: \033[32m%d ok\033[0m · \033[33m%d warn\033[0m · \033[31m%d fail\033[0m\n' "$pass" "$warn" "$fail"
+[ "$fail" -eq 0 ]
