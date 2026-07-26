@@ -14,6 +14,7 @@
 #   epics                       list Linear projects (epics) + their mapped repo
 #   stats [--days N]            momentum dashboard (totals, velocity, age, sparkline)
 #   new   --title T (--body B | --body-file F) --type TYPE [--repo R] [--epic E] [--label L ...]
+#   branch SB-N                 checkout silverbeer/sb-n-<slug> (triggers auto → In Progress)
 #   list  [--all] [--repo R] [--epic E]   my issues (open by default)
 #   move  SB-N "State"          change workflow state
 #   link  SB-N [PR#]            add "Fixes SB-N" to a PR body
@@ -39,6 +40,7 @@
 #   - `project list --team SB [-j]` lists projects; `project view <slug>` for one.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LINEAR_TEAM="${LINEAR_TEAM:-SB}"
 LINEAR_ASSIGNEE="${LINEAR_ASSIGNEE:-silverbeer.io}"
 
@@ -312,12 +314,34 @@ cmd_stats() {
   echo
 }
 
+# Create + checkout a branch named to trigger Linear's git automation
+# (branch → In Progress). Name: silverbeer/sb-<n>-<title-slug>. Needs linear-gql.sh.
+cmd_branch() {
+  local key="${1:-}"
+  [[ "$key" =~ ^[A-Za-z]+-[0-9]+$ ]] || die "usage: branch SB-123"
+  local num="${key##*-}"
+  local title
+  title="$(bash "$SCRIPT_DIR/linear-gql.sh" \
+    "{ issues(filter:{number:{eq:$num}, team:{key:{eq:\"$LINEAR_TEAM\"}}}){ nodes { title } } }" 2>/dev/null \
+    | jq -r '.data.issues.nodes[0].title // empty')"
+  [[ -z "$title" ]] && die "branch: $key not found (is linear-gql.sh set up? run doctor.sh)"
+  local slug
+  slug="$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40 | sed -E 's/-+$//')"
+  local branch="silverbeer/$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')-$slug"
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "branch: not inside a git repo"
+  git checkout -b "$branch"
+  echo "→ $branch"
+  echo "  Linear will auto-move $key to In Progress when this branch is pushed."
+}
+
 sub="${1:-}"; shift || true
 case "$sub" in
   repo-label)        cmd_repo_label "$@" ;;
   epics)             cmd_epics "$@" ;;
   stats)             cmd_stats "$@" ;;
   new)               cmd_new "$@" ;;
+  branch)            cmd_branch "$@" ;;
   list)              cmd_list "$@" ;;
   move)              cmd_move "$@" ;;
   link)              cmd_link "$@" ;;
