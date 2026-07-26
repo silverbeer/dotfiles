@@ -17,7 +17,7 @@ The helper lives next to this file: `scripts/linear.sh`. Run it with `bash`. It 
 
 ### Label vocabulary
 
-- `repo` (pick one, required): `MT` missing-table · `MS` match-scraper · `MSA` match-scraper-agent · `QB` qualityplaybook · `STK` myrunstreak · `TODO` todo (github.com/silverbeer/todo) · `TRD` trd (investment tracker). Auto-detected from the current git repo; pass `--repo` to override, or `--epic` to derive it from the epic.
+- `repo` (pick one, required): `MT` missing-table · `MTA` missing-table Android app · `BOOT` missingtable-platform-bootstrap · `MS` match-scraper · `MSA` match-scraper-agent · `QB` qualityplaybook · `STK` myrunstreak · `JT` janitor · `DOT` dotfiles · `TODO` todo (github.com/silverbeer/todo) · `TRD` trd (investment tracker). Auto-detected from the current git repo; pass `--repo` to override, or `--epic` to derive it from the epic.
 - `type` (pick one, required): `bug` · `feature` · `chore` (maintenance/refactor, no behavior change) · `docs` · `infra` (CI/k8s/helm/terraform) · `security`.
 - area (flat, optional, multi): e.g. `backend`, `frontend`, `db`, `auth`, `qop`, `scraper-integration`. Add with repeated `--label`.
 

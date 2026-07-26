@@ -53,13 +53,17 @@ repo_label() {
   root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
   name="$(basename "$root")"
   case "$name" in
-    missing-table)             echo "MT" ;;
-    match-scraper)             echo "MS" ;;
-    match-scraper-agent)       echo "MSA" ;;
-    qualityplaybook*|qb)       echo "QB" ;;
-    myrunstreak*|runstreak*)   echo "STK" ;;
-    todo)                      echo "TODO" ;;
-    trd*|*investment*)         echo "TRD" ;;
+    missing-table)                        echo "MT" ;;
+    *android*)                            echo "MTA" ;;
+    missingtable-platform-bootstrap|*bootstrap*) echo "BOOT" ;;
+    match-scraper)                        echo "MS" ;;
+    match-scraper-agent)                  echo "MSA" ;;
+    qualityplaybook*|qb)                  echo "QB" ;;
+    myrunstreak*|runstreak*)              echo "STK" ;;
+    janitor)                              echo "JT" ;;
+    dotfiles)                             echo "DOT" ;;
+    todo)                                 echo "TODO" ;;
+    trd*|*investment*)                    echo "TRD" ;;
     *) return 1 ;;
   esac
 }
@@ -75,8 +79,10 @@ epic_repo() {
     *social*|*community*)                   echo "STK" ;;
     *athlete*|*training*)                   echo "STK" ;;
     *local*agent*|*automation*)             echo "STK" ;;
+    *agentic*|*delivery*)                   echo "STK" ;;
     *quality*|*ci*)                         echo "STK" ;;
     *vision*|*roadmap*)                     echo "STK" ;;
+    *android*)                              echo "MTA" ;;
     *trd*|*investment*)                     echo "TRD" ;;
     *) return 1 ;;
   esac
@@ -243,7 +249,7 @@ cmd_stats() {
     def r1: (.*10|round)/10;
     def bar($n; $max): ["▁","▂","▃","▄","▅","▆","▇","█"] as $b
       | if $max<=0 then " " else $b[(($n/$max)*7|floor)] end;
-    ["MT","MS","MSA","QB","STK","TODO","TRD"] as $repos
+    ["MT","MTA","BOOT","MS","MSA","QB","STK","JT","DOT","TODO","TRD"] as $repos
 
     | .nodes as $all
     | ($all|length) as $total
