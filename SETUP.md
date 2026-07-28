@@ -206,7 +206,6 @@ cd ~/.local/share/chezmoi && git add -A && git commit -m "add someconfig" && git
 | `~/.claude/CLAUDE.md` | Global Claude instructions |
 | `~/.claude/RTK.md` | RTK config — loaded by Claude Code automatically |
 | `~/.claude/settings.json` | Hooks (RTK rewrite), statusline, permissions |
-| `~/.claude/mcp.json` | Templated — paths use homeDir |
 | `~/.claude/agents/qe-engineer.md` | Global QE agent baseline |
 | `~/.claude/commands/cppp.md` | `/cppp` slash command — commit/PR workflow |
 | `~/.claude/commands/qe.md` | `/qe` slash command — coverage audit |
