@@ -16,12 +16,4 @@ export SUPABASE_PG_URL="{{ onepasswordRead "op://Personal/Supabase MSA/credentia
 alias k='kubectl'
 export RESUME_DATA_DIR="{{ .chezmoi.homeDir }}/iCloud/resume-data"
 
-# Added by Antigravity
-export PATH="{{ .chezmoi.homeDir }}/.antigravity/antigravity/bin:$PATH"
-
-# OpenClaw Completion (only if installed on this machine)
-if [[ -f "{{ .chezmoi.homeDir }}/.openclaw/completions/openclaw.zsh" ]]; then
-  autoload -Uz compinit && compinit
-  source "{{ .chezmoi.homeDir }}/.openclaw/completions/openclaw.zsh"
-fi
 export APP_ENV={{ dig "appEnv" "prod" . }}
