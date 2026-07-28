@@ -21,3 +21,8 @@ export APP_ENV={{ dig "appEnv" "prod" . }}
 # Completion system. This used to live inside the OpenClaw block, so removing
 # that tool (SB-392) silently took zsh completions with it — keep it standalone.
 autoload -Uz compinit && compinit
+
+# Prompt (config: ~/.config/starship.toml). Shows repo, branch, dirty state and
+# the Linear ticket parsed from the branch name. Keep this last — starship's
+# init must run after anything that touches PROMPT.
+eval "$(starship init zsh)"
