@@ -17,3 +17,7 @@ alias k='kubectl'
 export RESUME_DATA_DIR="{{ .chezmoi.homeDir }}/iCloud/resume-data"
 
 export APP_ENV={{ dig "appEnv" "prod" . }}
+
+# Completion system. This used to live inside the OpenClaw block, so removing
+# that tool (SB-392) silently took zsh completions with it — keep it standalone.
+autoload -Uz compinit && compinit
