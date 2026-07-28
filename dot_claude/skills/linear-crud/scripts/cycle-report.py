@@ -124,7 +124,9 @@ def main() -> int:
         print(f"  created mid-cycle: {len(born_in_cycle)} of {len(issues)}")
 
     # Estimates are the weak spot — unestimated work makes points meaningless.
-    unest = [i for i in issues if not i["estimate"]]
+    # `is None`, not falsy: 0 is a deliberate estimate meaning "closed as
+    # superseded/duplicate, no work done", and must not be flagged as missing.
+    unest = [i for i in issues if i["estimate"] is None]
     if unest:
         print(f"\n  ⚠ {len(unest)} issue(s) with no estimate — point totals understate the work:")
         for i in unest[:8]:

@@ -47,6 +47,12 @@ Tag unplanned tickets `adhoc`. They skip grooming ceremony entirely: title, repo
 label, `adhoc`, then branch and build. Priority and epic get filled at the next
 groom, or never.
 
+**Always set an estimate when filing a ticket** (Fibonacci: 1/2/3/5/8). A first
+guess is fine — revise it at close if reality differed; the drift is itself
+signal. Use `0` for anything closed as superseded, duplicate or won't-do, so
+velocity doesn't count work nobody did. Unestimated tickets silently halve the
+measured throughput.
+
 `python3 ~/.claude/skills/linear-crud/scripts/cycle-report.py` shows the
 planned-vs-adhoc split. Plan each cycle at roughly `100% − adhoc share` of
 capacity.

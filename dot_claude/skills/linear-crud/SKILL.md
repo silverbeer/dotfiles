@@ -94,6 +94,23 @@ bash scripts/linear.sh new --title "Streak heatmap legend" \
 ```
 The command prints the new `SB-N` URL — relay it. (`--repo` is optional; omit to auto-detect.)
 
+**Always set an estimate.** `linear.sh new` has no `--estimate` flag, so set it
+immediately after filing:
+
+```bash
+bash scripts/linear-gql.sh 'mutation { issueUpdate(id: "<uuid>", input: { estimate: 3 }) { success } }'
+```
+
+Fibonacci 1/2/3/5/8. A first guess is fine — revise at close if reality
+differed. Use `0` for anything closed as superseded, duplicate or won't-do, so
+velocity doesn't count work nobody did (`cycle-report.py` distinguishes a
+deliberate 0 from a missing estimate).
+
+Unestimated tickets are not a cosmetic gap: on 2026-07-28 backfilling 18 of them
+moved the cycle from an apparent 30 points to an actual 73, and adhoc's share of
+points from 34% to 58%. Point totals without estimates understate throughput by
+more than half and make capacity planning worthless.
+
 ### List — `/linear list [--all] [--epic E]`
 ```bash
 bash scripts/linear.sh list                          # my open issues in the current repo
