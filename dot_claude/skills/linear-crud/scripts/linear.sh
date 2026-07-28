@@ -84,6 +84,7 @@ epic_repo() {
     *agentic*|*delivery*)                   echo "STK" ;;
     *quality*|*ci*)                         echo "STK" ;;
     *vision*|*roadmap*)                     echo "STK" ;;
+    *daily*coach*|*route*)                  echo "STK" ;;
     *android*)                              echo "MTA" ;;
     *trd*|*investment*)                     echo "TRD" ;;
     *) return 1 ;;

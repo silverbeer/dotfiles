@@ -60,6 +60,26 @@ Capacity + DORA-style delivery metrics (SB-360). Unlike `stats`, this uses the *
 bash scripts/metrics.sh --days 30
 ```
 
+### Cycle report — `python3 scripts/cycle-report.py [--cycle N | --previous]`
+Planned vs **adhoc** split for a cycle: issues and points, completion per stream,
+adhoc share, and how many issues were created mid-cycle. Read-only.
+
+```bash
+python3 scripts/cycle-report.py              # active cycle
+python3 scripts/cycle-report.py --previous   # the one that just ended
+```
+
+The portfolio is pre-user, so unplanned work is most of the throughput — the
+`adhoc` label exists to measure that, not to scold it. Run this at every cycle
+boundary and plan the next cycle at roughly `100% − adhoc share` of capacity.
+
+Two things to watch in the output:
+- **Unestimated issues make the point totals lie.** The report names them; fill
+  them in before trusting the ratio.
+- **Adhoc typically completes at a higher rate than planned work** — it jumps the
+  queue by definition. If planned completion is much lower, the cycle was
+  over-committed, not the team under-delivering.
+
 ### Create — `/linear new <free text>`
 Infer a concise title, a short markdown description, and the `type` from the conversation. Detect `repo` from cwd (or pass `--epic` to derive it). Then **show the user the proposed title + labels + epic and confirm**, then file:
 
