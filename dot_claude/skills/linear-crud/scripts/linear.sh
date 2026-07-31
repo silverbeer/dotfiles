@@ -45,6 +45,7 @@ LINEAR_TEAM="${LINEAR_TEAM:-SB}"
 LINEAR_ASSIGNEE="${LINEAR_ASSIGNEE:-silverbeer.io}"
 
 die() { echo "error: $*" >&2; exit 1; }
+warn() { echo "warn: $*" >&2; }
 
 # Strip ANSI color codes from CLI output (the binary colorizes even when piped).
 strip_ansi() { sed -E 's/\x1b\[[0-9;]*m//g'; }
@@ -66,6 +67,7 @@ repo_label() {
     dotfiles)                             echo "DOT" ;;
     todo)                                 echo "TODO" ;;
     trd*|*investment*)                    echo "TRD" ;;
+    podtelemetry*|pod)                    echo "POD" ;;
     *) return 1 ;;
   esac
 }
@@ -85,6 +87,7 @@ epic_repo() {
     *quality*|*ci*)                         echo "STK" ;;
     *vision*|*roadmap*)                     echo "STK" ;;
     *daily*coach*|*route*)                  echo "STK" ;;
+    *podtelemetry*|*run*audio*)             echo "POD" ;;
     *android*)                              echo "MTA" ;;
     *trd*|*investment*)                     echo "TRD" ;;
     *) return 1 ;;
@@ -126,15 +129,16 @@ cmd_new() {
   [[ -n "$title" ]] || die "new: --title required"
   [[ -n "$type"  ]] || die "new: --type required (bug|feature|chore|docs|infra|security)"
 
-  # Epic enforces its repo label (the project-level label). If both --epic and
-  # --repo are given they must agree.
+  # The epic supplies the default repo label (the project-level label). An
+  # explicit --repo wins: some epics span repos — Podtelemetry is a POD service
+  # with STK-side integration tickets in the same epic.
   if [[ -n "$epic" ]]; then
     local epic_r
     epic_r="$(epic_repo "$epic" || die "new: epic '$epic' is not mapped to a repo — add it to epic_repo() in this helper (run 'epics' to see the list)")"
     if [[ -n "$repo" && "$repo" != "$epic_r" ]]; then
-      die "new: --repo $repo conflicts with epic '$epic' (repo $epic_r)"
+      warn "new: --repo $repo overrides epic '$epic' default ($epic_r)"
     fi
-    repo="$epic_r"
+    [[ -z "$repo" ]] && repo="$epic_r"
   fi
   [[ -z "$repo" ]] && repo="$(repo_label || die "new: could not detect repo — pass --repo or --epic")"
 
@@ -252,7 +256,7 @@ cmd_stats() {
     def r1: (.*10|round)/10;
     def bar($n; $max): ["▁","▂","▃","▄","▅","▆","▇","█"] as $b
       | if $max<=0 then " " else $b[(($n/$max)*7|floor)] end;
-    ["MT","MTA","BOOT","MS","MSA","QB","STK","JT","DOT","TODO","TRD"] as $repos
+    ["MT","MTA","BOOT","MS","MSA","QB","STK","JT","DOT","TODO","TRD","POD"] as $repos
 
     | .nodes as $all
     | ($all|length) as $total
