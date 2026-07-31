@@ -13,17 +13,17 @@ The helper lives next to this file: `scripts/linear.sh`. Run it with `bash`. It 
 1. **Every issue is assigned to `silverbeer.io`. Never leave one unassigned.** The helper does this automatically on `new`; for any raw `linear` call you make, pass `--assignee "silverbeer.io"`.
 2. **Every issue gets a `repo` label and a `type` label** (both are mutually-exclusive groups). The helper sets these on `new`. A ticket without them is incomplete (SB-74 shipped label-less before this skill existed — don't repeat that).
 3. **Confirm before any write.** For `new` and `move`, show the user the exact title / type / repo / epic / area labels / target state you're about to apply and wait for a yes. Reads (`list`, `epics`) run immediately.
-4. **Every epic maps to a repo (its required "project-level label").** Epics are Linear *projects*. The helper holds the epic→repo map in `epic_repo()`; an epic with no mapping is rejected. When you pass `--epic`, the repo label is derived from it (no need to also pass `--repo`; if you do, they must agree).
+4. **Every epic maps to a repo (its required "project-level label").** Epics are Linear *projects*. The helper holds the epic→repo map in `epic_repo()`; an epic with no mapping is rejected. When you pass `--epic`, the repo label is derived from it — so `--repo` is usually unnecessary. An epic may nonetheless **span repos**: `Podtelemetry — Run Audio` defaults to `POD` (the service) but holds `STK` integration tickets. Passing an explicit `--repo` overrides the epic's default with a warning rather than failing.
 
 ### Label vocabulary
 
-- `repo` (pick one, required): `MT` missing-table · `MTA` missing-table Android app · `BOOT` missingtable-platform-bootstrap · `MS` match-scraper · `MSA` match-scraper-agent · `QB` qualityplaybook · `STK` myrunstreak · `JT` janitor · `DOT` dotfiles · `TODO` todo (github.com/silverbeer/todo) · `TRD` trd (investment tracker). Auto-detected from the current git repo; pass `--repo` to override, or `--epic` to derive it from the epic.
+- `repo` (pick one, required): `MT` missing-table · `MTA` missing-table Android app · `BOOT` missingtable-platform-bootstrap · `MS` match-scraper · `MSA` match-scraper-agent · `QB` qualityplaybook · `STK` myrunstreak · `JT` janitor · `DOT` dotfiles · `TODO` todo (github.com/silverbeer/todo) · `TRD` trd (investment tracker) · `POD` podtelemetry (run-audio capture service). Auto-detected from the current git repo; pass `--repo` to override, or `--epic` to derive it from the epic.
 - `type` (pick one, required): `bug` · `feature` · `chore` (maintenance/refactor, no behavior change) · `docs` · `infra` (CI/k8s/helm/terraform) · `security`.
 - area (flat, optional, multi): e.g. `backend`, `frontend`, `db`, `auth`, `qop`, `scraper-integration`. Add with repeated `--label`.
 
 ### Epics (Linear projects)
 
-Linear has no native "Epic" — its **Project** is the epic. Run `bash scripts/linear.sh epics` to list them with the repo each maps to. Pass the exact name to `--epic`. Every epic must resolve to a repo in `epic_repo()`; to add a new epic, add a case there (this is the "project-level label" requirement). Current epics are all `STK` except `trd — Investment Tracker` (`TRD`).
+Linear has no native "Epic" — its **Project** is the epic. Run `bash scripts/linear.sh epics` to list them with the repo each maps to. Pass the exact name to `--epic`. Every epic must resolve to a repo in `epic_repo()`; to add a new epic, add a case there (this is the "project-level label" requirement). Current epics are all `STK` except `trd — Investment Tracker` (`TRD`), `MT Android App` (`MTA`) and `Podtelemetry — Run Audio` (`POD`).
 
 ### CLI gotchas (linear 2.0.0, verified 2026-06-20 — the helper targets this)
 
