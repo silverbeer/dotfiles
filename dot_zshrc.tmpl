@@ -16,12 +16,13 @@ export SUPABASE_PG_URL="{{ onepasswordRead "op://Personal/Supabase MSA/credentia
 alias k='kubectl'
 export RESUME_DATA_DIR="{{ .chezmoi.homeDir }}/iCloud/resume-data"
 
-# Added by Antigravity
-export PATH="{{ .chezmoi.homeDir }}/.antigravity/antigravity/bin:$PATH"
-
-# OpenClaw Completion (only if installed on this machine)
-if [[ -f "{{ .chezmoi.homeDir }}/.openclaw/completions/openclaw.zsh" ]]; then
-  autoload -Uz compinit && compinit
-  source "{{ .chezmoi.homeDir }}/.openclaw/completions/openclaw.zsh"
-fi
 export APP_ENV={{ dig "appEnv" "prod" . }}
+
+# Completion system. This used to live inside the OpenClaw block, so removing
+# that tool (SB-392) silently took zsh completions with it — keep it standalone.
+autoload -Uz compinit && compinit
+
+# Prompt (config: ~/.config/starship.toml). Shows repo, branch, dirty state and
+# the Linear ticket parsed from the branch name. Keep this last — starship's
+# init must run after anything that touches PROMPT.
+eval "$(starship init zsh)"

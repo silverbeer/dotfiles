@@ -4,7 +4,7 @@ Personal Claude Code configuration, shell setup, and development standards manag
 
 > **Platform:** macOS only. Requires [Claude Code](https://claude.ai/code) installed and licensed.
 >
-> **Note:** This is a personal dotfiles repo. The `zshrc` and `mcp.json` reference personal tooling (`mcp-gmail`, `openclaw`, `antigravity`) that you won't have. Use them as reference — adapt to your own stack. The Claude agents, commands, RTK setup, and chezmoi patterns are fully portable.
+> **Note:** This is a personal dotfiles repo. The `zshrc` references personal paths and 1Password items you won't have. Use it as reference — adapt to your own stack. The Claude agents, commands, skills, RTK setup, and chezmoi patterns are fully portable.
 
 ---
 
@@ -55,7 +55,6 @@ rtk init --show && rtk gain
 | `~/.claude/CLAUDE.md` | Global Claude instructions (branch protection, GitOps standards) |
 | `~/.claude/RTK.md` | RTK config — owned by RTK, do not edit manually |
 | `~/.claude/settings.json` | Hooks (RTK rewrite), statusline, global permissions |
-| `~/.claude/mcp.json` | MCP server config — paths templated, no hardcoding |
 | `~/.claude/agents/` | Global Claude subagents (available in every project) |
 | `~/.claude/commands/` | Global slash commands (available in every project) |
 | `~/.claude/skills/` | Global skills — **allowlisted one-by-one in `.chezmoiignore`** (see below) |

@@ -13,17 +13,17 @@ The helper lives next to this file: `scripts/linear.sh`. Run it with `bash`. It 
 1. **Every issue is assigned to `silverbeer.io`. Never leave one unassigned.** The helper does this automatically on `new`; for any raw `linear` call you make, pass `--assignee "silverbeer.io"`.
 2. **Every issue gets a `repo` label and a `type` label** (both are mutually-exclusive groups). The helper sets these on `new`. A ticket without them is incomplete (SB-74 shipped label-less before this skill existed — don't repeat that).
 3. **Confirm before any write.** For `new` and `move`, show the user the exact title / type / repo / epic / area labels / target state you're about to apply and wait for a yes. Reads (`list`, `epics`) run immediately.
-4. **Every epic maps to a repo (its required "project-level label").** Epics are Linear *projects*. The helper holds the epic→repo map in `epic_repo()`; an epic with no mapping is rejected. When you pass `--epic`, the repo label is derived from it (no need to also pass `--repo`; if you do, they must agree).
+4. **Every epic maps to a repo (its required "project-level label").** Epics are Linear *projects*. The helper holds the epic→repo map in `epic_repo()`; an epic with no mapping is rejected. When you pass `--epic`, the repo label is derived from it — so `--repo` is usually unnecessary. An epic may nonetheless **span repos**: `Podtelemetry — Run Audio` defaults to `POD` (the service) but holds `STK` integration tickets. Passing an explicit `--repo` overrides the epic's default with a warning rather than failing.
 
 ### Label vocabulary
 
-- `repo` (pick one, required): `MT` missing-table · `MTA` missing-table Android app · `BOOT` missingtable-platform-bootstrap · `MS` match-scraper · `MSA` match-scraper-agent · `QB` qualityplaybook · `STK` myrunstreak · `JT` janitor · `DOT` dotfiles · `TODO` todo (github.com/silverbeer/todo) · `TRD` trd (investment tracker). Auto-detected from the current git repo; pass `--repo` to override, or `--epic` to derive it from the epic.
+- `repo` (pick one, required): `MT` missing-table · `MTA` missing-table Android app · `BOOT` missingtable-platform-bootstrap · `MS` match-scraper · `MSA` match-scraper-agent · `QB` qualityplaybook · `STK` myrunstreak · `JT` janitor · `DOT` dotfiles · `TODO` todo (github.com/silverbeer/todo) · `TRD` trd (investment tracker) · `POD` podtelemetry (run-audio capture service). Auto-detected from the current git repo; pass `--repo` to override, or `--epic` to derive it from the epic.
 - `type` (pick one, required): `bug` · `feature` · `chore` (maintenance/refactor, no behavior change) · `docs` · `infra` (CI/k8s/helm/terraform) · `security`.
 - area (flat, optional, multi): e.g. `backend`, `frontend`, `db`, `auth`, `qop`, `scraper-integration`. Add with repeated `--label`.
 
 ### Epics (Linear projects)
 
-Linear has no native "Epic" — its **Project** is the epic. Run `bash scripts/linear.sh epics` to list them with the repo each maps to. Pass the exact name to `--epic`. Every epic must resolve to a repo in `epic_repo()`; to add a new epic, add a case there (this is the "project-level label" requirement). Current epics are all `STK` except `trd — Investment Tracker` (`TRD`).
+Linear has no native "Epic" — its **Project** is the epic. Run `bash scripts/linear.sh epics` to list them with the repo each maps to. Pass the exact name to `--epic`. Every epic must resolve to a repo in `epic_repo()`; to add a new epic, add a case there (this is the "project-level label" requirement). Current epics are all `STK` except `trd — Investment Tracker` (`TRD`), `MT Android App` (`MTA`) and `Podtelemetry — Run Audio` (`POD`).
 
 ### CLI gotchas (linear 2.0.0, verified 2026-06-20 — the helper targets this)
 
@@ -60,6 +60,26 @@ Capacity + DORA-style delivery metrics (SB-360). Unlike `stats`, this uses the *
 bash scripts/metrics.sh --days 30
 ```
 
+### Cycle report — `python3 scripts/cycle-report.py [--cycle N | --previous]`
+Planned vs **adhoc** split for a cycle: issues and points, completion per stream,
+adhoc share, and how many issues were created mid-cycle. Read-only.
+
+```bash
+python3 scripts/cycle-report.py              # active cycle
+python3 scripts/cycle-report.py --previous   # the one that just ended
+```
+
+The portfolio is pre-user, so unplanned work is most of the throughput — the
+`adhoc` label exists to measure that, not to scold it. Run this at every cycle
+boundary and plan the next cycle at roughly `100% − adhoc share` of capacity.
+
+Two things to watch in the output:
+- **Unestimated issues make the point totals lie.** The report names them; fill
+  them in before trusting the ratio.
+- **Adhoc typically completes at a higher rate than planned work** — it jumps the
+  queue by definition. If planned completion is much lower, the cycle was
+  over-committed, not the team under-delivering.
+
 ### Create — `/linear new <free text>`
 Infer a concise title, a short markdown description, and the `type` from the conversation. Detect `repo` from cwd (or pass `--epic` to derive it). Then **show the user the proposed title + labels + epic and confirm**, then file:
 
@@ -73,6 +93,23 @@ bash scripts/linear.sh new --title "Streak heatmap legend" \
   --type feature --epic "Goals & Multi-Metric Tracking" --body-file /tmp/issue.md
 ```
 The command prints the new `SB-N` URL — relay it. (`--repo` is optional; omit to auto-detect.)
+
+**Always set an estimate.** `linear.sh new` has no `--estimate` flag, so set it
+immediately after filing:
+
+```bash
+bash scripts/linear-gql.sh 'mutation { issueUpdate(id: "<uuid>", input: { estimate: 3 }) { success } }'
+```
+
+Fibonacci 1/2/3/5/8. A first guess is fine — revise at close if reality
+differed. Use `0` for anything closed as superseded, duplicate or won't-do, so
+velocity doesn't count work nobody did (`cycle-report.py` distinguishes a
+deliberate 0 from a missing estimate).
+
+Unestimated tickets are not a cosmetic gap: on 2026-07-28 backfilling 18 of them
+moved the cycle from an apparent 30 points to an actual 73, and adhoc's share of
+points from 34% to 58%. Point totals without estimates understate throughput by
+more than half and make capacity planning worthless.
 
 ### List — `/linear list [--all] [--epic E]`
 ```bash

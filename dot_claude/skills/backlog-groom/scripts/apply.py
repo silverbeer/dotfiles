@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Write an approved groom change set to Linear. The only step that mutates.
+
+Idempotent: re-reads each issue first and skips fields that already match, so
+running it twice is a no-op and a partial run can simply be re-run.
+
+    python3 apply.py --changes apply.json            # dry run, prints the plan
+    python3 apply.py --changes apply.json --confirm   # actually writes
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+GQL = Path.home() / ".claude/skills/linear-crud/scripts/linear-gql.sh"
+FIELDS = ("priority", "project", "estimate")
+
+
+def gql(query: str) -> dict:
+    out = subprocess.run(
+        ["bash", str(GQL), query], capture_output=True, text=True, check=True
+    ).stdout
+    payload = json.loads(out)
+    if "errors" in payload:
+        raise RuntimeError(payload["errors"])
+    return payload["data"]
+
+
+def current_state(ids: list[str]) -> dict[str, dict]:
+    numbers = ",".join(i.split("-")[1] for i in ids)
+    data = gql(
+        '{ issues(filter:{number:{in:[%s]},team:{key:{eq:"SB"}}}, first:250){ nodes{'
+        " id identifier priority estimate project{id name} } } }" % numbers
+    )
+    return {n["identifier"]: n for n in data["issues"]["nodes"]}
+
+
+def projects() -> dict[str, str]:
+    data = gql("{ projects(first:100){ nodes{ id name } } }")
+    return {n["name"]: n["id"] for n in data["projects"]["nodes"]}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--changes", required=True)
+    ap.add_argument("--confirm", action="store_true", help="required to write")
+    args = ap.parse_args()
+
+    changes = json.loads(Path(args.changes).read_text())["changes"]
+    if not changes:
+        print("nothing to apply")
+        return 0
+
+    live = current_state([c["id"] for c in changes])
+    known_projects = projects()
+
+    missing = [c["id"] for c in changes if c["id"] not in live]
+    if missing:
+        sys.exit(f"REFUSING: not found in Linear: {', '.join(missing)}")
+
+    unknown_epics = sorted(
+        {c["project"] for c in changes if c.get("project") and c["project"] not in known_projects}
+    )
+    if unknown_epics:
+        sys.exit(
+            "REFUSING: these epics do not exist in Linear yet — create them first "
+            "(and add them to epic_repo() in linear-crud/scripts/linear.sh):\n  "
+            + "\n  ".join(unknown_epics)
+        )
+
+    planned, skipped = [], 0
+    for c in changes:
+        cur = live[c["id"]]
+        fields = {}
+        if "priority" in c and cur["priority"] != c["priority"]:
+            fields["priority"] = c["priority"]
+        if "estimate" in c and cur["estimate"] != c["estimate"]:
+            fields["estimate"] = c["estimate"]
+        if "project" in c and (cur["project"] or {}).get("name") != c["project"]:
+            fields["projectId"] = known_projects[c["project"]]
+        if fields:
+            planned.append((c, cur, fields))
+        else:
+            skipped += 1
+
+    for c, _, fields in planned:
+        shown = {k: v for k, v in fields.items() if k != "projectId"}
+        if "projectId" in fields:
+            shown["project"] = c["project"]
+        print(f"  {c['id']:<8} {shown}  — {c['title'][:56]}")
+    print(f"\n{len(planned)} to update, {skipped} already correct")
+
+    if not args.confirm:
+        print("\ndry run — pass --confirm to write")
+        return 0
+
+    written = 0
+    for c, _, fields in planned:
+        parts = [f"{k}: {json.dumps(v)}" for k, v in fields.items()]
+        gql(
+            'mutation { issueUpdate(id: "%s", input: { %s }) { success } }'
+            % (live[c["id"]]["id"], ", ".join(parts))
+        )
+        written += 1
+        print(f"  updated {c['id']}")
+    print(f"\n{written} issues updated")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
