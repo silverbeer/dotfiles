@@ -83,4 +83,26 @@ the current work (not an in-PR TODO), briefly offer to capture it with the
 `todo` skill — one line, ask before adding. Don't nag; skip if the user is
 clearly busy or has declined recently.
 
+## Look it up before asserting it
+
+Do not state regulations, broker or vendor capabilities, product availability, or
+API surfaces from training data. Search first, then say it, and cite the source.
+
+Anything that would change **what gets built or funded** and depends on the
+outside world moving — a rule, a regulator, a broker, a pricing page, whether some
+product has an API — is exactly where the training cutoff lies most convincingly.
+The failure is silent: a confident, specific, plausible answer that is simply out
+of date.
+
+Worked example, 2026-08-01: three blockers were given against a live trading
+engine, and two were stale facts stated as certainties — that FINRA's pattern day
+trader rule capped day trades under $25k (eliminated 2026-06-04), and that
+Robinhood had no official API so any integration would be reverse-engineered and
+against ToS (they shipped an official agentic-trading MCP in June 2026). Both were
+corrected by the user with sources. The third blocker held, and the reason it held
+is the general lesson:
+
+**Arguments from the user's own measured data survive; arguments from recalled
+external facts decay.** When both are available, lead with the measurement.
+
 @RTK.md
