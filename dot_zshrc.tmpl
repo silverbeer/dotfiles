@@ -16,6 +16,14 @@ export SUPABASE_PG_URL="{{ onepasswordRead "op://Personal/Supabase MSA/credentia
 alias k='kubectl'
 export RESUME_DATA_DIR="{{ .chezmoi.homeDir }}/iCloud/resume-data"
 
+# trd engines. Each engine has its own DuckDB, deliberately separate from the
+# real ~/.trd — so a bare `trd engine status` reads a database with no engine in
+# it and answers "run 'trd engine init'", which is the one command that would
+# wreck the live config (it rewrites the whole row: universe back to the default
+# ten, flat_at_minute dropped). These aliases are how you avoid ever typing it.
+alias trde='TRD_HOME={{ .chezmoi.homeDir }}/.trd-engine trd'   # swing: 25 names, 10 x $100, 1d
+alias trdd='TRD_HOME={{ .chezmoi.homeDir }}/.trd-day trd'      # day: 20 names, 5 x $10, 15:55 flat
+
 export APP_ENV={{ dig "appEnv" "prod" . }}
 
 # Completion system. This used to live inside the OpenClaw block, so removing
