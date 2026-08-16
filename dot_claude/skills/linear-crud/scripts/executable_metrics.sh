@@ -24,7 +24,7 @@ echo "  SB DELIVERY METRICS — last ${DAYS}d"
 echo "════════════════════════════════════════════"
 
 # ---- Delivery (Linear) -----------------------------------------------------
-issues_json="$(bash "$GQL" "{ issues(first:250, filter:{completedAt:{gte:\"$CUTOFF\"}}){ nodes { identifier createdAt startedAt completedAt } } }" 2>/dev/null)"
+issues_json="$(bash "$GQL" "{ issues(first:250, filter:{completedAt:{gte:\"$CUTOFF\"}}){ nodes { identifier createdAt startedAt completedAt estimate labels{nodes{name}} } } }" 2>/dev/null)"
 
 echo "$issues_json" | jq -r --argjson weeks "$WEEKS" '
   def parse: sub("\\.[0-9]+Z$";"Z") | fromdateiso8601;
@@ -41,6 +41,27 @@ echo "$issues_json" | jq -r --argjson weeks "$WEEKS" '
     "▸ Cycle time (started → done)",
     (if ($cycle|length)>0 then "    avg \((($cycle|add/($cycle|length))*24*10|round)/10)h   median \((($cycle|median)*24*10|round)/10)h   (n=\($cycle|length))" else "    (no started timestamps)" end)
 '
+
+# ---- Autonomy split (SB-507) ----------------------------------------------
+# Which share of delivered work an agent drove, not whether an LLM touched it —
+# every commit here carries Co-Authored-By: Claude, so authorship proves nothing.
+echo "▸ Delivered by (autonomy)"
+echo "$issues_json" | jq -r '
+  # `label` is a jq keyword — this function must not be called that.
+  def drv($i): ($i.labels.nodes // []) | map(select(.name | startswith("driven:")))
+               | if length>0 then .[0].name[7:] else "unlabelled" end;
+  (.data.issues.nodes // []) as $n
+  | ($n | length) as $total
+  | if $total == 0 then "    (no completed issues in window)"
+    else
+      (["human","agent-supervised","agent-auto","unlabelled"]
+       | map(. as $k | ($n | map(select(drv(.) == $k))) as $rows
+             | select($rows|length > 0)
+             | "    \($k | . + (" " * (17 - length)))\($rows|length) issues  "
+               + "\($rows | map(.estimate // 0) | add) pts  "
+               + "\((($rows|length)/$total*100|round))%")
+       | .[])
+    end'
 
 # ---- Deploy frequency + change-failure (GitHub, org-wide) ------------------
 echo "▸ Deploy frequency (merged PRs → main, org-wide proxy)"
