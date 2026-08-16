@@ -20,6 +20,11 @@ from pathlib import Path
 
 GQL = Path.home() / ".claude/skills/linear-crud/scripts/linear-gql.sh"
 ADHOC = "adhoc"
+DRIVEN_PREFIX = "driven:"
+# Ordered worst-to-best on the autonomy climb; progress is the distribution
+# moving down this list over cycles, which is why it is three values and not a
+# human/agent boolean.
+DRIVEN_ORDER = ["human", "agent-supervised", "agent-auto"]
 
 # Two queries on purpose: cycles-with-issues in one shot blows Linear's
 # complexity budget (~12k against a 10k ceiling).
@@ -86,6 +91,15 @@ def main() -> int:
     def is_adhoc(i) -> bool:
         return ADHOC in {n["name"] for n in i["labels"]["nodes"]}
 
+    def driven(i) -> str:
+        """Autonomy of delivery (SB-507). Orthogonal to planned/adhoc — an adhoc
+        ticket can perfectly well be agent-delivered, so the two are reported as
+        separate slices and never merged."""
+        for n in i["labels"]["nodes"]:
+            if n["name"].startswith(DRIVEN_PREFIX):
+                return n["name"][len(DRIVEN_PREFIX):]
+        return "unlabelled"
+
     def done(i) -> bool:
         return i["state"]["type"] == "completed"
 
@@ -122,6 +136,22 @@ def main() -> int:
         else:
             print()
         print(f"  created mid-cycle: {len(born_in_cycle)} of {len(issues)}")
+
+    # Autonomy slice (SB-507). Reported over COMPLETED work only: an unfinished
+    # ticket has not been delivered by anyone yet, so counting its label would
+    # credit an agent for work still in Todo.
+    if total_done:
+        counted = {d: [i for i in total_done if driven(i) == d] for d in DRIVEN_ORDER}
+        counted["unlabelled"] = [i for i in total_done if driven(i) == "unlabelled"]
+        shown = {k: v for k, v in counted.items() if v}
+        if shown:
+            print("\n  delivered by:")
+            for name, rows in shown.items():
+                pct = 100 * pts(rows) / pts(total_done) if pts(total_done) else 0
+                print(f"      {name:<17} {len(rows):>2} issues  {pts(rows):>3} pts  {pct:>3.0f}%")
+            if counted["unlabelled"]:
+                print("      ⚠ unlabelled work predates the driven group, or was filed"
+                      " outside linear.sh new")
 
     # Estimates are the weak spot — unestimated work makes points meaningless.
     # `is None`, not falsy: 0 is a deliberate estimate meaning "closed as
