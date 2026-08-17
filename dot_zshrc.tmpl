@@ -10,9 +10,23 @@ export PATH="{{ .chezmoi.homeDir }}/.local/bin:$PATH"
 # Google Cloud SDK
 export PATH="/opt/homebrew/share/google-cloud-sdk/bin:$PATH"
 
-# Supabase PostgreSQL connection for MCP
-export SUPABASE_PG_URL="{{ onepasswordRead "op://Personal/Supabase MSA/credential" }}"
-
+# Supabase PostgreSQL connection for MCP.
+#
+# Read through `output` rather than `onepasswordRead` on purpose. A template
+# renders on *every* chezmoi invocation, so `onepasswordRead` failing against a
+# locked vault aborted the whole command — including read-only `status` and
+# `diff`, which are the only things that surface drift between ~/ and the source.
+# On the mac mini that meant drift went unnoticed for weeks (SB-514).
+#
+# `|| true` keeps the exit status clean, so a locked vault degrades to an unset
+# variable instead of an error. No single secret should be able to break `status`.
+{{ $pgUrl := output "sh" "-c" "op read \"op://Personal/Supabase MSA/credential\" 2>/dev/null || true" | trim -}}
+{{ if $pgUrl -}}
+export SUPABASE_PG_URL="{{ $pgUrl }}"
+{{ else -}}
+# SUPABASE_PG_URL is unset: 1Password was locked when this file was last
+# rendered. Unlock `op` and re-run `chezmoi apply` to restore it.
+{{ end }}
 alias k='kubectl'
 export RESUME_DATA_DIR="{{ .chezmoi.homeDir }}/iCloud/resume-data"
 
