@@ -17,14 +17,13 @@ The helper lives next to this file: `scripts/linear.sh`. Run it with `bash`. It 
 
 ### Label vocabulary
 
-- `repo` (pick one, required): `MT` missing-table · `MTA` missing-table Android app · `BOOT` missingtable-platform-bootstrap · `MS` match-scraper · `MSA` match-scraper-agent · `QB` qualityplaybook · `STK` myrunstreak · `JT` janitor · `DOT` dotfiles · `TODO` todo (github.com/silverbeer/todo) · `TRD` trd (investment tracker) · `POD` podtelemetry (run-audio capture service). Auto-detected from the current git repo; pass `--repo` to override, or `--epic` to derive it from the epic.
+- `repo` (pick one, required): `MT` missing-table · `MTA` missing-table Android app · `BOOT` missingtable-platform-bootstrap · `MS` match-scraper · `MSA` match-scraper-agent · `QB` qualityplaybook · `STK` myrunstreak · `JT` janitor · `DOT` dotfiles · `TODO` todo (github.com/silverbeer/todo) · `TRD` trd (investment tracker) · `BET` bet (sports betting intelligence) · `BETC` bet-collect (private sportsbook acquisition layer) · `POD` podtelemetry (run-audio capture service). Auto-detected from the current git repo; pass `--repo` to override, or `--epic` to derive it from the epic.
 - `type` (pick one, required): `bug` · `feature` · `chore` (maintenance/refactor, no behavior change) · `docs` · `infra` (CI/k8s/helm/terraform) · `security`.
-- `driven` (pick one, auto-applied): `driven:human` · `driven:agent-supervised` · `driven:agent-auto`. **Autonomy of delivery, not whether an LLM touched the code** — every commit in every silverbeer repo already carries `Co-Authored-By: Claude`, so authorship cannot tell the two apart. `linear.sh new` stamps `driven:human` unless `--driven` says otherwise; an agent promotes its own ticket with `linear.sh driven SB-N agent-supervised` when it opens the PR.
 - area (flat, optional, multi): e.g. `backend`, `frontend`, `db`, `auth`, `qop`, `scraper-integration`. Add with repeated `--label`.
 
 ### Epics (Linear projects)
 
-Linear has no native "Epic" — its **Project** is the epic. Run `bash scripts/linear.sh epics` to list them with the repo each maps to. Pass the exact name to `--epic`. Every epic must resolve to a repo in `epic_repo()`; to add a new epic, add a case there (this is the "project-level label" requirement). Current epics are all `STK` except `trd — Investment Tracker` (`TRD`), `MT Android App` (`MTA`) and `Podtelemetry — Run Audio` (`POD`).
+Linear has no native "Epic" — its **Project** is the epic. Run `bash scripts/linear.sh epics` to list them with the repo each maps to. Pass the exact name to `--epic`. Every epic must resolve to a repo in `epic_repo()`; to add a new epic, add a case there (this is the "project-level label" requirement). Current epics are all `STK` except the `BET — *` epics (`BET`, but `BET — Acquisition & Capture` maps to `BETC`), `trd — Investment Tracker` (`TRD`), `MT Android App` (`MTA`) and `Podtelemetry — Run Audio` (`POD`).
 
 ### CLI gotchas (linear 2.0.0, verified 2026-06-20 — the helper targets this)
 
@@ -54,6 +53,34 @@ bash scripts/linear.sh stats            # last 7 days
 bash scripts/linear.sh stats --days 30  # last 30 days
 ```
 Computed from `issue query --all-states -j`. **Caveat:** this CLI has no `completedAt`, so "shipped in window" and "avg ship time" use `updatedAt` as the close-time proxy — directional, not exact.
+
+### Delivery board — `/linear board`
+Renders a self-contained HTML board for a repo: **ready queue** (tickets with no
+*open* blocker — what can actually be started right now) and **critical path**
+(longest unbroken chain of `blocks` relations), plus epic cards and a full
+ledger with a live blocked-by column. Linear has no view for either of the first
+two. Read-only.
+
+```bash
+bash scripts/linear.sh board                          # repo detected from cwd
+bash scripts/linear.sh board --repo BET --repo BETC   # several labels at once
+bash scripts/linear.sh board --epic "BET — Import Platform"
+bash scripts/linear.sh board --out /tmp/mt.html
+```
+
+Prints the path of the file it wrote. Everything is computed from Linear — epic
+order comes from the project `sortOrder`, there is no per-project config.
+
+Degrades cleanly: a repo with no `blocks` relations renders epics + ledger and
+says so instead of showing an empty critical path. If the graph contains a
+**cycle** the board leads with it — a cycle makes every ticket in the loop
+permanently unstartable, and Linear will not warn you.
+
+The board is only worth much once dependencies are actually modelled. Most repos
+have none; `BET` is the worked example (108 relations).
+
+**Publishing is manual** — the script writes a file; turning it into a shareable
+Artifact is a Claude tool call, not something the script can do.
 
 ### DORA metrics — `bash scripts/metrics.sh [--days N]`
 Capacity + DORA-style delivery metrics (SB-360). Unlike `stats`, this uses the **Linear API** (`linear-gql.sh`) for real `createdAt/startedAt/completedAt` → true lead time + cycle time, plus deploy frequency (merged-PRs-to-main proxy via `gh search prs`) and a revert/hotfix change-failure proxy. MTTR is not implemented (no incident tracking yet). Read-only.
@@ -93,10 +120,6 @@ bash scripts/linear.sh new --title "Roster CSV import rejects BOM" \
 bash scripts/linear.sh new --title "Streak heatmap legend" \
   --type feature --epic "Goals & Multi-Metric Tracking" --body-file /tmp/issue.md
 ```
-
-Every issue also gets a `driven` label; it defaults to `driven:human`, which is correct for
-anything filed from an interactive session. Pass `--driven agent-supervised` (or set
-`LINEAR_DRIVEN`) only when an agent filed the ticket unprompted.
 The command prints the new `SB-N` URL — relay it. (`--repo` is optional; omit to auto-detect.)
 
 **Always set an estimate.** `linear.sh new` has no `--estimate` flag, so set it
@@ -129,25 +152,6 @@ States: `Backlog → Todo → In Progress → In Review → Done` (or `Canceled`
 ```bash
 bash scripts/linear.sh move SB-42 "In Progress"
 ```
-
-### Autonomy — `/linear driven SB-N <value>`
-Re-stamp who drove the work. `driven` is a mutually-exclusive group, so this rewrites the
-issue's whole label set (via `set-driven.py`) rather than appending — the CLI's `-l` would
-fail with `labelIds not exclusive child labels`. Idempotent.
-
-```bash
-bash scripts/linear.sh driven SB-42 agent-supervised   # agent built it, human merges
-bash scripts/linear.sh driven SB-42 agent-auto         # agent delivered + QE verified it
-```
-
-**When an agent should call this:** at PR-open time, on its own ticket. Tickets are filed
-`driven:human` by default, so an agent that forgets to promote its work under-reports
-itself — which is the safe direction to fail.
-
-Both `cycle-report.py` and `metrics.sh` slice completed work by this label. The slice is
-over *completed* issues only: an unfinished ticket has not been delivered by anyone yet.
-It is orthogonal to `adhoc` — an adhoc ticket can be agent-delivered, and the two are
-never merged into one number.
 
 ### Link — `/linear link SB-N [PR#]`
 Adds `Fixes SB-N` to a PR body (idempotent). Defaults to the current branch's open PR:
