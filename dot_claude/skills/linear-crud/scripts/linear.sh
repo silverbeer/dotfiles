@@ -7,19 +7,17 @@
 #   - assignee = silverbeer.io, ALWAYS (override: LINEAR_ASSIGNEE)
 #   - repo label (group) detected from the current git repo
 #   - type label (group) required on create
-#   - driven label (group) = autonomy of delivery; defaults to driven:human
 #   - epic = Linear project; every epic MUST map to a repo label (epic_repo)
 #
 # Subcommands:
 #   repo-label                  print the repo label inferred from cwd
 #   epics                       list Linear projects (epics) + their mapped repo
+#   board [--repo L] [--epic E] render a delivery board (ready queue + critical path)
 #   stats [--days N]            momentum dashboard (totals, velocity, age, sparkline)
-#   new   --title T (--body B | --body-file F) --type TYPE [--repo R] [--epic E]
-#         [--driven human|agent-supervised|agent-auto] [--label L ...]
+#   new   --title T (--body B | --body-file F) --type TYPE [--repo R] [--epic E] [--label L ...]
 #   branch SB-N                 checkout silverbeer/sb-n-<slug> (triggers auto → In Progress)
 #   list  [--all] [--repo R] [--epic E]   my issues (open by default)
 #   move  SB-N "State"          change workflow state
-#   driven SB-N VALUE           re-stamp autonomy (human|agent-supervised|agent-auto)
 #   link  SB-N [PR#]            add "Fixes SB-N" to a PR body
 #   audit-unassigned [--fix]    SB issues not assigned to the default assignee
 #
@@ -69,6 +67,8 @@ repo_label() {
     janitor)                              echo "JT" ;;
     dotfiles)                             echo "DOT" ;;
     todo)                                 echo "TODO" ;;
+    bet-collect|bet-capture)             echo "BETC" ;;
+    bet|bet-*|*betting*)                  echo "BET" ;;
     trd*|*investment*)                    echo "TRD" ;;
     podtelemetry*|pod)                    echo "POD" ;;
     *) return 1 ;;
@@ -81,6 +81,8 @@ repo_label() {
 epic_repo() {
   local key; key="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   case "$key" in
+    *acquisition*|*capture*)               echo "BETC" ;;
+    bet\ *|bet-*)                           echo "BET" ;;
     *goals*|*multi-metric*)                 echo "STK" ;;
     *byok*|*multi-source*|*import*)         echo "STK" ;;
     *social*|*community*)                   echo "STK" ;;
@@ -90,12 +92,28 @@ epic_repo() {
     *quality*|*ci*)                         echo "STK" ;;
     *vision*|*roadmap*)                     echo "STK" ;;
     *daily*coach*|*route*)                  echo "STK" ;;
-    *paper*)                                echo "MT"  ;;  # spans MT + STK; MT is the deadline half
     *podtelemetry*|*run*audio*)             echo "POD" ;;
     *android*)                              echo "MTA" ;;
     *trd*|*investment*)                     echo "TRD" ;;
     *) return 1 ;;
   esac
+}
+
+# Render a delivery board (ready queue + critical path) for one or more repos.
+# Read-only. Writes an HTML file and prints its path.
+cmd_board() {
+  local args=() repo=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) args+=(--repo "$2"); repo="$2"; shift 2 ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  if [ -z "$repo" ]; then
+    repo="$(repo_label || die "board: could not detect repo from $(pwd) — pass --repo")"
+    args+=(--repo "$repo")
+  fi
+  python3 "$SCRIPT_DIR/board.py" "${args[@]}"
 }
 
 cmd_repo_label() { repo_label || die "unknown repo '$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")' — pass --repo explicitly"; }
@@ -117,7 +135,7 @@ cmd_epics() {
 }
 
 cmd_new() {
-  local title="" body="" body_file="" type="" repo="" epic="" driven="" extra_labels=()
+  local title="" body="" body_file="" type="" repo="" epic="" extra_labels=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --title)     title="$2"; shift 2 ;;
@@ -126,26 +144,12 @@ cmd_new() {
       --type)      type="$2"; shift 2 ;;
       --repo)      repo="$2"; shift 2 ;;
       --epic)      epic="$2"; shift 2 ;;
-      --driven)    driven="$2"; shift 2 ;;
       --label)     extra_labels+=("$2"); shift 2 ;;
       *) die "new: unknown arg '$1'" ;;
     esac
   done
   [[ -n "$title" ]] || die "new: --title required"
   [[ -n "$type"  ]] || die "new: --type required (bug|feature|chore|docs|infra|security)"
-
-  # Autonomy attribution (SB-507). Defaults to human because that is what an
-  # interactive session is; an agent must opt in explicitly, and the only way to
-  # do so is to pass the flag. A human cannot emit it by accident, which is the
-  # whole point — every commit already carries Co-Authored-By: Claude, so
-  # authorship cannot distinguish autonomy. The label can only mean what the
-  # caller asserts.
-  driven="${driven:-${LINEAR_DRIVEN:-human}}"
-  driven="${driven#driven:}"
-  case "$driven" in
-    human|agent-supervised|agent-auto) ;;
-    *) die "new: --driven must be human|agent-supervised|agent-auto (got '$driven')" ;;
-  esac
 
   # The epic supplies the default repo label (the project-level label). An
   # explicit --repo wins: some epics span repos — Podtelemetry is a POD service
@@ -168,7 +172,7 @@ cmd_new() {
   # Labels are REPEATED -l flags on this CLI (repo + type + any area labels).
   local args=(issue create --title "$title" --team "$LINEAR_TEAM"
               --assignee "$LINEAR_ASSIGNEE" --no-interactive
-              -l "$repo" -l "$type" -l "driven:$driven")
+              -l "$repo" -l "$type")
   local l; for l in "${extra_labels[@]:-}"; do [[ -n "$l" ]] && args+=(-l "$l"); done
   [[ -n "$epic" ]] && args+=(--project "$epic")
   if [[ -n "$body_file" ]]; then
@@ -213,27 +217,6 @@ cmd_move() {
   local id="${1:-}" state="${2:-}"
   [[ -n "$id" && -n "$state" ]] || die "move: usage: move SB-N \"State\""
   linear issue update "$id" --state "$state"
-}
-
-# Re-stamp the autonomy label on an existing issue (SB-507).
-#
-# `driven` is a mutually-exclusive group, so the CLI's `-l` would reject a second
-# child ("labelIds not exclusive child labels"). The whole label set has to be
-# rewritten with the old driven:* value dropped — which needs GraphQL, not the CLI.
-#
-# This is the hook an agent calls when it opens a PR: it starts life as
-# driven:human (filed by a human) and promotes itself to agent-supervised.
-cmd_driven() {
-  local id="${1:-}" value="${2:-}"
-  [[ -n "$id" && -n "$value" ]] || die "driven: usage: driven SB-N human|agent-supervised|agent-auto"
-  value="${value#driven:}"
-  case "$value" in
-    human|agent-supervised|agent-auto) ;;
-    *) die "driven: value must be human|agent-supervised|agent-auto (got '$value')" ;;
-  esac
-  local num="${id##*-}"
-  LINEAR_DRIVEN_VALUE="$value" LINEAR_ISSUE_NUM="$num" LINEAR_TEAM="$LINEAR_TEAM" \
-    python3 "$SCRIPT_DIR/set-driven.py"
 }
 
 # Add "Fixes SB-N" to a PR body (idempotent). PR# optional — defaults to the
@@ -383,12 +366,12 @@ sub="${1:-}"; shift || true
 case "$sub" in
   repo-label)        cmd_repo_label "$@" ;;
   epics)             cmd_epics "$@" ;;
+  board)             cmd_board "$@" ;;
   stats)             cmd_stats "$@" ;;
   new)               cmd_new "$@" ;;
   branch)            cmd_branch "$@" ;;
   list)              cmd_list "$@" ;;
   move)              cmd_move "$@" ;;
-  driven)            cmd_driven "$@" ;;
   link)              cmd_link "$@" ;;
   audit-unassigned)  cmd_audit_unassigned "$@" ;;
   ""|-h|--help) sed -n '2,33p' "$0" ;;
