@@ -95,6 +95,7 @@ epic_repo() {
     *quality*|*ci*)                         echo "STK" ;;
     *vision*|*roadmap*)                     echo "STK" ;;
     *daily*coach*|*route*)                  echo "STK" ;;
+    *paper*)                                echo "MT"  ;;  # spans MT + STK; MT is the deadline half
     *podtelemetry*|*run*audio*)             echo "POD" ;;
     *android*)                              echo "MTA" ;;
     *trd*|*investment*)                     echo "TRD" ;;
