@@ -30,6 +30,12 @@
 .claude/settings.json.bak
 .claude/settings.local.json
 
+# Repo documentation — belongs in the repo, not deployed into $HOME.
+# Without these, chezmoi treats them as target files and writes ~/README.md and
+# ~/SETUP.md (it did, for months).
+README.md
+SETUP.md
+
 # Secrets — never commit
 .env
 .env.*

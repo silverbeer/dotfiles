@@ -4,6 +4,20 @@
 `~/gitrepos/dotfiles/dot_claude/`. `~/.claude/` is the *deployed copy* — editing
 it changes only this machine.
 
+**Confirm that before trusting it.** chezmoi's default source is
+`~/.local/share/chezmoi`, and `chezmoi init` recreates it there. If that clone
+still exists it becomes a second, silently divergent copy: edits land in the
+git repo, chezmoi keeps applying the other one, and merged PRs never reach the
+machine. On the mac mini it sat four commits behind for weeks.
+
+```bash
+chezmoi source-path    # MUST print ~/gitrepos/dotfiles
+```
+
+If it prints anything else, fix `sourceDir` in `~/.config/chezmoi/chezmoi.toml`
+before editing anything. That file is bootstrap config: it cannot manage itself,
+so it is per-machine and is documented in SETUP.md rather than tracked here.
+
 After changing anything under `~/.claude/`:
 
 ```bash
@@ -21,6 +35,68 @@ Changes land via a PR to `silverbeer/dotfiles`. Other machines pick them up with
 
 Memory lives in `~/.claude/projects/<slug>/memory/` and is **not** currently
 synced between machines.
+
+## 1Password: which vault, and what the errors mean
+
+Agent shells (`CLAUDECODE=1`, and any non-interactive zsh) authenticate `op`
+with a **service-account token**, exported from `~/.zshenv`, read from
+`~/.config/op/agent-token`. Fully headless — no biometric, no "access data from
+other apps" prompt. Interactive terminals are unchanged and still use the
+desktop app.
+
+**`agents` is the only vault an agent can see.** Use `op://agents/<item>/<field>`.
+
+**An `op://Personal/...` failure means wrong vault. It is not a lock, and
+retrying will never fix it.** A 1Password service account can never be granted
+the built-in Personal/Private vault — that is a product constraint, not a
+permission that someone forgot to add. Do not retry, do not try to unlock, do
+not ask the user to touch the fingerprint reader. Rewrite the reference or, if
+the item genuinely only exists in Personal, stop and say so.
+
+**Access is read-only.** `op item create`, `edit` and `move` all fail. Work that
+needs a write has to happen in a human terminal — stop and ask.
+
+**The token expires 2026-11-19.** An auth failure on or near that date is expiry,
+not a bug.
+
+### Telling the three failures apart
+
+They are indistinguishable from the error text alone, so check state instead:
+
+```bash
+[ -r ~/.config/op/agent-token ] || echo "NO TOKEN — machine not provisioned"
+op whoami        # 'User Type: SERVICE_ACCOUNT' = token present and valid
+op vault list    # exactly one row, 'agents', is the healthy state
+```
+
+- **Absent** — `~/.config/op/agent-token` missing. This machine was never
+  provisioned; the token cannot bootstrap itself from 1Password. See SETUP.md
+  "Step 2b" and ask the user to run it. Nothing you can do from an agent shell.
+- **Wrong vault** — `op whoami` fine, `op vault list` shows `agents`, but the
+  read fails. The reference is pointing at Personal. Fix the reference.
+- **Expired** — `op whoami` itself fails on a token file that exists. Issue a
+  replacement service-account token and rewrite the file.
+
+### Things that are still not in the vault
+
+- `mt-android-release` remains in `Personal`. `scripts/set-release-secrets.sh`
+  and the android `set-release-secrets.sh` read it and honour `OP_VAULT` /
+  `OP_ITEM` — leave their defaults alone.
+- `Supabase MSA` remains in `Personal`, which is why `SUPABASE_PG_URL` is
+  provisioned to `~/.config/supabase/pg-url` from a human terminal rather than
+  read at apply time.
+- `mt` prod login still reads `TEST_USER_PASSWORD_TOM` from `backend/.env.prod`,
+  **not** 1Password. `mt login` stops at the first source it finds, so the vault
+  path is inert for `mt-prod` until SB-840 removes those four keys. Changing the
+  vault item will appear to do nothing.
+
+### Never print a secret
+
+Agent output goes to a permanent transcript. Verify by exit code, byte count or
+a hash prefix — never by value, and never with `cat` on a file that might hold
+one. `${VAR:-x}` expands to the *value* when VAR is set; to test whether a
+variable is set, use `[ -n "$VAR" ] && echo set`. Both of those mistakes have
+already leaked a live credential here.
 
 ## The delivery loop
 
