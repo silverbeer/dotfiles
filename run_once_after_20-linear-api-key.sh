@@ -5,7 +5,7 @@
 set -uo pipefail
 
 KEY_FILE="$HOME/.config/linear/gql-key"
-OP_REF='op://Personal/linear_api_key/password'
+OP_REF='op://agents/linear_api_key/password'
 
 if [ -f "$KEY_FILE" ] && [ -s "$KEY_FILE" ]; then
   echo "linear gql-key already present — skipping"

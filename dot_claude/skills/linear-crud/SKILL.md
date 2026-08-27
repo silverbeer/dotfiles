@@ -19,6 +19,7 @@ The helper lives next to this file: `scripts/linear.sh`. Run it with `bash`. It 
 
 - `repo` (pick one, required): `MT` missing-table · `MTA` missing-table Android app · `BOOT` missingtable-platform-bootstrap · `MS` match-scraper · `MSA` match-scraper-agent · `QB` qualityplaybook · `STK` myrunstreak · `JT` janitor · `DOT` dotfiles · `TODO` todo (github.com/silverbeer/todo) · `TRD` trd (investment tracker) · `BET` bet (sports betting intelligence) · `BETC` bet-collect (private sportsbook acquisition layer) · `POD` podtelemetry (run-audio capture service). Auto-detected from the current git repo; pass `--repo` to override, or `--epic` to derive it from the epic.
 - `type` (pick one, required): `bug` · `feature` · `chore` (maintenance/refactor, no behavior change) · `docs` · `infra` (CI/k8s/helm/terraform) · `security`.
+- `driven` (pick one, auto-applied): `driven:human` · `driven:agent-supervised` · `driven:agent-auto`. **Autonomy of delivery, not whether an LLM touched the code** — every commit in every silverbeer repo already carries `Co-Authored-By: Claude`, so authorship cannot tell the two apart. `linear.sh new` stamps `driven:human` unless `--driven` says otherwise; an agent promotes its own ticket with `linear.sh driven SB-N agent-supervised` when it opens the PR.
 - area (flat, optional, multi): e.g. `backend`, `frontend`, `db`, `auth`, `qop`, `scraper-integration`. Add with repeated `--label`.
 
 ### Epics (Linear projects)
@@ -120,6 +121,10 @@ bash scripts/linear.sh new --title "Roster CSV import rejects BOM" \
 bash scripts/linear.sh new --title "Streak heatmap legend" \
   --type feature --epic "Goals & Multi-Metric Tracking" --body-file /tmp/issue.md
 ```
+
+Every issue also gets a `driven` label; it defaults to `driven:human`, which is correct for
+anything filed from an interactive session. Pass `--driven agent-supervised` (or set
+`LINEAR_DRIVEN`) only when an agent filed the ticket unprompted.
 The command prints the new `SB-N` URL — relay it. (`--repo` is optional; omit to auto-detect.)
 
 **Always set an estimate.** `linear.sh new` has no `--estimate` flag, so set it
@@ -152,6 +157,25 @@ States: `Backlog → Todo → In Progress → In Review → Done` (or `Canceled`
 ```bash
 bash scripts/linear.sh move SB-42 "In Progress"
 ```
+
+### Autonomy — `/linear driven SB-N <value>`
+Re-stamp who drove the work. `driven` is a mutually-exclusive group, so this rewrites the
+issue's whole label set (via `set-driven.py`) rather than appending — the CLI's `-l` would
+fail with `labelIds not exclusive child labels`. Idempotent.
+
+```bash
+bash scripts/linear.sh driven SB-42 agent-supervised   # agent built it, human merges
+bash scripts/linear.sh driven SB-42 agent-auto         # agent delivered + QE verified it
+```
+
+**When an agent should call this:** at PR-open time, on its own ticket. Tickets are filed
+`driven:human` by default, so an agent that forgets to promote its work under-reports
+itself — which is the safe direction to fail.
+
+Both `cycle-report.py` and `metrics.sh` slice completed work by this label. The slice is
+over *completed* issues only: an unfinished ticket has not been delivered by anyone yet.
+It is orthogonal to `adhoc` — an adhoc ticket can be agent-delivered, and the two are
+never merged into one number.
 
 ### Link — `/linear link SB-N [PR#]`
 Adds `Fixes SB-N` to a PR body (idempotent). Defaults to the current branch's open PR:
