@@ -1,0 +1,54 @@
+# ~/.zshenv — read by EVERY zsh, interactive or not, and before ~/.zshrc.
+#
+# Two kinds of thing belong here and nothing else:
+#   1. Credentials a NON-interactive shell needs. Agent shells, MCP servers and
+#      `zsh -c` never source ~/.zshrc, so anything they depend on has to live
+#      here or it simply is not there.
+#   2. Nothing that prints. A stray echo in this file corrupts every scp, rsync
+#      and `ssh host command` on the machine.
+#
+# No secret literal is ever written into this file. Every value below is read
+# from a 0600 file under ~/.config that a run_once script provisions from
+# 1Password. That separation is the whole reason this file can be tracked in a
+# public repo, and it must survive any future edit.
+
+# --- Linear personal API key -------------------------------------------------
+# Provisioned by run_once_after_20-linear-api-key.sh from op://agents/linear_api_key.
+# Read from the file rather than shelling out to `op` here: .zshenv runs on every
+# single zsh invocation, so a network round-trip per shell is not affordable.
+_linear_key=~/.config/linear/gql-key
+[[ -r $_linear_key ]] && export LINEAR_API_KEY="$(<$_linear_key)"
+unset _linear_key
+
+# --- Supabase connection string ----------------------------------------------
+# Provisioned by run_once_before_21-supabase-pg-url.sh. This used to be rendered
+# into ~/.zshrc by a chezmoi template, which broke once agent shells switched to
+# a service-account token: a service account cannot see the Personal vault, so
+# rendering silently produced an empty value and `chezmoi apply` from an agent
+# shell rewrote ~/.zshrc without the variable. Reading a file at shell start
+# instead means apply never touches the secret at all.
+_supabase_url=~/.config/supabase/pg-url
+[[ -r $_supabase_url ]] && export SUPABASE_PG_URL="$(<$_supabase_url)"
+unset _supabase_url
+
+# --- 1Password auth split (see: agent popup storm, 2026-08-26) ---------------
+# Agent + headless shells authenticate with a service-account token: fully
+# headless, so `op` never talks to the 1Password desktop app. That contact is
+# what raised two prompts on *every* invocation under Supacode — a macOS
+# "access data from other apps" TCC prompt (op reads 1Password's group
+# container) and 1Password's own "allow zmx CLI access" (its client cache is
+# keyed on the calling process tree, and Claude Code spawns a fresh one per
+# command, so the cache never hit).
+# Interactive shells deliberately keep biometrics: one unlock per terminal is
+# cheap, and the token is a bearer secret we don't want backing a human session.
+#
+# The token file is NOT provisioned by chezmoi and never can be — it is the one
+# credential that cannot bootstrap itself from 1Password. A new machine gets it
+# by hand; see SETUP.md "Step 2b". Absence is silent and harmless here: `op`
+# simply falls back to the desktop app, which is correct for a human terminal
+# and merely unavailable for an agent one.
+_op_token=~/.config/op/agent-token
+if [[ -r $_op_token && ( -n $CLAUDECODE || ! -o interactive ) ]]; then
+  export OP_SERVICE_ACCOUNT_TOKEN="$(<$_op_token)"
+fi
+unset _op_token

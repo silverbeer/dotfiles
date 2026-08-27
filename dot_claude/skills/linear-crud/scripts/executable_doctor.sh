@@ -41,7 +41,7 @@ if [ -f "$KEY_FILE" ]; then
     failf "linear-gql.sh API call failed" "key invalid/expired — re-create gql-key from op (see below)"
   fi
 else
-  failf "gql-key missing at $KEY_FILE" "op read 'op://Personal/linear_api_key/password' > $KEY_FILE  (then chmod 600)"
+  failf "gql-key missing at $KEY_FILE" "op read 'op://agents/linear_api_key/password' > $KEY_FILE  (then chmod 600)"
 fi
 
 echo "── skills + repos ───────────────────────"

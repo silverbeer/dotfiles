@@ -16,7 +16,15 @@ cur="$(cat)"; [ -z "$cur" ] && cur='{}'
 
 canonical=$(cat <<'JSON'
 {
-  "permissions": { "allow": ["Bash","Read","Glob","Grep","Edit","Write","mcp__supabase-sql__run_sql"] },
+  "permissions": { "allow": ["Bash","Read","Glob","Grep","Edit","Write","mcp__supabase-sql__run_sql",
+    "mcp__paper",
+    "Bash(linear:*)",
+    "Bash(bash {{ .chezmoi.homeDir }}/.claude/skills/linear-crud/scripts/linear.sh:*)",
+    "Bash(bash {{ .chezmoi.homeDir }}/.claude/skills/linear-crud/scripts/linear-gql.sh:*)",
+    "Bash(bash {{ .chezmoi.homeDir }}/.claude/skills/linear-crud/scripts/metrics.sh:*)",
+    "Bash(bash {{ .chezmoi.homeDir }}/.claude/skills/linear-crud/scripts/doctor.sh:*)",
+    "Bash(python3 {{ .chezmoi.homeDir }}/.claude/skills/linear-crud/scripts/cycle-report.py:*)",
+    "Bash(~/.claude/skills/linear-crud/scripts/linear.sh:*)"] },
   "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "{{ .chezmoi.homeDir }}/.claude/hooks/rtk-rewrite.sh" } ] } ] },
   "statusLine": { "type": "command", "command": "{{ .chezmoi.homeDir }}/.claude/statusLine.sh" },
   "enabledPlugins": { "warp@claude-code-warp": true, "caveman@caveman": true },
