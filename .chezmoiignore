@@ -3,6 +3,16 @@
 # NOTE: .claude/skills/* is ignored wholesale; every skill that should sync
 # MUST have a `!.claude/skills/<name>` exception below, or `chezmoi add`
 # silently skips it. See README "Adding a new skill".
+#
+# CI enforces this both ways (.github/scripts/check-skill-exceptions.sh): every
+# dot_claude/skills/<name>/ must have managed FILES in `chezmoi managed`, and
+# every exception line must have a matching source dir. Counting files, not just
+# the directory entry, is deliberate: a `.claude/skills/<name>/**` rule anywhere
+# below re-ignores the contents while chezmoi goes on listing the directory, so
+# the skill would sync nothing and still look managed.
+# Do not "simplify" this file —
+# dropping an exception here is invisible locally and only shows up as a skill
+# that quietly stopped syncing to the other Mac.
 .claude/cache
 .claude/sessions
 .claude/history.jsonl
@@ -35,6 +45,16 @@
 # ~/SETUP.md (it did, for months).
 README.md
 SETUP.md
+
+# CI config — repo-only. These document intent; they are NOT a second line of
+# defence. They name the DOTTED targets, and chezmoi skipping dot-prefixed
+# source entries is why those targets never exist in the first place. Rename
+# .ruff.toml to ruff.toml and the target becomes `ruff.toml`, which matches
+# nothing here and lands in $HOME — measured, not assumed.
+# check-no-ci-config-in-home.sh is the actual guard.
+.ruff.toml
+.gitleaks.toml
+.github
 
 # Secrets — never commit
 .env

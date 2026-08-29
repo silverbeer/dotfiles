@@ -12,7 +12,13 @@ Usage:
 
 Reads through linear-gql.sh (same auth as the `linear` CLI). Read-only.
 """
-import argparse, json, subprocess, sys, html, pathlib, functools
+import argparse
+import functools
+import html
+import json
+import pathlib
+import subprocess
+import sys
 from collections import defaultdict
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -101,14 +107,15 @@ def render(issues, cycle, labels, title, team):
                           if r["type"] == "blocks" and r["issue"]["state"]["name"] != "Done"]
         i["_blocks"] = [r["relatedIssue"]["identifier"] for r in i["relations"]["nodes"]
                         if r["type"] == "blocks"]
-        i["_repo"] = next((l["name"] for l in i["labels"]["nodes"] if l["name"] in GH), "")
-        i["_type"] = next((l["name"] for l in i["labels"]["nodes"] if l["name"] in TYPES), "")
+        i["_repo"] = next((lb["name"] for lb in i["labels"]["nodes"] if lb["name"] in GH), "")
+        i["_type"] = next((lb["name"] for lb in i["labels"]["nodes"] if lb["name"] in TYPES), "")
 
     graph = {i["identifier"]: i["_blocks"] for i in issues if i["_blocks"]}
     cyc = find_cycle(graph)
     nrel = sum(len(v) for v in graph.values())
     by_id = {i["identifier"]: i for i in issues}
-    est = lambda v: sum(i["estimate"] or 0 for i in v)
+    def est(v):
+        return sum(i["estimate"] or 0 for i in v)
 
     open_ = [i for i in issues if i["state"]["type"] not in ("completed", "canceled")]
     ready = [i for i in open_ if not i["_blockers"]]
@@ -152,12 +159,13 @@ def render(issues, cycle, labels, title, team):
     rq = []
     for i in sorted(ready, key=lambda x: (-len(x["_blocks"]), x["identifier"])):
         n = len(i["_blocks"])
+        unblocks = f"unblocks {n} ticket" + ("s" if n != 1 else "") if n else "unblocks nothing downstream"
         rq.append(
             f'<div class="rq"><div class="rq-top"><a href="{i["url"]}">{i["identifier"]}</a>'
             f'<span class="ep">{E(i["project"]["name"] if i["project"] else "—")}</span>'
             f'<span class="e">{i["estimate"] or 0}pts</span></div>'
             f'<p>{E(i["title"])}</p>'
-            f'<p class="ep">{f"unblocks {n} ticket" + ("s" if n != 1 else "") if n else "unblocks nothing downstream"}</p></div>')
+            f'<p class="ep">{unblocks}</p></div>')
 
     ledger = []
     for name in order:
@@ -199,7 +207,8 @@ def render(issues, cycle, labels, title, team):
                 f'{i["estimate"] or 0}pts · {i["state"]["name"]}</li>'
                 for i in sorted(inc, key=lambda x: x["identifier"]))
             notes.append(
-                f'<div class="note"><h2>Cycle {cycle["number"]} — {cycle["startsAt"][:10]} to {cycle["endsAt"][:10]}</h2>'
+                f'<div class="note"><h2>Cycle {cycle["number"]} — '
+                f'{cycle["startsAt"][:10]} to {cycle["endsAt"][:10]}</h2>'
                 f'<p>{len(inc)} of these tickets are in the active cycle, {est(inc)} points.</p>'
                 f'<ul class="mini">{rows}</ul></div>')
     if len(chain) > 2:
@@ -220,8 +229,11 @@ def render(issues, cycle, labels, title, team):
             'a real ready queue.</p></div>')
 
     links = "".join(
-        f'<a href="https://github.com/silverbeer/{GH[l]}"><span class="lk">repo</span> {GH[l]}</a>'
-        for l in labels if l in GH)
+        f'<a href="https://github.com/silverbeer/{GH[lb]}"><span class="lk">repo</span> {GH[lb]}</a>'
+        for lb in labels if lb in GH)
+    team_link = (f'<a href="https://linear.app/silverbeer/team/{E(team)}/active">'
+                 f'<span class="lk">Linear</span> {E(team)} board</a>')
+    ready_html = "".join(rq) or '<p class="hint">Nothing is startable — every open ticket has an open blocker.</p>'
 
     return f'''<title>{E(title)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -233,7 +245,7 @@ def render(issues, cycle, labels, title, team):
   <span class="eyebrow">Linear · team {E(team)} · {E(" + ".join(labels))}</span>
   <h1>{E(title)}</h1>
   <p class="sub">{len(issues)} tickets, {est(issues)} points, {len(order)} epics, {nrel} blocking relations.</p>
-  <div class="links"><a href="https://linear.app/silverbeer/team/{E(team)}/active"><span class="lk">Linear</span> {E(team)} board</a>{links}</div>
+  <div class="links">{team_link}{links}</div>
  </header>
  <div class="stats">
   <div class="stat"><b>{len(issues)}</b><span>tickets</span></div>
@@ -246,7 +258,7 @@ def render(issues, cycle, labels, title, team):
  {"".join(notes)}
  <section class="sec"><div class="sec-hd"><h2>Ready queue</h2>
   <span class="hint">no open blocker · ordered by how much each unblocks</span></div>
-  <div class="ready">{"".join(rq) or '<p class="hint">Nothing is startable — every open ticket has an open blocker.</p>'}</div></section>
+  <div class="ready">{ready_html}</div></section>
  <section class="sec"><div class="sec-hd"><h2>Epics</h2>
   <span class="hint">ordered as in Linear · red border means something in it is blocked</span></div>
   <div class="grid">{"".join(cards)}</div></section>

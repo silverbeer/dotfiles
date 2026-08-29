@@ -85,6 +85,70 @@ Flow for a new skill:
 Commands and agents need no allowlist step — `~/.claude/commands/` and `~/.claude/agents/`
 are not ignored, so plain `chezmoi add` works.
 
+Step 2 is the one that gets forgotten, so CI fails the PR if you skip it.
+
+---
+
+## CI
+
+`.github/workflows/ci.yml` runs on every PR to `main` (and on pushes to `main`).
+Five jobs in parallel, then a single `all green` gate:
+
+| Job | What it protects |
+| --- | --- |
+| `shellcheck` | Every tracked `*.sh`, plus the two scripts the glob misses: `modify_settings.json.tmpl` (bash, despite the name) and `run_onchange_install-brew-tools.sh.tmpl` (de-templated first). Config: inline `# shellcheck disable=` with a reason. |
+| `ruff` | Every tracked `*.py`. Config: `.ruff.toml`, which pins `required-version` so a drifted ruff fails loudly instead of linting with a different rule set. |
+| `chezmoi (ubuntu / macos)` | Templates render, the `modify_` script merges correctly and idempotently, `apply --dry-run` succeeds into a scratch `$HOME`, every skill really is managed, and no CI config leaks into `$HOME`. |
+| `gitleaks` | Full history and working tree. Config: `.gitleaks.toml` — allowlists are by regex (`op://` references, the agent-token path), never by path, so a real key pasted into `SETUP.md` is still caught. |
+| `check tests` | Runs `.github/tests/` — the test suite for the checks themselves. |
+
+Two things to know before editing the workflow:
+
+- **Every `chezmoi apply` in CI must keep `--dry-run`.** Without it, the `run_*`
+  scripts execute — `op read` against a vault the runner cannot see, and
+  `brew install`. `check-no-bare-apply.sh` enforces this statically, because the
+  dry-run checks themselves cannot: with the flag gone they would pass while
+  doing real work.
+- `.ruff.toml` and `.gitleaks.toml` are dot-prefixed on purpose. A root-level
+  file that is not dot-prefixed becomes a chezmoi target and gets written into
+  `$HOME`; `check-no-ci-config-in-home.sh` asserts that has not happened. Note
+  that the `.chezmoiignore` entries for these are NOT a backstop — they list the
+  *dotted* names, so a rename to `ruff.toml` sails straight past them.
+
+### Where the check logic lives
+
+In `.github/scripts/check-*.sh`, **not** in the workflow's `run:` blocks. Each
+job step is a one-line call to a script.
+
+That is what makes the checks testable. `.github/tests/` runs those same
+scripts, so there is exactly one copy of every check — a check inlined in
+`ci.yml` and duplicated in a test would be verified in one place and executed in
+another, which is worse than having no test at all. `test_meta.sh` fails the
+build if check logic reappears in `ci.yml`.
+
+### Running the checks and their tests locally
+
+```bash
+.github/tests/run.sh              # the whole suite
+.github/tests/run.sh gitleaks     # just files matching *gitleaks*
+.github/scripts/check-ruff.sh     # one check, on its own
+```
+
+No network, no installs, and nothing is written outside a `mktemp -d` — every
+mutating test works on a throwaway copy of the source tree, and every `chezmoi`
+call runs with `HOME` pointed at a scratch directory. Checks whose binary is
+missing report `SKIP` with a reason rather than failing, and the summary counts
+skips separately from passes, so a machine that is quietly testing nothing is
+visible. In CI `QE_NO_SKIPS=1` turns any skip into a failure.
+
+Every check is tested in both directions. A check that can only pass is
+decoration, so for each one there is at least one test that breaks the input in
+a scratch copy and asserts the check *fails*, and asserts the error message is
+the right one — a typo in a fixture also produces a non-zero exit.
+
+Pinned versions, if you want to reproduce a job exactly: shellcheck 0.11.0,
+ruff 0.16.5, gitleaks 8.30.0, chezmoi v2.70.0.
+
 ---
 
 ## RTK — The Single Highest-Impact Tool Here

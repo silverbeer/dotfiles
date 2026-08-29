@@ -33,6 +33,7 @@ fi
 echo "── Linear API (raw GraphQL) ─────────────"
 if [ -f "$KEY_FILE" ]; then
   perms="$(stat -f '%A' "$KEY_FILE" 2>/dev/null || stat -c '%a' "$KEY_FILE" 2>/dev/null)"
+  # shellcheck disable=SC2015 # ok/warnf always return 0, so the || branch can only fire on a false test
   [ "$perms" = "600" ] && ok "gql-key present (perms 600)" || warnf "gql-key perms $perms" "chmod 600 $KEY_FILE"
   if resp="$(bash "$GQL" '{ viewer { id name } }' 2>/dev/null)" && printf '%s' "$resp" | jq -e '.data.viewer.id' >/dev/null 2>&1; then
     who="$(printf '%s' "$resp" | jq -r '.data.viewer.name')"
@@ -46,9 +47,11 @@ fi
 
 echo "── skills + repos ───────────────────────"
 for s in linear-crud todo session-audit; do
+  # shellcheck disable=SC2015 # ok/warnf always return 0, so the || branch can only fire on a false test
   [ -d "$HOME/.claude/skills/$s" ] && ok "skill: $s" || warnf "skill $s not synced" "run: chezmoi apply"
 done
-[ -d "$HOME/gitrepos" ] && ok "~/gitrepos present" || warnf "~/gitrepos missing" "clone your repos under ~/gitrepos"
+# shellcheck disable=SC2015 # ok/warnf always return 0, so the || branch can only fire on a false test
+[ -d "$HOME/gitrepos" ] && ok "$HOME/gitrepos present" || warnf "$HOME/gitrepos missing" "clone your repos under $HOME/gitrepos"
 
 echo "─────────────────────────────────────────"
 printf 'summary: \033[32m%d ok\033[0m · \033[33m%d warn\033[0m · \033[31m%d fail\033[0m\n' "$pass" "$warn" "$fail"
