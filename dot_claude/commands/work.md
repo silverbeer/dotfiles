@@ -22,7 +22,14 @@ split ownership is how branches end up misnamed and tickets end up stuck.
 ### 1. Fetch and restate
 
 ```bash
-bash ~/.claude/skills/linear-crud/scripts/linear.sh view SB-<n>
+bash ~/.claude/skills/linear-crud/scripts/linear.sh pack SB-<n>
+```
+
+One JSON: brief issue, `branchName`, `repoLabel`, `git.{branch,dirty}`, `pr`. Only when
+the acceptance-criteria text itself is needed, add:
+
+```bash
+bash ~/.claude/skills/linear-crud/scripts/linear.sh view --full SB-<n>
 ```
 
 No ticket given → list the user's open issues for this repo and ask which one.
