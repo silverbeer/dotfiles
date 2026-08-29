@@ -177,6 +177,18 @@ over *completed* issues only: an unfinished ticket has not been delivered by any
 It is orthogonal to `adhoc` — an adhoc ticket can be agent-delivered, and the two are
 never merged into one number.
 
+### View — `/linear view SB-N`
+Print one issue: title, state, priority, assignee, description. This is step 1 of both
+`/work` and `/ticket`.
+
+```bash
+bash scripts/linear.sh view SB-42
+```
+
+Thin passthrough to `linear issue view`, which already renders markdown and already exits
+1 with a clear message on a bad or missing key. It lives here so callers don't reach past
+the wrapper for the single most common read (SB-905).
+
 ### Link — `/linear link SB-N [PR#]`
 Adds `Fixes SB-N` to a PR body (idempotent). Defaults to the current branch's open PR:
 ```bash
@@ -194,7 +206,6 @@ bash scripts/linear.sh audit-unassigned --fix   # assign all to silverbeer.io
 ## Anything not covered
 
 Drop to the raw CLI (`linear issue ...`, **singular**) but keep conventions #1–#4. Useful raw recipes:
-- View one issue: `linear issue view SB-N`
 - List labels (to confirm group membership): `linear label list --team SB`
 - Add a comment: `linear issue comment add SB-N --body "text"` (or `--body-file /tmp/c.md` for markdown)
 - Unassigned set: `linear issue query --team SB --unassigned --all-states` (or `--assignee <user>` for someone specific; add `-j` for JSON).
