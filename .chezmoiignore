@@ -45,6 +45,7 @@
 # ~/SETUP.md (it did, for months).
 README.md
 SETUP.md
+docs
 
 # CI config — repo-only. These document intent; they are NOT a second line of
 # defence. They name the DOTTED targets, and chezmoi skipping dot-prefixed
