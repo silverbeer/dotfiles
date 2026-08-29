@@ -7,8 +7,10 @@ This is the light version — it sets you up, then you drive. For the full
 
 1. **Fetch the issue** using the `linear-crud` skill conventions:
    ```bash
-   bash ~/.claude/skills/linear-crud/scripts/linear.sh view SB-<n>
+   bash ~/.claude/skills/linear-crud/scripts/linear.sh pack SB-<n>
    ```
+   That is one brief JSON (issue, branch name, repo label, git state, PR). Use
+   `linear.sh view --full SB-<n>` only when the acceptance-criteria text is needed.
    If no ticket number was given, list the user's open issues for this repo and ask which one.
 
 2. **Move it to In Progress** (confirm with the user first, per linear-crud rules).

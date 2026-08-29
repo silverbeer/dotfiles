@@ -18,8 +18,9 @@
 #   new   --title T (--body B | --body-file F) --type TYPE [--repo R] [--epic E]
 #         [--driven human|agent-supervised|agent-auto] [--label L ...]
 #   branch SB-N                 checkout silverbeer/sb-n-<slug> (triggers auto → In Progress)
-#   list  [--all] [--repo R] [--epic E]   my issues (open by default)
-#   view  SB-N                  print one issue (title, state, assignee, description)
+#   list  [--all] [--repo R] [--epic E]   my issues (open by default), TSV
+#   view  SB-N [--full]         brief JSON for one issue (--full: CLI text incl. description)
+#   pack  SB-N                  one JSON: brief issue + branchName + repoLabel + git + pr
 #   move  SB-N "State"          change workflow state
 #   driven SB-N VALUE           re-stamp autonomy (human|agent-supervised|agent-auto)
 #   link  SB-N [PR#]            add "Fixes SB-N" to a PR body
@@ -43,6 +44,7 @@
 #     --project, --description/-file. (state accepts a name or type.)
 #   - `issue view <id>` shows one issue; `issue comment add <id>` comments.
 #   - `project list --team SB [-j]` lists projects; `project view <slug>` for one.
+export NO_COLOR=1
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,8 +54,42 @@ LINEAR_ASSIGNEE="${LINEAR_ASSIGNEE:-silverbeer.io}"
 die() { echo "error: $*" >&2; exit 1; }
 warn() { echo "warn: $*" >&2; }
 
-# Strip ANSI color codes from CLI output (the binary colorizes even when piped).
+# Strip ANSI color codes from CLI text output. NO_COLOR (exported above) now
+# covers list/epics, which read JSON; this remains only for audit-unassigned's
+# text scrape (migration tracked in SB-923).
 strip_ansi() { sed -E 's/\x1b\[[0-9;]*m//g'; }
+
+# Path to a sibling helper (linear-gql.sh, board.py, set-driven.py). Deployed it
+# is NAME; in the chezmoi source tree it may carry the executable_ prefix.
+# Resolve so both work.
+sibling() {
+  local name="$1" f
+  for f in "$SCRIPT_DIR/$name" "$SCRIPT_DIR/executable_$name"; do
+    [[ -f "$f" ]] && { echo "$f"; return 0; }
+  done
+  die "$name not found next to $0 (run doctor.sh)"
+}
+
+# Brief JSON for one issue (~300 B, no description) via a single GraphQL call.
+# This is what view / branch / pack all read from (SB-922).
+# KEY is validated here, once; VERB names the caller in the usage message.
+# branchName is deliberately NOT projected: Linear's own (silverbeerio/…)
+# conflicts with ours — pack carries the branch_name_for() value instead.
+issue_brief() {
+  local key="${1:-}" verb="${2:-view}"
+  [[ "$key" =~ ^[A-Za-z]+-[0-9]+$ ]] || die "usage: $verb SB-123"
+  command -v jq >/dev/null || die "jq not found"
+  local raw
+  raw="$(bash "$(sibling linear-gql.sh)" \
+    "{ issue(id:\"$key\"){ identifier title state{name} estimate priority labels{nodes{name}} url } }" 2>/dev/null)" \
+    || die "$key: GraphQL call failed (is linear-gql.sh set up? run doctor.sh)"
+  jq -e . >/dev/null 2>&1 <<<"$raw" || die "$key: non-JSON response from Linear"
+  if [[ "$(jq -r '.errors // empty | length' <<<"$raw")" -gt 0 ]]; then
+    die "$key: $(jq -r '.errors[0].message' <<<"$raw")"
+  fi
+  [[ "$(jq -r '.data.issue // empty | length' <<<"$raw")" -gt 0 ]] || die "$key not found"
+  jq -c '.data.issue | {identifier,title,state:.state.name,estimate,priority,labels:[.labels.nodes[].name],url}' <<<"$raw"
+}
 
 # Map the current git repo (or cwd) to its Linear `repo` label.
 repo_label() {
@@ -118,7 +154,7 @@ cmd_board() {
     repo="$(repo_label || die "board: could not detect repo from $(pwd) — pass --repo")"
     args+=(--repo "$repo")
   fi
-  python3 "$SCRIPT_DIR/board.py" "${args[@]}"
+  python3 "$(sibling board.py)" "${args[@]}"
 }
 
 cmd_repo_label() { repo_label || die "unknown repo '$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")' — pass --repo explicitly"; }
@@ -128,15 +164,13 @@ cmd_repo_label() { repo_label || die "unknown repo '$(basename "$(git rev-parse 
 # names don't get mangled by the text table's column padding.
 cmd_epics() {
   command -v jq >/dev/null || die "epics: jq not found"
-  echo "Epics (Linear projects) — pass the NAME to --epic:"
+  # name<TAB>status<TAB>[repo]; [??] = not mapped in epic_repo() — add it before use.
   linear project list --team "$LINEAR_TEAM" -j 2>/dev/null \
     | jq -r '.nodes[] | "\(.name)\t\(.status.name // "?")"' \
     | while IFS=$'\t' read -r name status; do
         local repo; repo="$(epic_repo "$name" 2>/dev/null || echo '??')"
-        printf '  [%-3s] %-32s %s\n' "$repo" "$name" "$status"
+        printf '%s\t%s\t[%s]\n' "$name" "$status" "$repo"
       done
-  echo
-  echo "([??] = epic not yet mapped to a repo in epic_repo(); add it before use.)"
 }
 
 cmd_new() {
@@ -220,30 +254,45 @@ cmd_list() {
   fi
   [[ -z "$repo" && -z "$epic" ]] && repo="$(repo_label || true)"
 
-  # `mine` = my issues; --sort is required. Open = unstarted + started.
-  local args=(issue mine --team "$LINEAR_TEAM" --sort priority --limit 0 --no-pager)
+  # `issue query -j` (the only listing verb with JSON) scoped to my issues.
+  # Open = unstarted + started. Output is TSV: id, state, Pn, e<est>, title —
+  # full titles, no ANSI, no column padding (SB-922).
+  command -v jq >/dev/null || die "list: jq not found"
+  local args=(issue query --team "$LINEAR_TEAM" --assignee "$LINEAR_ASSIGNEE" --limit 0 -j)
   if [[ $all -eq 1 ]]; then
     args+=(--all-states)
   else
-    args+=(--state unstarted --state started)
+    args+=(-s unstarted -s started)
   fi
   [[ -n "$repo" ]] && args+=(-l "$repo")
   [[ -n "$epic" ]] && args+=(--project "$epic")
-  linear "${args[@]}"
+  local out
+  out="$(linear "${args[@]}")" || die "list: linear CLI failed"
+  jq -r '.nodes[] | "\(.identifier)\t\(.state.name)\tP\(.priority)\te\(.estimate // "-")\t\(.title)"' <<<"$out"
 }
 
 # Print a single issue. The first thing /work and /ticket do, and the reason this
 # verb exists here rather than callers reaching past the wrapper for
 # `linear issue view` (SB-905).
 #
-# Deliberately thin: the CLI already prints title/state/assignee/description as
-# markdown and already exits 1 with a clear message on a bad or missing key
-# ("Could not find referenced Issue" / "Could not determine issue ID"). Wrapping
-# that in our own validation would only make the message worse.
+# Default is the brief JSON (issue_brief, ~300 B) — enough to restate, branch
+# and plan. `--full` is the old passthrough to `linear issue view`, which prints
+# the description as markdown and exits 1 with a clear message on a bad key;
+# reach for it only when the AC text itself is needed (SB-922).
 cmd_view() {
-  local id="${1:-}"
-  [[ -n "$id" ]] || die "view: usage: view SB-N"
-  linear issue view "$id"
+  local id="" full=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --full) full=1; shift ;;
+      *) id="$1"; shift ;;
+    esac
+  done
+  [[ -n "$id" ]] || die "view: usage: view SB-N [--full]"
+  if [[ $full -eq 1 ]]; then
+    linear issue view "$id" --no-download
+  else
+    issue_brief "$id" view
+  fi
 }
 
 cmd_move() {
@@ -270,7 +319,7 @@ cmd_driven() {
   esac
   local num="${id##*-}"
   LINEAR_DRIVEN_VALUE="$value" LINEAR_ISSUE_NUM="$num" LINEAR_TEAM="$LINEAR_TEAM" \
-    python3 "$SCRIPT_DIR/set-driven.py"
+    python3 "$(sibling set-driven.py)"
 }
 
 # Add "Fixes SB-N" to a PR body (idempotent). PR# optional — defaults to the
@@ -397,26 +446,61 @@ cmd_stats() {
   echo
 }
 
-# Create + checkout a branch named to trigger Linear's git automation
-# (branch → In Progress). Name: silverbeer/sb-<n>-<title-slug>. Needs linear-gql.sh.
-cmd_branch() {
-  local key="${1:-}"
-  [[ "$key" =~ ^[A-Za-z]+-[0-9]+$ ]] || die "usage: branch SB-123"
-  local num="${key##*-}"
-  local title
-  title="$(bash "$SCRIPT_DIR/linear-gql.sh" \
-    "{ issues(filter:{number:{eq:$num}, team:{key:{eq:\"$LINEAR_TEAM\"}}}){ nodes { title } } }" 2>/dev/null \
-    | jq -r '.data.issues.nodes[0].title // empty')"
-  [[ -z "$title" ]] && die "branch: $key not found (is linear-gql.sh set up? run doctor.sh)"
+# Branch name for an issue: silverbeer/sb-<n>-<title-slug>. Shared by branch
+# and pack so the two can never disagree.
+branch_name_for() {
+  local key="$1" title="$2"
   local slug
   slug="$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]' \
     | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40 | sed -E 's/-+$//')"
+  echo "silverbeer/$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')-$slug"
+}
+
+# Create + checkout a branch named to trigger Linear's git automation
+# (branch → In Progress). Needs linear-gql.sh.
+cmd_branch() {
+  local key="${1:-}"
+  local title
+  title="$(issue_brief "$key" branch | jq -r .title)"
   local branch
-  branch="silverbeer/$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')-$slug"
+  branch="$(branch_name_for "$key" "$title")"
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "branch: not inside a git repo"
   git checkout -b "$branch"
   echo "→ $branch"
   echo "  Linear will auto-move $key to In Progress when this branch is pushed."
+}
+
+# Everything /work needs to start, in one ~400 B JSON: the brief issue, the
+# branch name it would check out, the repo label, git state and the most
+# relevant PR for that branch, any state (null if none). Replaces view +
+# repo-label + branch + git status.
+cmd_pack() {
+  local key="${1:-}"
+  local brief bn repo cur dirty pr
+  brief="$(issue_brief "$key" pack)"
+  bn="$(branch_name_for "$key" "$(jq -r .title <<<"$brief")")"
+  repo="$(repo_label 2>/dev/null || echo null)"
+  # One git call for both: `# branch.head` gives the branch, any non-# line
+  # means dirty. -uno = untracked files are ignored (not counted as dirty).
+  local st
+  st="$(git status --porcelain=v2 --branch -uno 2>/dev/null || true)"
+  cur="$(sed -n 's/^# branch\.head //p' <<<"$st")"
+  [[ "$cur" == "(detached)" ]] && cur=""
+  if grep -qv '^#' <<<"$st"; then dirty=true; else dirty=false; fi
+  # PR lookup: prefer the checked-out branch when it is this ticket's
+  # (sb-<n>- anywhere, case-insensitive) — a hand-named branch still resolves.
+  # Any state; an OPEN PR wins if several exist for the head.
+  local head="$bn" num="${key##*-}"
+  shopt -s nocasematch
+  [[ "$cur" == *"sb-${num}-"* ]] && head="$cur"
+  shopt -u nocasematch
+  pr="$(gh pr list --head "$head" --state all --json number,url,state \
+        --jq 'sort_by(.state=="OPEN"|not) | .[0] // null' 2>/dev/null || echo null)"
+  [[ -n "$pr" ]] || pr=null
+  jq -nc --argjson issue "$brief" --arg bn "$bn" --arg repo "$repo" \
+         --arg cur "$cur" --argjson dirty "$dirty" --argjson pr "$pr" \
+    '{issue:$issue, branchName:$bn, repoLabel:(if $repo=="null" then null else $repo end),
+      git:{branch:$cur, dirty:$dirty}, pr:$pr}'
 }
 
 sub="${1:-}"; shift || true
@@ -427,6 +511,7 @@ case "$sub" in
   stats)             cmd_stats "$@" ;;
   new)               cmd_new "$@" ;;
   branch)            cmd_branch "$@" ;;
+  pack)              cmd_pack "$@" ;;
   list)              cmd_list "$@" ;;
   view)              cmd_view "$@" ;;
   move)              cmd_move "$@" ;;

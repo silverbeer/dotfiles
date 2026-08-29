@@ -151,6 +151,9 @@ bash scripts/linear.sh list --all                    # include done/canceled
 bash scripts/linear.sh list --epic "Local Agent Automation"        # open issues in one epic
 bash scripts/linear.sh list --epic "Local Agent Automation" --all  # all states in that epic
 ```
+Output is TSV, one issue per line: `SB-N<TAB>State<TAB>P<prio><TAB>e<est><TAB>title`. Full
+titles, no colour, no column padding — built from `issue query -j`, not the text table.
+`epics` is the same shape: `name<TAB>status<TAB>[repo]`.
 
 ### Move — `/linear move SB-N <state>`
 States: `Backlog → Todo → In Progress → In Review → Done` (or `Canceled`). Confirm, then:
@@ -177,17 +180,36 @@ over *completed* issues only: an unfinished ticket has not been delivered by any
 It is orthogonal to `adhoc` — an adhoc ticket can be agent-delivered, and the two are
 never merged into one number.
 
-### View — `/linear view SB-N`
-Print one issue: title, state, priority, assignee, description. This is step 1 of both
-`/work` and `/ticket`.
+### View — `/linear view SB-N [--full]`
+Print one issue. The default is a one-line brief JSON (~300 B):
+`{identifier,title,state,estimate,priority,labels,url}` — enough to restate,
+branch and plan without paying for the description.
 
 ```bash
-bash scripts/linear.sh view SB-42
+bash scripts/linear.sh view SB-42          # brief JSON
+bash scripts/linear.sh view SB-42 --full   # CLI text incl. description (markdown)
 ```
 
-Thin passthrough to `linear issue view`, which already renders markdown and already exits
-1 with a clear message on a bad or missing key. It lives here so callers don't reach past
-the wrapper for the single most common read (SB-905).
+`--full` is the old passthrough to `linear issue view`, which renders the description as
+markdown and exits 1 with a clear message on a bad key. Reach for it only when the AC
+text itself is needed. The verb lives here so callers don't reach past the wrapper for
+the single most common read (SB-905, SB-922).
+
+### Pack — `/linear pack SB-N`
+Everything `/work` needs to start, in one ~400 B JSON. Replaces `view` + `repo-label` +
+the branch-name lookup + `git status`:
+
+```bash
+bash scripts/linear.sh pack SB-42
+# {"issue":{...brief...},"branchName":"silverbeer/sb-42-<slug>","repoLabel":"DOT",
+#  "git":{"branch":"main","dirty":false},"pr":{"number":7,"url":"...","state":"OPEN"}}
+```
+
+`branchName` is the name `branch SB-N` would check out (computed by the same function);
+Linear's own branch name is not included — it conflicts with ours. `repoLabel` is `null`
+outside a mapped repo. `pr` is the most relevant PR for the branch in any state (an OPEN
+one wins if several; `MERGED`/`CLOSED` otherwise), looked up by the checked-out branch
+when it is this ticket's, else by `branchName`; `null` if none (or `gh` is unavailable).
 
 ### Link — `/linear link SB-N [PR#]`
 Adds `Fixes SB-N` to a PR body (idempotent). Defaults to the current branch's open PR:
