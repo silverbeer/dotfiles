@@ -60,3 +60,6 @@ SETUP.md
 .env
 .env.*
 *.secret
+
+# Repo documentation for humans and reviewers — not deployed into $HOME.
+docs
