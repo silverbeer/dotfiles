@@ -154,10 +154,17 @@ All repositories should have branch protection enabled on the `main` branch:
 
 ## Personal Todo Capture
 
-When a session surfaces a concrete follow-up or deferred task that lives beyond
-the current work (not an in-PR TODO), briefly offer to capture it with the
-`todo` skill — one line, ask before adding. Don't nag; skip if the user is
-clearly busy or has declined recently.
+The `todo` skill is the user's **life** list — a second brain for errands,
+admin, people, health. It is not a project tracker and does not sync between
+machines. Never offer it for anything about a repo, a ticket, an environment
+or a setup step: those are project work and belong in Linear — file an
+`adhoc` ticket, or add a checklist to the ticket they block. The agentic loop
+only sees Linear; a project task in `todo` is invisible to it.
+
+When a session surfaces a genuinely personal follow-up (call someone, pay
+something, buy something), briefly offer to capture it with the `todo` skill —
+one line, ask before adding. Don't nag; skip if the user is clearly busy or has
+declined recently.
 
 ## Look it up before asserting it
 
