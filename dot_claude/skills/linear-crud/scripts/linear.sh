@@ -298,7 +298,9 @@ cmd_audit_unassigned() {
   ids="$(linear issue query --team "$LINEAR_TEAM" --unassigned --all-states --limit 0 --no-pager 2>/dev/null \
         | strip_ansi | grep -oE "${LINEAR_TEAM}-[0-9]+" | sort -u || true)"
   if [[ -z "$ids" ]]; then echo "audit: no unassigned ${LINEAR_TEAM} issues 🎉"; return 0; fi
-  echo "Issues not assigned to ${LINEAR_ASSIGNEE}:"; echo "$ids" | sed 's/^/  /'
+  echo "Issues not assigned to ${LINEAR_ASSIGNEE}:"
+  # shellcheck disable=SC2001 # indents every line of a multi-line list; ${//} can't do that
+  echo "$ids" | sed 's/^/  /'
   if [[ $fix -eq 1 ]]; then
     while read -r id; do
       [[ -z "$id" ]] && continue
@@ -409,7 +411,8 @@ cmd_branch() {
   local slug
   slug="$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]' \
     | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40 | sed -E 's/-+$//')"
-  local branch="silverbeer/$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')-$slug"
+  local branch
+  branch="silverbeer/$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')-$slug"
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "branch: not inside a git repo"
   git checkout -b "$branch"
   echo "→ $branch"

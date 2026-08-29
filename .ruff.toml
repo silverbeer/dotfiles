@@ -1,0 +1,16 @@
+# ruff config for the tracked *.py under dot_claude/skills/.
+#
+# Dot-prefixed on purpose: a bare `ruff.toml` at the repo root is a chezmoi
+# target file and gets written to ~/ruff.toml. The .chezmoiignore entry is NOT a
+# backstop for that: it names the dotted target, which a rename no longer
+# matches. check-no-ci-config-in-home.sh is the guard.
+#
+# `select` is load-bearing. Ruff's default rule set is a broad curated list
+# that excludes E501 and drifts between releases, so pinning both the version
+# and the selection is what makes "ruff clean" mean the same thing next month.
+line-length = 120
+required-version = "==0.16.5"
+target-version = "py313"
+
+[lint]
+select = ["E", "F"]

@@ -1,0 +1,52 @@
+# gitleaks config for this repo. The default ruleset does all the detecting;
+# everything below is an allowlist for things that only look like secrets.
+#
+# Dot-prefixed on purpose: a bare `gitleaks.toml` at the repo root is a chezmoi
+# target file and gets written to ~/gitleaks.toml. The .chezmoiignore entry is NOT a
+# backstop for that: it names the dotted target, which a rename no longer
+# matches. check-no-ci-config-in-home.sh is the guard.
+#
+# Allowlisting is by REGEX, never by path. A path allowlist on SETUP.md or
+# README.md would blind the scanner to a real key pasted into the docs, which
+# is this repo's single most likely mistake.
+#
+# regexTarget = "line" means a match suppresses EVERY finding on that line, not
+# just the one the allowlist was written for. So each regex below has to
+# describe the whole line, or it becomes a place to hide a real key: a key
+# appended to an allowlisted line was silently suppressed until SB-904 phase 7,
+# and SETUP.md already carries such a line (step 2b, the agent-token path).
+# test_gitleaks.sh pins all three.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "1Password secret references — a pointer into a vault, never the secret"
+regexTarget = "line"
+# The vault segment excludes spaces so the pattern cannot span prose: with
+# spaces admitted, `op:// docs in SETUP md/step 2` parsed as a reference and
+# disarmed the whole line. Item and field names DO legitimately contain spaces
+# (op://Personal/Supabase MSA/credential), so those two segments keep it.
+#
+# This one still suppresses the whole line by design: a line carrying a real
+# op:// reference is the one place a doc example belongs. That is why the vault
+# segment has to be tight.
+regexes = ['''op://[A-Za-z0-9._-]+/[A-Za-z0-9 ._-]+(/[A-Za-z0-9 ._-]+)?''']
+
+[[allowlists]]
+description = "Path to the op service-account token file — a path, not the token"
+regexTarget = "line"
+# Anchored end to end: matches private_dot_zshenv's `_op_token=<path>` and a
+# bare path on its own line, and nothing else. Unanchored, any line MENTIONING
+# the path was allowlisted, including `aws_access_key_id = <key>  # see
+# ~/.config/op/agent-token`. The prose mentions in SETUP.md and CLAUDE.md are no
+# longer covered; if a future rule starts firing on one, that is a visible false
+# positive to widen this for — the opposite failure is a silent suppression.
+regexes = ['''^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=)?(~|\$HOME)/\.config/op/agent-token[[:space:]]*$''']
+
+[[allowlists]]
+description = "private_dot_zshenv reads the Linear key out of a file at shell start"
+regexTarget = "line"
+# Anchored end to end, for the same reason: unanchored, a key appended to this
+# line was suppressed along with it. Matches private_dot_zshenv:20 as written.
+regexes = ['''^[[:space:]]*(\[\[ -r \$_linear_key \]\] && )?export LINEAR_API_KEY="\$\(<\$_linear_key\)"[[:space:]]*$''']

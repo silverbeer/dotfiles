@@ -1,0 +1,291 @@
+# CI for the dotfiles repo.
+#
+# The thing this repo can break is not "does it compile" — it is "does a fresh
+# chezmoi apply on the other Mac still do the right thing". So the chezmoi job
+# renders every template, exercises the modify_ script the way chezmoi does, and
+# dry-runs a full apply into a scratch HOME on both Linux and macOS.
+#
+# HARD RULE: every apply here is --dry-run. A bare apply executes the run_*
+# scripts, which call `op read` and `brew install`. Never remove the flag —
+# .github/scripts/check-no-bare-apply.sh enforces this, and the `selftest` job
+# proves that enforcement still works.
+#
+# WHERE THE LOGIC LIVES: in .github/scripts/check-*.sh, not in the `run:` blocks
+# below. That is deliberate. .github/tests/ runs those same scripts, so there is
+# exactly one copy of every check; a check re-inlined here would be tested in
+# one place and executed in another. .github/tests/test_meta.sh fails the build
+# if that starts happening.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Tools are pinned by version AND by checksum: this repo is public, and a
+  # release asset swapped underneath us would run as CI.
+  SHELLCHECK_VERSION: "0.11.0"
+  SHELLCHECK_SHA256_LINUX_X86_64: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+  SHELLCHECK_SHA256_DARWIN_AARCH64: "56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79"
+  GITLEAKS_VERSION: "8.30.0"
+  GITLEAKS_SHA256_LINUX_X64: "79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e"
+  # Kept in step with .ruff.toml's required-version by check-pins.sh.
+  RUFF_VERSION: "0.16.5"
+  RUFF_SHA256_LINUX_X86_64: "65b8bae7e43f12a91b71036a52176012b3aefb725d5ae263e2771474110a0983"
+  # The release TAG carries the v; the asset filenames do not, hence ${VERSION#v}
+  # at every use site.
+  CHEZMOI_VERSION: "v2.70.0"
+  CHEZMOI_SHA256_LINUX_AMD64: "32dbc87a4db7163d0f8c3156b631e3ee1cc6fed400f43ff467eca4211f2905e7"
+  CHEZMOI_SHA256_DARWIN_ARM64: "87142ac0465e9b1cd04a71c06c5164867fded7778c3c098f8efbea3ee9df1ade"
+
+jobs:
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install shellcheck
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          url="https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -fsSL -o "$RUNNER_TEMP/shellcheck.tar.xz" "$url"
+          echo "${SHELLCHECK_SHA256_LINUX_X86_64}  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" "$RUNNER_TEMP/bin/shellcheck"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: shellcheck --version
+        run: shellcheck --version
+
+      # Covers the tracked *.sh set plus the two shell scripts the glob misses:
+      # dot_claude/modify_settings.json.tmpl (named .json, but bash) and the
+      # de-templated run_onchange_install-brew-tools.sh.tmpl.
+      - name: All tracked shell
+        run: .github/scripts/check-shellcheck.sh
+
+  python:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install ruff
+        run: |
+          set -euo pipefail
+          # Downloaded and checksummed, not `pipx install`: pipx has no
+          # --require-hashes of its own, and passing one through --pip-args needs
+          # a hash-pinned requirements file for ruff AND every build dependency.
+          # The release asset is the same thing shellcheck and gitleaks already do.
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/ruff.tar.gz" \
+            "https://github.com/astral-sh/ruff/releases/download/${RUFF_VERSION}/ruff-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${RUFF_SHA256_LINUX_X86_64}  $RUNNER_TEMP/ruff.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/ruff.tar.gz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/ruff-x86_64-unknown-linux-gnu/ruff" "$RUNNER_TEMP/bin/ruff"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: ruff --version
+        run: ruff --version
+
+      # Before linting: RUFF_VERSION above and .ruff.toml's required-version
+      # have to agree, or ruff aborts on every file and the failure reads like a
+      # broken lint rather than a stale pin.
+      - name: Version pins agree
+        run: .github/scripts/check-pins.sh
+
+      - name: Tracked *.py
+        run: .github/scripts/check-ruff.sh
+
+  chezmoi:
+    name: chezmoi (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install chezmoi and shellcheck
+        run: |
+          set -euo pipefail
+          # Every check below works inside $WORK and applies into $WORK/home,
+          # never the runner's real HOME. Exported here rather than declared in
+          # job-level `env:` — the runner context is not available at that
+          # level, so a runner.temp expression there is the empty string.
+          echo "WORK=$RUNNER_TEMP/work" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/bin" "$RUNNER_TEMP/work"
+
+          # ubuntu has sha256sum, macOS has shasum. Neither runner has both.
+          verify() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              echo "$1  $2" | sha256sum -c -
+            else
+              echo "$1  $2" | shasum -a 256 -c -
+            fi
+          }
+
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            asset="shellcheck-v${SHELLCHECK_VERSION}.darwin.aarch64.tar.xz"
+            want="$SHELLCHECK_SHA256_DARWIN_AARCH64"
+            cz_asset="chezmoi_${CHEZMOI_VERSION#v}_darwin_arm64.tar.gz"
+            cz_want="$CHEZMOI_SHA256_DARWIN_ARM64"
+          else
+            asset="shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+            want="$SHELLCHECK_SHA256_LINUX_X86_64"
+            cz_asset="chezmoi_${CHEZMOI_VERSION#v}_linux_amd64.tar.gz"
+            cz_want="$CHEZMOI_SHA256_LINUX_AMD64"
+          fi
+
+          # The release asset directly, NOT `curl get.chezmoi.io | sh`: -t pins
+          # the binary but nothing pinned the installer that fetches it, in the
+          # job that renders every template and pipes them through bash.
+          curl -fsSL -o "$RUNNER_TEMP/chezmoi.tar.gz" \
+            "https://github.com/twpayne/chezmoi/releases/download/${CHEZMOI_VERSION}/${cz_asset}"
+          verify "$cz_want" "$RUNNER_TEMP/chezmoi.tar.gz"
+          tar -xzf "$RUNNER_TEMP/chezmoi.tar.gz" -C "$RUNNER_TEMP/bin" chezmoi
+
+          curl -fsSL -o "$RUNNER_TEMP/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/${asset}"
+          verify "$want" "$RUNNER_TEMP/shellcheck.tar.xz"
+          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" "$RUNNER_TEMP/bin/shellcheck"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Versions
+        run: |
+          chezmoi --version
+          shellcheck --version | sed -n 2p
+
+      - name: Templates render
+        run: .github/scripts/check-templates-render.sh
+
+      # The rendered modify_ script, not the template. This is the artefact
+      # chezmoi actually pipes settings.json through on every apply.
+      - name: shellcheck the rendered modify_ script
+        run: .github/scripts/check-shellcheck.sh "$WORK/rendered/modify_settings.json.tmpl.rendered"
+
+      - name: modify_settings.json.tmpl behaves
+        run: .github/scripts/check-modify-settings.sh
+
+      - name: apply --dry-run writes nothing
+        run: .github/scripts/check-apply-dry-run.sh
+
+      - name: Every apply still carries --dry-run
+        run: .github/scripts/check-no-bare-apply.sh
+
+      - name: Skill exceptions in .chezmoiignore
+        run: .github/scripts/check-skill-exceptions.sh
+
+      - name: Repo-only files are not deployed into HOME
+        run: .github/scripts/check-no-ci-config-in-home.sh
+
+  secrets:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # Full history: a diff-only scan cannot see a key that is already on
+          # main, and this repo is 60 commits / ~300KB, so it costs ~0.2s.
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tar.gz" "$url"
+          echo "${GITLEAKS_SHA256_LINUX_X64}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Scan history and working tree
+        run: .github/scripts/check-gitleaks.sh
+
+  selftest:
+    name: check tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # copy_source() re-inits a scratch repo, but the gitleaks history
+          # tests still need this checkout to be a real repository.
+          fetch-depth: 0
+
+      # Every tool, so that nothing in the suite is allowed to skip here. A
+      # check whose binary is missing reports SKIP rather than failing, which is
+      # right on a laptop and wrong in CI.
+      - name: Install every tool the suite needs
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+
+          curl -fsSL -o "$RUNNER_TEMP/chezmoi.tar.gz" \
+            "https://github.com/twpayne/chezmoi/releases/download/${CHEZMOI_VERSION}/chezmoi_${CHEZMOI_VERSION#v}_linux_amd64.tar.gz"
+          echo "${CHEZMOI_SHA256_LINUX_AMD64}  $RUNNER_TEMP/chezmoi.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/chezmoi.tar.gz" -C "$RUNNER_TEMP/bin" chezmoi
+
+          curl -fsSL -o "$RUNNER_TEMP/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256_LINUX_X86_64}  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" "$RUNNER_TEMP/bin/shellcheck"
+
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256_LINUX_X64}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/bin" gitleaks
+
+          curl -fsSL -o "$RUNNER_TEMP/ruff.tar.gz" \
+            "https://github.com/astral-sh/ruff/releases/download/${RUFF_VERSION}/ruff-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${RUFF_SHA256_LINUX_X86_64}  $RUNNER_TEMP/ruff.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/ruff.tar.gz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/ruff-x86_64-unknown-linux-gnu/ruff" "$RUNNER_TEMP/bin/ruff"
+
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # QE_NO_SKIPS turns a skip into a failure. On a laptop a skip is honest
+      # reporting; here it means a tool install silently stopped working and the
+      # suite went green while testing nothing.
+      - name: Run the CI-check test suite
+        env:
+          QE_NO_SKIPS: "1"
+        run: .github/tests/run.sh
+
+  all-green:
+    name: all green
+    if: always()
+    needs: [shell, python, chezmoi, secrets, selftest]
+    runs-on: ubuntu-latest
+    steps:
+      # One stable check name to hang branch protection off, instead of six
+      # that churn every time the matrix changes.
+      - name: Results
+        run: echo '${{ toJSON(needs) }}'
+
+      # FAIL CLOSED. GitHub has exactly four result values and 'success' is the
+      # only acceptable one; the previous condition named two of the other three,
+      # so a needed job that was SKIPPED left this gate green — and this is the
+      # single check name branch protection hangs off, so green here is
+      # mergeable. The trailing clause covers the degenerate case of no results
+      # at all.
+      - name: Fail unless every upstream job succeeded
+        if: >-
+          contains(needs.*.result, 'failure')
+          || contains(needs.*.result, 'cancelled')
+          || contains(needs.*.result, 'skipped')
+          || !contains(needs.*.result, 'success')
+        run: exit 1
