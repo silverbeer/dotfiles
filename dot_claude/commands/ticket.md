@@ -1,5 +1,8 @@
 Start work on a Linear ticket end-to-end: fetch it, branch, plan. Usage: `/ticket SB-123` (or `/ticket` to pick from the current sprint).
 
+This is the light version — it sets you up, then you drive. For the full
+`dev-engineer` → `qe-engineer` → `/code-review` → PR loop, use `/work SB-123`.
+
 ## Steps
 
 1. **Fetch the issue** using the `linear-crud` skill conventions:
@@ -12,9 +15,12 @@ Start work on a Linear ticket end-to-end: fetch it, branch, plan. Usage: `/ticke
 
 3. **Create the branch** from up-to-date main:
    ```bash
-   git checkout main && git pull && git checkout -b <type>/sb-<n>-<short-slug>
+   git checkout main && git pull
+   bash ~/.claude/skills/linear-crud/scripts/linear.sh branch SB-<n>
    ```
-   `<type>` from the issue's type label: feature→`feat`, bug→`fix`, chore→`chore`, docs→`docs`, infra→`ci`.
+   Use `linear.sh branch`, not a hand-rolled `git checkout -b`. The
+   `silverbeer/sb-<n>-<slug>` name it produces is what triggers Linear's
+   auto-move to In Progress on push; any other name silently doesn't.
 
 4. **Restate the acceptance criteria** in 2–4 bullets from the issue description. If the description is thin, say so and ask one clarifying question before coding — don't guess scope.
 
