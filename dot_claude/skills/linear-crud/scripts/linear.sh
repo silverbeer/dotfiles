@@ -19,6 +19,7 @@
 #         [--driven human|agent-supervised|agent-auto] [--label L ...]
 #   branch SB-N                 checkout silverbeer/sb-n-<slug> (triggers auto → In Progress)
 #   list  [--all] [--repo R] [--epic E]   my issues (open by default)
+#   view  SB-N                  print one issue (title, state, assignee, description)
 #   move  SB-N "State"          change workflow state
 #   driven SB-N VALUE           re-stamp autonomy (human|agent-supervised|agent-auto)
 #   link  SB-N [PR#]            add "Fixes SB-N" to a PR body
@@ -231,6 +232,20 @@ cmd_list() {
   linear "${args[@]}"
 }
 
+# Print a single issue. The first thing /work and /ticket do, and the reason this
+# verb exists here rather than callers reaching past the wrapper for
+# `linear issue view` (SB-905).
+#
+# Deliberately thin: the CLI already prints title/state/assignee/description as
+# markdown and already exits 1 with a clear message on a bad or missing key
+# ("Could not find referenced Issue" / "Could not determine issue ID"). Wrapping
+# that in our own validation would only make the message worse.
+cmd_view() {
+  local id="${1:-}"
+  [[ -n "$id" ]] || die "view: usage: view SB-N"
+  linear issue view "$id"
+}
+
 cmd_move() {
   local id="${1:-}" state="${2:-}"
   [[ -n "$id" && -n "$state" ]] || die "move: usage: move SB-N \"State\""
@@ -410,10 +425,11 @@ case "$sub" in
   new)               cmd_new "$@" ;;
   branch)            cmd_branch "$@" ;;
   list)              cmd_list "$@" ;;
+  view)              cmd_view "$@" ;;
   move)              cmd_move "$@" ;;
   driven)            cmd_driven "$@" ;;
   link)              cmd_link "$@" ;;
   audit-unassigned)  cmd_audit_unassigned "$@" ;;
-  ""|-h|--help) sed -n '2,33p' "$0" ;;
+  ""|-h|--help) sed -n '2,/^# CLI surface/{/^# CLI surface/!p;}' "$0" ;;
   *) die "unknown subcommand '$sub' (try --help)" ;;
 esac
