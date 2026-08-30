@@ -390,26 +390,11 @@ cmd_audit_unassigned() {
   fi
 }
 
-# Momentum dashboard. Pulls every SB issue once (issue query -j) and crunches it
-# with jq. No completedAt field exists on this CLI, so "ship time" / "closed in
-# window" use updatedAt as the close-time proxy (flagged approx in the output).
-cmd_stats() {
-  command -v jq >/dev/null || die "stats: jq not found"
-  local days=7
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --days) days="$2"; shift 2 ;;
-      *) die "stats: unknown arg '$1'" ;;
-    esac
-  done
-
-  local json
-  json="$(linear issue query --team "$LINEAR_TEAM" --all-states --limit 0 -j)" \
-    || die "stats: query failed"
-  [[ -n "$json" ]] || die "stats: empty result"
-
-  local repos; repos="$(jq -c 'map(.label)' "$(repos_json)")"
-  jq -r --argjson win "$days" --arg team "$LINEAR_TEAM" --argjson repos "$repos" '
+# The jq program behind `stats`, in its own function so the CI check
+# (.github/scripts/check-linear-crud.sh) can run it against a fixture without
+# the linear CLI. Args: $win (days), $team, $repos (labels from repos.json).
+stats_jq() {
+  cat <<'JQ'
     def age($iso): ($iso | sub("\\.[0-9]+Z$";"Z") | fromdateiso8601) as $t | (now - $t)/86400;
     def r1: (.*10|round)/10;
     def bar($n; $max): ["▁","▂","▃","▄","▅","▆","▇","█"] as $b
@@ -459,7 +444,30 @@ cmd_stats() {
       "",
       "  Created/day (14d, →today):  \($spark | map(bar(.n;$smax)) | join(""))   peak \($smax)",
       ""
-  ' <<<"$json"
+JQ
+}
+
+# Momentum dashboard. Pulls every SB issue once (issue query -j) and crunches it
+# with jq. No completedAt field exists on this CLI, so "ship time" / "closed in
+# window" use updatedAt as the close-time proxy (flagged approx in the output).
+cmd_stats() {
+  command -v jq >/dev/null || die "stats: jq not found"
+  local days=7
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --days) days="$2"; shift 2 ;;
+      *) die "stats: unknown arg '$1'" ;;
+    esac
+  done
+
+  local json
+  json="$(linear issue query --team "$LINEAR_TEAM" --all-states --limit 0 -j)" \
+    || die "stats: query failed"
+  [[ -n "$json" ]] || die "stats: empty result"
+
+  local repos; repos="$(jq -c 'map(.label)' "$(repos_json)")"
+  jq -r --argjson win "$days" --arg team "$LINEAR_TEAM" --argjson repos "$repos" \
+    "$(stats_jq)" <<<"$json"
 
   # Motivational closer (computed in jq above would be awkward; do it here).
   local shipped created_win closed_win
@@ -531,6 +539,10 @@ cmd_pack() {
     '{issue:$issue, branchName:$bn, repoLabel:(if $repo=="null" then null else $repo end),
       git:{branch:$cur, dirty:$dirty}, pr:$pr}'
 }
+
+# Sourced by .github/scripts/check-linear-crud.sh for table tests: stop here
+# so the functions above are defined without dispatching a subcommand.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
 sub="${1:-}"; shift || true
 case "$sub" in

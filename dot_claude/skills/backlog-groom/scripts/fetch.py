@@ -13,10 +13,20 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os
 import sys
 from pathlib import Path
 
-LINEAR_CRUD = Path.home() / ".claude/skills/linear-crud/scripts"
+# linear_api.py lives in the linear-crud skill. Resolve it from, in order:
+# LINEAR_CRUD_SCRIPTS (tests point this at a scratch copy), the sibling skill
+# in the chezmoi source tree, then the deployed ~/.claude copy.
+_CANDIDATES = [
+    Path(__file__).resolve().parents[2] / "linear-crud" / "scripts",
+    Path.home() / ".claude/skills/linear-crud/scripts",
+]
+if os.environ.get("LINEAR_CRUD_SCRIPTS"):
+    _CANDIDATES.insert(0, Path(os.environ["LINEAR_CRUD_SCRIPTS"]))
+LINEAR_CRUD = next((p for p in _CANDIDATES if (p / "linear_api.py").is_file()), _CANDIDATES[-1])
 sys.path.insert(0, str(LINEAR_CRUD))
 try:
     from linear_api import gql, warn_if_capped
