@@ -126,3 +126,7 @@ Modify: `linear.sh`, `executable_linear-gql.sh`, `executable_board.py`, `set-dri
 
 ## Status log
 - 2026-08-29 — plan approved; SB-921–935 filed, SB-508/624 repurposed; this doc committed (SB-921).
+- 2026-08-30 — Phase 0 (Linear hardening) complete: SB-922–926 merged. SB-937 (pagination) and SB-939 (chezmoi __pycache__) filed and merged along the way; SB-938 (branch-prefix experiment) closed.
+- 2026-08-30 — Phase 1 (gatekeeper) complete: SB-508 merged (dual-channel Telegram+Linear gates, 35 tests). SB-927 closed as superseded — fully covered by SB-508's suite.
+- 2026-08-30 — Phase 2 (headless loop) complete: SB-928 (`/work-headless`), SB-929 (`cycle-runner` pick+run+merge), SB-930 (launchd + doctor, mini = `Toms-Mac-mini`) all merged. SB-941 (doctor.sh `stat` portability, same bug class SB-929 hit in CI) filed.
+- **Next: first real run on the mini.** Human steps outstanding: confirm pilot repos (SB-508 checklist); on the mini, `chezmoi update` → `bash ~/.claude/skills/linear-crud/scripts/doctor.sh` → `launchctl load` the plist.
