@@ -301,6 +301,45 @@ else
 fi
 default_gh
 
+# --- 2h. scan_log_clean: the run-log scanner gates the outbound post (SB-943)
+
+# The whole point of the scan is that a run log carrying a credential never
+# reaches Telegram. These three cases pin the only behaviour that matters:
+# clean -> 0, finding -> 1, scanner absent -> 2. Anything but 0 must leave the
+# summary unposted, so a missing binary can never silently open the gate.
+scan_log="$WORK/scan-run.log"
+echo "cycle-runner: nothing interesting here" >"$scan_log"
+
+gitleaks_stub() {  # EXIT_CODE
+  cat >"$bin/gitleaks" <<STUB
+#!/usr/bin/env bash
+exit $1
+STUB
+  chmod +x "$bin/gitleaks"
+}
+
+gitleaks_stub 0
+rc=0; run_sourced "scan_log_clean '$scan_log' '$WORK/scan.out'" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 0 ] && ok "scan_log_clean: clean log -> rc 0 (summary may be posted)" \
+  || bad "scan_log_clean: a clean log did not return 0 (rc=$rc)"
+
+gitleaks_stub 1
+rc=0; run_sourced "scan_log_clean '$scan_log' '$WORK/scan.out'" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 1 ] && ok "scan_log_clean: gitleaks finding -> rc 1 (post suppressed)" \
+  || bad "scan_log_clean: a gitleaks finding did not return 1 (rc=$rc)"
+
+rm -f "$bin/gitleaks"
+rc=0
+# PATH is narrowed to the stub dir plus the system ones so the real gitleaks —
+# brew installs it under /opt/homebrew/bin — cannot satisfy the lookup and mask
+# the regression, while bash/mktemp/cp stay reachable.
+out="$(PATH="$bin:/usr/bin:/bin" run_sourced "scan_log_clean '$scan_log' '$WORK/scan.out'" 2>&1)" || rc=$?
+if [ "$rc" -eq 2 ] && [[ "$out" == *"cannot scan the run log"* ]]; then
+  ok "scan_log_clean: scanner absent -> rc 2, fails closed (post suppressed)"
+else
+  bad "scan_log_clean: a missing gitleaks did not fail closed (rc=$rc): $out"
+fi
+
 # ---------------------------------------------------------------- verdict
 
 [ "$fails" -eq 0 ] || die "check-cycle-runner-policy: $fails failure(s)"
