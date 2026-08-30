@@ -129,6 +129,14 @@ jobs:
       - name: cycle-runner scripts
         run: .github/scripts/check-cycle-runner-policy.sh
 
+      # Offline tests for doctor.sh's cycle-runner + chezmoi-sync checks
+      # (SB-930): OAuth-token, gh auth, Telegram getMe and stale-lock logic,
+      # run for real against a scratch $HOME with `op`/`gh`/`chezmoi`/`claude`
+      # stubbed. No network, no real 1Password read, `claude -p`, or
+      # Telegram call.
+      - name: doctor.sh cycle-runner checks
+        run: .github/scripts/check-doctor.sh
+
   chezmoi:
     name: chezmoi (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -192,6 +200,15 @@ jobs:
 
       - name: Templates render
         run: .github/scripts/check-templates-render.sh
+
+      # NOT part of check-templates-render.sh's TEMPLATES list on purpose: it
+      # renders to 0 bytes on every host that isn't the mac mini — including
+      # every CI runner — and check-templates-render.sh treats an empty
+      # render as a failure. This is its own check because that emptiness is
+      # exactly the behaviour under test: hostname-gated, mini-only, nothing
+      # deployed anywhere else.
+      - name: launchd plist template (mini-only hostname gate)
+        run: .github/scripts/check-launchd-plist.sh
 
       # The rendered modify_ script, not the template. This is the artefact
       # chezmoi actually pipes settings.json through on every apply.
