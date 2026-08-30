@@ -13,11 +13,15 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
-import subprocess
 import sys
 from pathlib import Path
 
-GQL = Path.home() / ".claude/skills/linear-crud/scripts/linear-gql.sh"
+LINEAR_CRUD = Path.home() / ".claude/skills/linear-crud/scripts"
+sys.path.insert(0, str(LINEAR_CRUD))
+try:
+    from linear_api import gql, warn_if_capped
+except ImportError:
+    sys.exit(f"missing {LINEAR_CRUD}/linear_api.py — the linear-crud skill must be installed")
 
 QUERY = """
 { issues(filter:{team:{key:{eq:"%s"}}, state:{type:{nin:["completed","canceled"]}}},
@@ -29,15 +33,9 @@ QUERY = """
 
 
 def fetch(team: str) -> list[dict]:
-    if not GQL.exists():
-        sys.exit(f"missing {GQL} — the linear-crud skill must be installed")
-    out = subprocess.run(
-        ["bash", str(GQL), QUERY % team], capture_output=True, text=True, check=True
-    ).stdout
-    payload = json.loads(out)
-    if "errors" in payload:
-        sys.exit(f"Linear API error: {payload['errors']}")
-    return payload["data"]["issues"]["nodes"]
+    nodes = gql(QUERY % team)["issues"]["nodes"]
+    warn_if_capped(nodes, 250, "open issues")
+    return nodes
 
 
 def main() -> int:

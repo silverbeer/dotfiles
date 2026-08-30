@@ -8,7 +8,7 @@
 # main across the org (the CD/ArgoCD flow deploys on merge; no GitHub Deployments
 # are recorded). Change-failure is a revert/hotfix proxy; MTTR needs incident
 # tracking we don't have yet — both are marked honestly.
-set -uo pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GQL="$SCRIPT_DIR/linear-gql.sh"
@@ -19,12 +19,24 @@ CUTOFF="$(date -u -v-"${DAYS}"d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "-
 
 command -v jq >/dev/null || { echo "metrics: jq required" >&2; exit 1; }
 
+# Pagination guard: none of these queries page, so a full first:N result is
+# indistinguishable from a truncated one without this.
+cap_warn() {  # cap_warn <what> <N> <count>
+  [ "$3" -ge "$2" ] && echo "warn: $1 hit the first:$2 cap; results may be truncated" >&2
+  return 0
+}
+
 echo "════════════════════════════════════════════"
 echo "  SB DELIVERY METRICS — last ${DAYS}d"
 echo "════════════════════════════════════════════"
 
 # ---- Delivery (Linear) -----------------------------------------------------
-issues_json="$(bash "$GQL" "{ issues(first:250, filter:{completedAt:{gte:\"$CUTOFF\"}}){ nodes { identifier createdAt startedAt completedAt estimate labels{nodes{name}} } } }" 2>/dev/null)"
+issues_json="$(bash "$GQL" "{ issues(first:250, filter:{completedAt:{gte:\"$CUTOFF\"}}){ nodes { identifier createdAt startedAt completedAt estimate labels{nodes{name}} } } }")" \
+  || { echo "metrics: Linear query failed" >&2; exit 1; }
+if [ "$(jq -r '.errors // [] | length' <<<"$issues_json")" -gt 0 ]; then
+  echo "metrics: Linear API error: $(jq -r '.errors[0].message' <<<"$issues_json")" >&2; exit 1
+fi
+cap_warn "completed issues (${DAYS}d)" 250 "$(jq '.data.issues.nodes | length' <<<"$issues_json")"
 
 echo "$issues_json" | jq -r --argjson weeks "$WEEKS" '
   def parse: sub("\\.[0-9]+Z$";"Z") | fromdateiso8601;
@@ -65,8 +77,10 @@ echo "$issues_json" | jq -r '
 
 # ---- Deploy frequency + change-failure (GitHub, org-wide) ------------------
 echo "▸ Deploy frequency (merged PRs → main, org-wide proxy)"
-prs="$(gh search prs --owner=silverbeer --merged --merged-at=">${CUTOFF%%T*}" --json title,repository --limit 300 2>/dev/null)"
+prs="$(gh search prs --owner=silverbeer --merged --merged-at=">${CUTOFF%%T*}" --json title,repository --limit 300)" \
+  || { echo "metrics: gh search failed" >&2; exit 1; }
 if [ -n "$prs" ] && [ "$prs" != "null" ]; then
+  cap_warn "merged PRs (${DAYS}d)" 300 "$(jq 'length' <<<"$prs")"
   echo "$prs" | jq -r --argjson weeks "$WEEKS" '
     length as $m
     | (map(select(.title|test("(?i)revert|hotfix|rollback"))) | length) as $cf

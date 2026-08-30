@@ -12,22 +12,17 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
 
-GQL = Path.home() / ".claude/skills/linear-crud/scripts/linear-gql.sh"
+LINEAR_CRUD = Path.home() / ".claude/skills/linear-crud/scripts"
+sys.path.insert(0, str(LINEAR_CRUD))
+try:
+    from linear_api import gql, warn_if_capped
+except ImportError:
+    sys.exit(f"missing {LINEAR_CRUD}/linear_api.py — the linear-crud skill must be installed")
+
 FIELDS = ("priority", "project", "estimate")
-
-
-def gql(query: str) -> dict:
-    out = subprocess.run(
-        ["bash", str(GQL), query], capture_output=True, text=True, check=True
-    ).stdout
-    payload = json.loads(out)
-    if "errors" in payload:
-        raise RuntimeError(payload["errors"])
-    return payload["data"]
 
 
 def current_state(ids: list[str]) -> dict[str, dict]:
@@ -36,12 +31,16 @@ def current_state(ids: list[str]) -> dict[str, dict]:
         '{ issues(filter:{number:{in:[%s]},team:{key:{eq:"SB"}}}, first:250){ nodes{'
         " id identifier priority estimate project{id name} } } }" % numbers
     )
-    return {n["identifier"]: n for n in data["issues"]["nodes"]}
+    nodes = data["issues"]["nodes"]
+    warn_if_capped(nodes, 250, "issues to update")
+    return {n["identifier"]: n for n in nodes}
 
 
 def projects() -> dict[str, str]:
     data = gql("{ projects(first:100){ nodes{ id name } } }")
-    return {n["name"]: n["id"] for n in data["projects"]["nodes"]}
+    nodes = data["projects"]["nodes"]
+    warn_if_capped(nodes, 100, "projects")
+    return {n["name"]: n["id"] for n in nodes}
 
 
 def main() -> int:

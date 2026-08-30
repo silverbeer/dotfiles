@@ -13,12 +13,11 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import json
-import subprocess
 import sys
 from pathlib import Path
 
-GQL = Path.home() / ".claude/skills/linear-crud/scripts/linear-gql.sh"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from linear_api import gql, warn_if_capped  # noqa: E402
 ADHOC = "adhoc"
 DRIVEN_PREFIX = "driven:"
 # Ordered worst-to-best on the autonomy climb; progress is the distribution
@@ -40,16 +39,6 @@ Q_ISSUES = """
 """
 
 
-def gql(query: str) -> dict:
-    out = subprocess.run(
-        ["bash", str(GQL), query], capture_output=True, text=True, check=True
-    ).stdout
-    payload = json.loads(out)
-    if "errors" in payload:
-        sys.exit(f"Linear API error: {payload['errors']}")
-    return payload["data"]
-
-
 def bar(part: int, whole: int, width: int = 24) -> str:
     if not whole:
         return " " * width
@@ -65,6 +54,7 @@ def main() -> int:
 
     today = datetime.date.today()
     cycles = gql(Q_CYCLES)["cycles"]["nodes"]
+    warn_if_capped(cycles, 50, "cycles")
     if not cycles:
         sys.exit("no cycles found")
 
@@ -87,6 +77,7 @@ def main() -> int:
 
     start, end = window(cycle)
     issues = gql(Q_ISSUES % cycle["id"])["issues"]["nodes"]
+    warn_if_capped(issues, 250, f"cycle {cycle['number']} issues")
 
     def is_adhoc(i) -> bool:
         return ADHOC in {n["name"] for n in i["labels"]["nodes"]}
