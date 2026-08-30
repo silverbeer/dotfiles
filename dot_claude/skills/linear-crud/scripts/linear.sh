@@ -17,7 +17,7 @@
 #   stats [--days N]            momentum dashboard (totals, velocity, age, sparkline)
 #   new   --title T (--body B | --body-file F) --type TYPE [--repo R] [--epic E]
 #         [--driven human|agent-supervised|agent-auto] [--label L ...] [--estimate N]
-#   branch SB-N                 checkout silverbeer/sb-n-<slug> (triggers auto → In Progress)
+#   branch SB-N                 checkout silverbeer/sb-n-<slug> (sb-n token links the PR)
 #   list  [--all] [--repo R] [--epic E]   my issues (open by default), TSV
 #   view  SB-N [--full]         brief JSON for one issue (--full: CLI text incl. description)
 #   pack  SB-N                  one JSON: brief issue + branchName + repoLabel + git + pr
@@ -485,8 +485,9 @@ branch_name_for() {
   echo "silverbeer/$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')-$slug"
 }
 
-# Create + checkout a branch named to trigger Linear's git automation
-# (branch → In Progress). Needs linear-gql.sh.
+# Create + checkout a branch carrying the sb-<n> token. Linear links the PR
+# opened from it and moves the issue to In Progress when that PR is non-draft;
+# the push itself does nothing (verified SB-938). Needs linear-gql.sh.
 cmd_branch() {
   local key="${1:-}"
   local title
@@ -496,7 +497,7 @@ cmd_branch() {
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "branch: not inside a git repo"
   git checkout -b "$branch"
   echo "→ $branch"
-  echo "  Linear will auto-move $key to In Progress when this branch is pushed."
+  echo "  Opening a (non-draft) PR from this branch moves $key to In Progress."
 }
 
 # Everything /work needs to start, in one ~400 B JSON: the brief issue, the
