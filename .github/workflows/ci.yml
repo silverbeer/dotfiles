@@ -114,6 +114,13 @@ jobs:
       - name: linear-crud + backlog-groom scripts
         run: .github/scripts/check-linear-crud.sh
 
+      # Offline unit tests for the gatekeeper skill: tg.py's Telegram
+      # transport (urlopen replaced, chunking, 409, no secret in the body) and
+      # gate.py's dual-channel gate logic against a fake `gql`. No network, no
+      # subprocess, no real Telegram token.
+      - name: gatekeeper scripts
+        run: .github/scripts/check-gatekeeper.sh
+
   chezmoi:
     name: chezmoi (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

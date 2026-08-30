@@ -70,18 +70,36 @@ test_readme_dropped_from_chezmoiignore_is_rejected() {
   assert_out 'README.md'
 }
 
-# The tests directory lives under .github precisely so it inherits that
-# protection. Assert it, rather than assuming it.
-test_tests_dir_is_not_a_chezmoi_target() {
+# .github/tests lives under .github precisely so it inherits that protection.
+# Assert it, rather than assuming it. harness.sh and run.sh exist nowhere else
+# in the repo, so they are an unambiguous marker of THIS directory leaking —
+# unlike a bare "tests" path segment, which is no longer unique to it: a
+# skill's own tests/ (dot_claude/skills/gatekeeper/tests, SB-508) is a
+# legitimate, intentionally-managed deliverable, not a leak.
+test_github_tests_dir_is_not_a_chezmoi_target() {
   need_bin chezmoi
   work="$(new_dir)"
   dest="$work/home"; mkdir -p "$dest"
   HOME="$dest" chezmoi --source "$REPO_ROOT" --destination "$dest" --no-tty managed \
     >"$work/managed.txt"
-  if grep -qE '(^|/)(tests|harness\.sh|run\.sh)' "$work/managed.txt"; then
-    fail "the test suite is being deployed into \$HOME:
-$(grep -nE '(^|/)(tests|harness\.sh|run\.sh)' "$work/managed.txt")"
+  if grep -qE '(^|/)(harness\.sh|run\.sh)$' "$work/managed.txt"; then
+    fail "the .github test suite is being deployed into \$HOME:
+$(grep -nE '(^|/)(harness\.sh|run\.sh)$' "$work/managed.txt")"
   fi
+}
+
+# ...and the complement: a bare root-level tests/ WOULD be a leak (it is what
+# check-no-ci-config-in-home.sh's own `^tests(/|$)` guards), unlike a nested
+# skill tests/ directory, which is fine.
+test_a_root_level_tests_dir_would_be_rejected_by_the_check() {
+  need_bin chezmoi
+  src="$(copy_source)"
+  mv "$src/.github/tests" "$src/tests"
+  rmdir "$src/.github" 2>/dev/null || true
+
+  export REPO="$src"
+  assert_fail check-no-ci-config-in-home.sh
+  assert_out 'tests'
 }
 
 run_tests
