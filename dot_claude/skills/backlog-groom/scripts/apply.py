@@ -67,7 +67,7 @@ def main() -> int:
     if unknown_epics:
         sys.exit(
             "REFUSING: these epics do not exist in Linear yet — create them first "
-            "(and add them to epic_repo() in linear-crud/scripts/linear.sh):\n  "
+            "(and add an epicGlobs entry for each to linear-crud/repos.json):\n  "
             + "\n  ".join(unknown_epics)
         )
 

@@ -65,6 +65,16 @@ for s in linear-crud todo session-audit; do
 done
 # shellcheck disable=SC2015 # ok/warnf always return 0, so the || branch can only fire on a false test
 [ -d "$HOME/gitrepos" ] && ok "$HOME/gitrepos present" || warnf "$HOME/gitrepos missing" "clone your repos under $HOME/gitrepos"
+# The repo <-> label map linear.sh, board.py and metrics.sh all read. Deployed
+# next to SKILL.md; in the chezmoi source tree it sits beside scripts/ too.
+REPOS_JSON="$SCRIPT_DIR/../repos.json"
+if [ ! -f "$REPOS_JSON" ]; then
+  failf "repos.json missing at $REPOS_JSON" "it ships with the linear-crud skill — run: chezmoi apply"
+elif jq -e 'type=="array" and length>0' "$REPOS_JSON" >/dev/null 2>&1; then
+  ok "repos.json present and parses ($(jq -r 'length' "$REPOS_JSON") repos)"
+else
+  failf "repos.json does not parse as a non-empty array" "fix $REPOS_JSON (jq . to see the error)"
+fi
 
 echo "─────────────────────────────────────────"
 printf 'summary: \033[32m%d ok\033[0m · \033[33m%d warn\033[0m · \033[31m%d fail\033[0m\n' "$pass" "$warn" "$fail"

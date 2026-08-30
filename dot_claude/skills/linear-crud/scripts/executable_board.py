@@ -15,6 +15,7 @@ Reads through linear-gql.sh (same auth as the `linear` CLI). Read-only.
 import argparse
 import functools
 import html
+import json
 import pathlib
 import sys
 from collections import defaultdict
@@ -25,15 +26,11 @@ CSS  = HERE / "board.css"
 sys.path.insert(0, str(HERE))
 from linear_api import gql, warn_if_capped  # noqa: E402
 
-# repo label -> GitHub repo name. Inverse of repo_label() in linear.sh.
-GH = {
-    "MT": "missing-table", "MTA": "missing-table-android",
-    "BOOT": "missingtable-platform-bootstrap", "MS": "match-scraper",
-    "MSA": "match-scraper-agent", "QB": "qualityplaybook.dev",
-    "STK": "myrunstreak.run", "JT": "janitor", "DOT": "dotfiles",
-    "TODO": "todo", "TRD": "trd", "POD": "podtelemetry.com",
-    "BET": "bet", "BETC": "bet-collect",
-}
+# repo label -> GitHub repo name, from the skill's repos.json (shared with
+# repo_label() / epic_repo() in linear.sh). The file sits one level up, next to
+# SKILL.md, both in the chezmoi source tree and deployed.
+GH = {r["label"]: r["ghRepo"]
+      for r in json.loads((HERE.parent / "repos.json").read_text())}
 TYPES = {"feature", "bug", "chore", "docs", "infra", "security"}
 STATE_ORDER = {"In Progress": 0, "In Review": 1, "Todo": 2, "Backlog": 3, "Done": 4, "Canceled": 5}
 

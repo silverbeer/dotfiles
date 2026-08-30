@@ -8,7 +8,7 @@
 #   - repo label (group) detected from the current git repo
 #   - type label (group) required on create
 #   - driven label (group) = autonomy of delivery; defaults to driven:human
-#   - epic = Linear project; every epic MUST map to a repo label (epic_repo)
+#   - epic = Linear project; every epic MUST map to a repo label (repos.json)
 #
 # Subcommands:
 #   repo-label                  print the repo label inferred from cwd
@@ -88,53 +88,71 @@ issue_brief() {
   jq -c '.data.issue | {identifier,title,state:.state.name,estimate,priority,labels:[.labels.nodes[].name],url}' <<<"$raw"
 }
 
+# The repo <-> label map lives in ../repos.json (one entry per repo label:
+# dirGlobs, epicGlobs, ghRepo). board.py and stats read the same file. Deployed
+# it sits at ~/.claude/skills/linear-crud/repos.json, next to SKILL.md.
+repos_json() {
+  local f="$SCRIPT_DIR/../repos.json"
+  [[ -f "$f" ]] || die "repos.json not found at $f — it ships with the skill; run 'chezmoi apply' (doctor.sh checks it)"
+  echo "$f"
+}
+
+# repos.json parsed once per process into two flat rule lists, one line per
+# glob as label<TAB>glob, in file order. Loaded lazily on first match so the
+# hot paths (epics loops over every project) pay for jq exactly once.
+REPO_DIR_RULES=()
+REPO_EPIC_RULES=()
+load_repo_rules() {
+  [[ ${#REPO_DIR_RULES[@]} -gt 0 ]] && return 0
+  command -v jq >/dev/null || die "jq not found"
+  local f kind label glob
+  f="$(repos_json)"
+  while IFS=$'\t' read -r kind label glob; do
+    case "$kind" in
+      d) REPO_DIR_RULES+=("$label"$'\t'"$glob") ;;
+      e) REPO_EPIC_RULES+=("$label"$'\t'"$glob") ;;
+    esac
+  done < <(jq -r '.[] | .label as $l
+                  | ((.dirGlobs // [])[] | "d\t\($l)\t\(.)"),
+                    ((.epicGlobs // [])[] | "e\t\($l)\t\(.)")' "$f")
+  [[ ${#REPO_DIR_RULES[@]} -gt 0 ]] || die "repos.json: no dirGlobs rules parsed from $f (invalid JSON?)"
+}
+
+# First label whose FIELD (dirGlobs|epicGlobs) has a glob matching NAME.
+# Entries are tried in file order and globs in list order, exactly like the
+# old `case` arms — order matters (bet-collect must beat bet-*). Exit 1 on miss.
+match_repo_glob() {
+  local field="$1" name="$2" rule label glob
+  load_repo_rules
+  local -a rules=()
+  case "$field" in
+    dirGlobs)  rules=(${REPO_DIR_RULES[@]+"${REPO_DIR_RULES[@]}"}) ;;
+    epicGlobs) rules=(${REPO_EPIC_RULES[@]+"${REPO_EPIC_RULES[@]}"}) ;;
+    *) die "match_repo_glob: unknown field '$field'" ;;
+  esac
+  for rule in ${rules[@]+"${rules[@]}"}; do
+    label="${rule%%$'\t'*}"; glob="${rule#*$'\t'}"
+    # shellcheck disable=SC2053 # $glob is meant to be a pattern
+    [[ "$name" == $glob ]] && { echo "$label"; return 0; }
+  done
+  return 1
+}
+
 # Map the current git repo (or cwd) to its Linear `repo` label.
 repo_label() {
   local root name
   root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
   name="$(basename "$root")"
-  case "$name" in
-    missing-table)                        echo "MT" ;;
-    *android*)                            echo "MTA" ;;
-    missingtable-platform-bootstrap|*bootstrap*) echo "BOOT" ;;
-    match-scraper)                        echo "MS" ;;
-    match-scraper-agent)                  echo "MSA" ;;
-    qualityplaybook*|qb)                  echo "QB" ;;
-    myrunstreak*|runstreak*)              echo "STK" ;;
-    janitor)                              echo "JT" ;;
-    dotfiles)                             echo "DOT" ;;
-    todo)                                 echo "TODO" ;;
-    bet-collect|bet-capture)             echo "BETC" ;;
-    bet|bet-*|*betting*)                  echo "BET" ;;
-    trd*|*investment*)                    echo "TRD" ;;
-    podtelemetry*|pod)                    echo "POD" ;;
-    *) return 1 ;;
-  esac
+  match_repo_glob dirGlobs "$name"
 }
 
 # Epic (Linear project) -> repo label. EVERY epic MUST resolve to a repo here —
-# that is the required "project-level label". To add an epic, give it a repo.
+# that is the required "project-level label". To add an epic, give it a repo:
+# add a lowercase glob to that label's epicGlobs in repos.json.
 # (Inferred 2026-06-20 from each project's existing issue labels.)
 epic_repo() {
   local key; key="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-  case "$key" in
-    *acquisition*|*capture*)               echo "BETC" ;;
-    bet\ *|bet-*)                           echo "BET" ;;
-    *goals*|*multi-metric*)                 echo "STK" ;;
-    *byok*|*multi-source*|*import*)         echo "STK" ;;
-    *social*|*community*)                   echo "STK" ;;
-    *athlete*|*training*)                   echo "STK" ;;
-    *local*agent*|*automation*)             echo "STK" ;;
-    *agentic*|*delivery*)                   echo "STK" ;;
-    *quality*|*ci*)                         echo "STK" ;;
-    *vision*|*roadmap*)                     echo "STK" ;;
-    *daily*coach*|*route*)                  echo "STK" ;;
-    *paper*)                                echo "MT"  ;;  # spans MT + STK; MT is the deadline half
-    *podtelemetry*|*run*audio*)             echo "POD" ;;
-    *android*)                              echo "MTA" ;;
-    *trd*|*investment*)                     echo "TRD" ;;
-    *) return 1 ;;
-  esac
+  match_repo_glob epicGlobs "$key"
 }
 
 # Render a delivery board (ready queue + critical path) for one or more repos.
@@ -161,7 +179,11 @@ cmd_repo_label() { repo_label || die "unknown repo '$(basename "$(git rev-parse 
 # names don't get mangled by the text table's column padding.
 cmd_epics() {
   command -v jq >/dev/null || die "epics: jq not found"
-  # name<TAB>status<TAB>[repo]; [??] = not mapped in epic_repo() — add it before use.
+  # Parse repos.json here, in the parent shell, so a missing/invalid file dies
+  # with its real message instead of every row showing [??] — and so the
+  # per-row lookups below inherit the parsed rules rather than re-running jq.
+  load_repo_rules
+  # name<TAB>status<TAB>[repo]; [??] = not mapped in repos.json — add it before use.
   local out
   out="$(linear project list --team "$LINEAR_TEAM" -j)" || die "epics: linear CLI failed"
   jq -r '.nodes[] | "\(.name)\t\(.status.name // "?")"' <<<"$out" \
@@ -209,7 +231,7 @@ cmd_new() {
   # with STK-side integration tickets in the same epic.
   if [[ -n "$epic" ]]; then
     local epic_r
-    epic_r="$(epic_repo "$epic" || die "new: epic '$epic' is not mapped to a repo — add it to epic_repo() in this helper (run 'epics' to see the list)")"
+    epic_r="$(epic_repo "$epic" || die "new: epic '$epic' is not mapped to a repo — add an epicGlobs entry in repos.json (run 'epics' to see the list)")"
     if [[ -n "$repo" && "$repo" != "$epic_r" ]]; then
       warn "new: --repo $repo overrides epic '$epic' default ($epic_r)"
     fi
@@ -386,14 +408,13 @@ cmd_stats() {
     || die "stats: query failed"
   [[ -n "$json" ]] || die "stats: empty result"
 
-  jq -r --argjson win "$days" --arg team "$LINEAR_TEAM" '
+  local repos; repos="$(jq -c 'map(.label)' "$(repos_json)")"
+  jq -r --argjson win "$days" --arg team "$LINEAR_TEAM" --argjson repos "$repos" '
     def age($iso): ($iso | sub("\\.[0-9]+Z$";"Z") | fromdateiso8601) as $t | (now - $t)/86400;
     def r1: (.*10|round)/10;
     def bar($n; $max): ["▁","▂","▃","▄","▅","▆","▇","█"] as $b
       | if $max<=0 then " " else $b[(($n/$max)*7|floor)] end;
-    ["MT","MTA","BOOT","MS","MSA","QB","STK","JT","DOT","TODO","TRD","POD"] as $repos
-
-    | .nodes as $all
+    .nodes as $all
     | ($all|length) as $total
     | [ $all[] | select(.state.type=="completed") ] as $done
     | [ $all[] | select(.state.type=="canceled") ]  as $cancel
