@@ -14,6 +14,7 @@ The helper lives next to this file: `scripts/linear.sh`. Run it with `bash`. It 
 2. **Every issue gets a `repo` label and a `type` label** (both are mutually-exclusive groups). The helper sets these on `new`. A ticket without them is incomplete (SB-74 shipped label-less before this skill existed — don't repeat that).
 3. **Confirm before any write.** For `new` and `move`, show the user the exact title / type / repo / epic / area labels / target state you're about to apply and wait for a yes. Reads (`list`, `epics`) run immediately.
 4. **Every epic maps to a repo (its required "project-level label").** Epics are Linear *projects*. The epic→repo map is `repos.json` (next to this file); an epic with no mapping is rejected. When you pass `--epic`, the repo label is derived from it — so `--repo` is usually unnecessary. An explicit `--repo` overrides the epic's default with a warning.
+5. **A pasted image in the request that prompted `new` gets attached to the issue, always.** `linear.sh new` has no image support — after it prints the `SB-N` URL, attach every image the user pasted with the raw CLI: `linear issue attach SB-N <path>` (repeat per image). Never write "screenshot attached" in a description without actually running this. If the pasted image is a cache path (e.g. under `image-cache/`), that path is still valid on disk — use it directly.
 
 ### Label vocabulary
 
@@ -82,6 +83,11 @@ bash scripts/linear.sh new --title "Streak heatmap legend" \
 ```
 
 The command prints the new `SB-N` URL — relay it. (`--repo` is optional; omit to auto-detect.)
+
+If the request included a pasted image, attach it now — `new` doesn't do this itself:
+```bash
+linear issue attach SB-42 /path/to/pasted-image.png
+```
 
 **Always set an estimate** — `--estimate N`, Fibonacci 1/2/3/5/8; `0` for superseded/duplicate/won't-do. Why, and how to reset one: `REFERENCE.md` → "Estimates".
 
