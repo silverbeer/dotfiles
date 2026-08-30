@@ -19,6 +19,14 @@ KEY_FILE="${LINEAR_KEY_FILE:-$HOME/.config/linear/gql-key}"
 # the two never drift apart into silently checking different things.
 CYCLE_RUNNER_HOST="Toms-Mac-mini"
 
+# The live `claude -p` probe below is a real billed call, so it is pinned and
+# capped. The cap must clear the system-prompt preamble: at $0.02 the call was
+# killed before it could answer and the check FAILED for every token, valid or
+# not (SB-942). Pinning the model keeps the probe's cost independent of
+# whatever the default model happens to become.
+DOCTOR_PROBE_MODEL="claude-haiku-4-5-20251001"
+DOCTOR_PROBE_BUDGET_USD="0.10"
+
 # A peer skill's scripts dir, resolved the same way run.sh's own
 # sibling_scripts() does: try the chezmoi source tree layout, then the
 # deployed ~/.claude one, and print whichever actually has the marker file.
@@ -135,8 +143,16 @@ if [ "$on_mini" -eq 1 ]; then
     # so this can never touch Bash/Edit/etc), --max-budget-usd (hard dollar
     # cap) and --no-session-persistence (leaves nothing to clean up) are the
     # real bounded/non-interactive flags `claude --help` actually documents.
-    if claude_out="$(claude -p "ok" --tools "" --max-budget-usd 0.02 --no-session-persistence --output-format text 2>&1)"; then
+    if claude_out="$(claude -p "ok" --tools "" --model "$DOCTOR_PROBE_MODEL" \
+        --max-budget-usd "$DOCTOR_PROBE_BUDGET_USD" --no-session-persistence \
+        --output-format text 2>&1)"; then
       ok "claude OAuth token valid ($(printf '%s' "$claude_out" | tr '\n' ' ' | cut -c1-60))"
+    elif printf '%s' "$claude_out" | grep -q 'Exceeded USD budget'; then
+      # Hitting the ceiling means the call authenticated and started billing,
+      # which is the very thing this check exists to prove. Never report that
+      # as a credential failure — raise the cap instead.
+      warnf "claude -p hit the \$$DOCTOR_PROBE_BUDGET_USD probe cap — token authenticated" \
+        "raise DOCTOR_PROBE_BUDGET_USD in doctor.sh if this persists"
     else
       failf "claude -p failed with CLAUDE_CODE_OAUTH_TOKEN set" "$(printf '%s' "$claude_out" | head -1)"
     fi
