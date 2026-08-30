@@ -301,6 +301,50 @@ else
 fi
 default_gh
 
+# --- 2g2. drain_resolved_gates: EVERY resolved gate is handled (SB-952)
+
+# Three gates resolved in one tick; exactly one was resumed. `claude` reads
+# stdin, and resume_session ran inside `while read` over a process
+# substitution, so the first resume swallowed the remaining lines and the
+# other two humans' approvals were silently dropped — the tickets then got
+# re-planned from scratch on a later tick.
+gate_stub() {  # writes a gate.py stub whose `status` answers for any gate id
+  cat >"$bin/gate-stub.py" <<'STUB'
+import json, sys
+gid = sys.argv[-1]
+print(json.dumps({"kind": "plan", "session_id": "s-" + gid, "run_id": "r-" + gid, "note": ""}))
+STUB
+}
+gate_stub
+
+# A `claude` that drains stdin, exactly as the real one does. If the loop is
+# not insulated from it, iterations 2 and 3 never happen.
+cat >"$bin/claude" <<'STUB'
+#!/usr/bin/env bash
+cat >/dev/null            # consume whatever stdin is offered
+echo "{\"status\":\"awaiting\"}"
+STUB
+chmod +x "$bin/claude"
+
+resolved_tsv=$'g1\tSB-1\tapproved\ng2\tSB-2\tapproved\ng3\tSB-3\tapproved'
+out="$(printf '%s\n' "$resolved_tsv" | run_sourced '
+  GATE_PY="'"$bin"'/gate-stub.py"
+  JSON_SCHEMA="{}"; ALLOWED_TOOLS=""; DISALLOWED_TOOLS=""
+  SUMMARY_LINES=(); acted=0
+  drain_resolved_gates
+  printf "%s\n" "${SUMMARY_LINES[@]}"
+')"
+
+for t in SB-1 SB-2 SB-3; do
+  if grep -q "$t resumed" <<<"$out"; then
+    ok "drain_resolved_gates: $t was handled"
+  else
+    bad "drain_resolved_gates: $t was NOT handled — the loop stopped early: $out"
+  fi
+done
+rm -f "$bin/claude" "$bin/gate-stub.py"
+default_gh
+
 # --- 2h. scan_log_clean: the run-log scanner gates the outbound post (SB-943)
 
 # The whole point of the scan is that a run log carrying a credential never
