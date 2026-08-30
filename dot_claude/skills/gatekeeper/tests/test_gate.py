@@ -88,7 +88,9 @@ class CallbackTests(GateTestCase):
         loaded = gate.load_gate(g["gate_id"])
         self.assertEqual(loaded["status"], "approved")
         self.assertEqual(loaded["source"], "telegram")
-        self.assertIn(("cb1", ""), self.transport.answered)
+        # The toast names the outcome and the ticket, so a tap that does land
+        # tells the human what it did.
+        self.assertIn(("cb1", "approved — SB-1"), self.transport.answered)
         self.assertEqual(self.linear.labels, ["type:feature", "gate:approved"])
         # echoed to the channel that did NOT decide
         self.assertTrue(any("<!-- sb-agent:echo -->" in c["body"] for c in self.linear.comments))
@@ -123,6 +125,85 @@ class CallbackTests(GateTestCase):
         self.assertEqual(loaded["status"], "rejected")
         self.assertEqual(loaded["source"], "telegram")
         self.assertEqual(loaded["note"], "needs another pass")
+
+
+class CallbackAnswerFailureTests(GateTestCase):
+    """SB-950. A callback query id expires about a minute after the tap; this
+    poller runs on a 30-minute tick, so `answerCallbackQuery` nearly always
+    fails in production. It used to be called FIRST and unguarded, so the raise
+    propagated, `drain_telegram` acked the update in its `finally` anyway, and
+    a real human approval was destroyed by the failure of a courtesy toast."""
+
+    def test_expired_callback_id_still_records_the_decision(self):
+        g = self.open_gate()
+        self.transport.fail_answer = gate.TelegramError("Telegram rejected answerCallbackQuery (HTTP 400).")
+
+        self.callback(g, "approve", cq_id="cb-expired")
+
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertEqual(loaded["status"], "approved")
+        self.assertEqual(loaded["source"], "telegram")
+        self.assertEqual(self.linear.labels, ["type:feature", "gate:approved"])
+
+    def test_a_failing_answer_never_escapes_the_handler(self):
+        g = self.open_gate()
+        self.transport.fail_answer = gate.TelegramError("Telegram rejected answerCallbackQuery (HTTP 400).")
+        try:
+            self.callback(g, "reject", cq_id="cb-expired-2")
+        except gate.TelegramError as exc:  # pragma: no cover - the regression
+            self.fail(f"a failed courtesy answer escaped _handle_callback: {exc}")
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "rejected")
+
+    def test_stranger_is_still_answered_when_the_answer_works(self):
+        g = self.open_gate()
+        self.callback(g, "approve", user_id=999, cq_id="cb-stranger-2")
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "awaiting")
+        self.assertIn(("cb-stranger-2", ""), self.transport.answered)
+
+
+class DrainAckPolicyTests(GateTestCase):
+    """SB-950, the other half: what `drain_telegram` acks. Telegram replays an
+    unacked update for 24h, which is the safety net — acking one whose decision
+    was never recorded throws the human's answer away permanently."""
+
+    def _batch(self, gate_dict, verb="approve", update_id=500, cq_id="cb-drain"):
+        return [
+            {
+                "update_id": update_id,
+                "callback_query": {"id": cq_id, "from": {"id": 42}, "data": f"{gate_dict['gate_id']}:{verb}"},
+            }
+        ]
+
+    def test_a_clean_update_is_acked(self):
+        g = self.open_gate()
+        self.transport.batches = [self._batch(g, update_id=500)]
+        self.gk.drain_telegram(timeout=0)
+
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "approved")
+        self.assertEqual(self.gk._offset(), 501)
+
+    def test_a_transport_failure_does_not_ack_so_telegram_redelivers(self):
+        g = self.open_gate()
+        # send_text runs after the decision is saved; make it blow up to stand
+        # in for any transport failure mid-handling.
+        self.transport.batches = [self._batch(g, verb="note", update_id=700)]
+        self.transport.fail_send = gate.TelegramError("Could not reach Telegram: timed out")
+
+        self.gk.drain_telegram(timeout=0)
+
+        # Offset must NOT have advanced past an update we could not finish.
+        self.assertNotEqual(self.gk._offset(), 701)
+
+    def test_an_unprocessable_update_is_acked_so_it_cannot_block_the_queue(self):
+        g = self.open_gate()
+        batch = self._batch(g, update_id=900)
+        # A shape the handler cannot process at all — not a transport problem.
+        batch[0]["callback_query"]["from"] = None
+        self.transport.batches = [batch]
+
+        self.gk.drain_telegram(timeout=0)
+
+        self.assertEqual(self.gk._offset(), 901)
 
 
 class LinearChannelTests(GateTestCase):

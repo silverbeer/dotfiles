@@ -46,7 +46,14 @@ def _linear_scripts() -> Path:
 sys.path.insert(0, str(_linear_scripts()))
 sys.path.insert(0, str(HERE))
 from linear_api import gql  # noqa: E402  (tests monkeypatch gate.gql)
-from tg import TelegramTransport, Transport, approve_keyboard, parse_callback, send_text  # noqa: E402
+from tg import (  # noqa: E402
+    TelegramError,
+    TelegramTransport,
+    Transport,
+    approve_keyboard,
+    parse_callback,
+    send_text,
+)
 
 KINDS = ("plan", "cycle-plan", "triage", "pr", "merge", "blocked")
 GATE_VALUES = ("awaiting-approval", "approved", "rejected", "needs-human")
@@ -383,10 +390,23 @@ class Gatekeeper:
         for update in updates:
             try:
                 self._handle(update)
-            finally:
-                # Ack even on failure: a crashing update must not be redelivered
-                # forever (Telegram replays unacked updates for 24h).
-                self._remember(int(update["update_id"]) + 1)
+            except TelegramError as exc:
+                # Transport trouble: the decision may not have been recorded.
+                # Do NOT ack — Telegram replays unacked updates for 24h, which
+                # is exactly the safety net wanted here. Stop the drain so the
+                # rest of the batch is retried in order on the next poll
+                # (SB-950: acking through a failure destroyed a real approval).
+                print(f"gate: telegram error draining update {update.get('update_id')}: {exc}", file=sys.stderr)
+                return
+            except Exception as exc:  # noqa: BLE001 — poison-pill guard
+                # A bug in our own handling, not a transport failure. Ack it:
+                # an update we can never process must not block every future
+                # poll behind it for 24h.
+                print(
+                    f"gate: dropping unprocessable update {update.get('update_id')}: {exc!r}",
+                    file=sys.stderr,
+                )
+            self._remember(int(update["update_id"]) + 1)
 
     def _allowed(self, sender: dict) -> bool:
         # Numeric id, never username: usernames are changeable and, once
@@ -402,26 +422,45 @@ class Gatekeeper:
         elif "message" in update:
             self._handle_message(update["message"])
 
+    def _answer_quietly(self, cq: dict, text: str = "") -> None:
+        """Best-effort `answerCallbackQuery`. NEVER raises (SB-950).
+
+        A callback query id expires about a minute after the tap, and this
+        poller runs on a 30-minute tick, so the answer usually fails. It used
+        to be called first and unguarded: the raise propagated, `drain_telegram`
+        acked the update in its `finally` anyway, and the human's decision was
+        destroyed by the failure of a courtesy toast. The toast is optional;
+        the decision is the payload."""
+        try:
+            self.transport.answer_callback_query(cq.get("id", ""), text)
+        except TelegramError as exc:
+            print(f"gate: answerCallbackQuery failed (harmless): {exc}", file=sys.stderr)
+
     def _handle_callback(self, cq: dict) -> None:
-        # Answer FIRST, unconditionally — an unanswered callback leaves the
-        # client spinning, and silence is the right reply to a stranger too.
-        self.transport.answer_callback_query(cq.get("id", ""))
+        # Silence is the right reply to a stranger, and answering costs nothing.
         if not self._allowed(cq.get("from") or {}):
-            return  # silently: a refusal tells a scanner the bot is live
+            self._answer_quietly(cq)
+            return
         parsed = parse_callback(cq.get("data", ""))
         if parsed is None:
+            self._answer_quietly(cq)
             return
         gate_id, verb = parsed
         gate = next((g for g in awaiting_gates() if g["gate_id"] == gate_id), None)
         if gate is None:
+            self._answer_quietly(cq, "already resolved")
             send_text(self.transport, self.chat_id, f"gate {gate_id} is not awaiting (already resolved?)")
             return
+        # Record FIRST, acknowledge second: everything below this line is a
+        # courtesy, and a courtesy must not be able to lose a decision.
         if verb == "note":
             gate["note_pending"] = True
             save_gate(gate)
+            self._answer_quietly(cq, "send your note")
             send_text(self.transport, self.chat_id, f"💬 reply with your note for [{gate['kind']}] {gate['ticket']}")
         else:
             self.decide(gate, verb, None, "telegram")
+            self._answer_quietly(cq, f"{verb}d — {gate['ticket']}")
 
     def _handle_message(self, message: dict) -> None:
         chat = message.get("chat") or {}
@@ -518,14 +557,21 @@ def cmd_open(args: argparse.Namespace) -> int:
     body = sys.stdin.read() if args.body == "/dev/stdin" else Path(args.body).read_text()
     if args.dry_run:
         # No network at all: no Linear lookup (so no real title), no Telegram.
-        print(json.dumps({
-            "status": "dry-run",
-            "kind": args.kind,
-            "ticket": args.ticket,
-            "marker": f"<!-- sb-agent:{args.kind}:{args.run_id}:{args.session_id} -->",
-            "telegram": telegram_text(args.kind, args.ticket, "(title not fetched)", body, args.link or "(issue url)"),
-            "keyboard": args.kind != "blocked",
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "status": "dry-run",
+                    "kind": args.kind,
+                    "ticket": args.ticket,
+                    "marker": f"<!-- sb-agent:{args.kind}:{args.run_id}:{args.session_id} -->",
+                    "telegram": telegram_text(
+                        args.kind, args.ticket, "(title not fetched)", body, args.link or "(issue url)"
+                    ),
+                    "keyboard": args.kind != "blocked",
+                },
+                indent=2,
+            )
+        )
         return 0
     gk = gatekeeper_from_env()
     gate = gk.open_gate(args.kind, args.ticket, body, args.session_id, args.run_id, args.link)
@@ -540,13 +586,18 @@ def cmd_poll(args: argparse.Namespace) -> int:
         resolved.extend(gk.poll_once(args.timeout))
         if args.once or not awaiting_gates():
             break
-    print(json.dumps({
-        "resolved": [
-            {"gate_id": g["gate_id"], "ticket": g["ticket"], "status": g["status"], "source": g["source"]}
-            for g in resolved
-        ],
-        "awaiting": len(awaiting_gates()),
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "resolved": [
+                    {"gate_id": g["gate_id"], "ticket": g["ticket"], "status": g["status"], "source": g["source"]}
+                    for g in resolved
+                ],
+                "awaiting": len(awaiting_gates()),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
