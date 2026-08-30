@@ -399,6 +399,49 @@ else
   bad "run.sh does not parse under /bin/bash: $(cat "$WORK/bash32.err")"
 fi
 
+# --- 2g4. env.sh gives a launchd process the service account (SB-953)
+
+# launchd passes only HOME and PATH — it does not source ~/.zshenv, where
+# OP_SERVICE_ACCOUNT_TOKEN is exported. Without it `op` falls back to the
+# 1Password desktop app and every tick raised "op would like to access data
+# from other apps" plus a Touch ID prompt, and failed outright unattended.
+# A fake HOME with a fake token file keeps this offline and away from the vault.
+fake_home="$WORK/fakehome"
+mkdir -p "$fake_home/.config/op"
+printf 'not-a-real-token\n' >"$fake_home/.config/op/agent-token"
+chmod 600 "$fake_home/.config/op/agent-token"
+
+CR_ENV="$(cd "$(dirname "$RUN_SH")" && pwd)/env.sh"
+env_out="$(env -i HOME="$fake_home" PATH="/usr/bin:/bin" CR_ENV="$CR_ENV" /bin/bash -c '
+  . "$CR_ENV" 2>/dev/null
+  [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] && echo EXPORTED || echo MISSING
+' 2>/dev/null)"
+
+if [ "$env_out" = "EXPORTED" ]; then
+  ok "env.sh: a launchd-shaped env (HOME+PATH only) gets the service-account token"
+else
+  bad "env.sh: launchd-shaped env did not get OP_SERVICE_ACCOUNT_TOKEN ($env_out) — op would prompt on every tick"
+fi
+
+# An absent token file must stay a silent no-op, not an error: a laptop that
+# was never provisioned still has to be able to source this.
+env_out2="$(env -i HOME="$WORK/emptyhome" PATH="/usr/bin:/bin" CR_ENV="$CR_ENV" /bin/bash -c '
+  . "$CR_ENV" 2>/dev/null; echo "rc=$?"
+' 2>/dev/null)"
+if [ "$env_out2" = "rc=0" ]; then
+  ok "env.sh: no token file -> sources cleanly, stays a no-op"
+else
+  bad "env.sh: a missing token file broke sourcing ($env_out2)"
+fi
+
+# The secret must never be written into the chezmoi-managed plist.
+PLIST_TMPL="$REPO/Library/LaunchAgents/io.silverbeer.cycle-runner.plist.tmpl"
+if [ -f "$PLIST_TMPL" ] && grep -q "OP_SERVICE_ACCOUNT_TOKEN" "$PLIST_TMPL"; then
+  bad "plist template references OP_SERVICE_ACCOUNT_TOKEN — a bearer token must not live in a managed file"
+else
+  ok "plist template carries no service-account token"
+fi
+
 # --- 2h. scan_log_clean: the run-log scanner gates the outbound post (SB-943)
 
 # The whole point of the scan is that a run log carrying a credential never
