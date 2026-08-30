@@ -108,6 +108,12 @@ jobs:
       - name: Tracked *.py
         run: .github/scripts/check-ruff.sh
 
+      # Offline functional tests for the linear-crud and backlog-groom scripts:
+      # repo/epic label tables, the stats jq program, `pack` output, and the
+      # python helpers. Needs only bash, jq and python3 — all on the runner.
+      - name: linear-crud + backlog-groom scripts
+        run: .github/scripts/check-linear-crud.sh
+
   chezmoi:
     name: chezmoi (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
