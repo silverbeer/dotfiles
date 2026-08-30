@@ -51,7 +51,7 @@ failf(){ printf '  \033[31m✗\033[0m %s\n     ↳ %s\n' "$1" "$2"; fail=$((fail
 infof(){ printf '  \033[36mi\033[0m %s\n' "$1"; }
 
 echo "── binaries ─────────────────────────────"
-for bin in git gh jq curl uv node op linear rtk chezmoi; do
+for bin in git gh jq curl uv node op linear rtk chezmoi gitleaks; do
   if command -v "$bin" >/dev/null 2>&1; then ok "$bin"; else failf "$bin missing" "install via chezmoi run_onchange (brew)"; fi
 done
 

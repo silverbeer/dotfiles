@@ -219,9 +219,13 @@ handle_merge_gate() {
 # old, already-seen finding blocks every summary forever after.
 scan_log_clean() {
   local log_file="$1" out_file="$2"
+  # Fails CLOSED (SB-943). "Never block on a missing binary" is right for a
+  # linter and wrong for the only thing standing between a run log — which
+  # contains verbatim `claude -p` output — and an outbound channel. A missing
+  # scanner means the log stays on this machine.
   if ! command -v gitleaks >/dev/null 2>&1; then
-    note "gitleaks not on PATH — skipping the run-log scan (never block on a missing binary)"
-    return 0
+    note "gitleaks not on PATH — cannot scan the run log, so nothing is posted (fix: brew install gitleaks)"
+    return 2
   fi
   local scan_dir
   scan_dir="$(mktemp -d)"
@@ -367,10 +371,18 @@ fi
 summary="cycle-runner $(date -u +%Y-%m-%dT%H:%M:%SZ) (run $INVOCATION_ID)
 $(printf '%s\n' "${SUMMARY_LINES[@]+"${SUMMARY_LINES[@]}"}")"
 
-if scan_log_clean "$LOG_FILE" "$RUN_LOG_DIR/$INVOCATION_ID.gitleaks.out"; then
-  post_telegram_summary "$GATEKEEPER_SCRIPTS" "$summary"
-else
-  note "gitleaks flagged something in the run log — NOT posting to Telegram (see $RUN_LOG_DIR/$INVOCATION_ID.gitleaks.out); log kept at $LOG_FILE for a human to review"
-fi
+scan_rc=0
+scan_log_clean "$LOG_FILE" "$RUN_LOG_DIR/$INVOCATION_ID.gitleaks.out" || scan_rc=$?
+case "$scan_rc" in
+  0)
+    post_telegram_summary "$GATEKEEPER_SCRIPTS" "$summary"
+    ;;
+  2)
+    note "run-log scan could not run — NOT posting to Telegram; log kept at $LOG_FILE for a human to review"
+    ;;
+  *)
+    note "gitleaks flagged something in the run log — NOT posting to Telegram (see $RUN_LOG_DIR/$INVOCATION_ID.gitleaks.out); log kept at $LOG_FILE for a human to review"
+    ;;
+esac
 
 note "invocation $INVOCATION_ID done"

@@ -193,6 +193,25 @@ else
   bad "token-set-success case did not report as expected: $out"
 fi
 
+# Budget-exceeded is NOT an auth failure (SB-942): reaching the cap means the
+# call authenticated and started billing. The old $0.02 cap made this the
+# outcome for every token, valid or not, and it was reported as a credential
+# failure — which sent an operator hunting a bug that did not exist.
+stub claude <<'STUB'
+#!/usr/bin/env bash
+echo "Error: Exceeded USD budget (0.10)" >&2
+exit 1
+STUB
+out="$(run_doctor env CLAUDE_CODE_OAUTH_TOKEN=fake-token-for-testing)"
+if [[ "$out" == *"probe cap"* && "$out" == *"token authenticated"* ]]; then
+  ok "token set + budget exceeded -> warns, does not claim the token is bad"
+else
+  bad "budget-exceeded case was not reported as a cap warning: $out"
+fi
+if [[ "$out" == *"claude -p failed with CLAUDE_CODE_OAUTH_TOKEN set"* ]]; then
+  bad "budget-exceeded case was reported as an auth failure"
+fi
+
 stub claude <<'STUB'
 #!/usr/bin/env bash
 echo "invalid_api_key: token expired" >&2
