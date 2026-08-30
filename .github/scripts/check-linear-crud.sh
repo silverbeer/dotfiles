@@ -16,6 +16,7 @@
 # linear.sh is sourced: it returns before its dispatcher when BASH_SOURCE != $0,
 # so the functions are defined without running a subcommand.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1  # never leave __pycache__ in the scratch or source tree
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"

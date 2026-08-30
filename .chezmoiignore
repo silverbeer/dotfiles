@@ -37,6 +37,8 @@
 !.claude/skills/session-audit
 !.claude/skills/backlog-groom
 .claude/worktrees
+# Python bytecode left by running skill tests from the source tree.
+.claude/**/__pycache__
 .claude/settings.json.bak
 .claude/settings.local.json
 
