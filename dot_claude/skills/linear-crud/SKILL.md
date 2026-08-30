@@ -6,37 +6,27 @@ allowed-tools: Bash, Read
 
 Wraps the already-installed, already-authed `linear` CLI so issue ops are one tool call instead of drafting markdown for the user to paste. Linear is the canonical tracker for all silverbeer repos; the `SB` team holds every project, scoped by a `repo` label group.
 
-The helper lives next to this file: `scripts/linear.sh`. Run it with `bash`. It bakes in the conventions below so you don't have to reconstruct them each time.
+The helper lives next to this file: `scripts/linear.sh`. Run it with `bash`. It bakes in the conventions below so you don't have to reconstruct them each time. Cold detail (CLI gotchas, board, metrics, cycle report, estimate history, `driven`, raw recipes, transport) lives in `REFERENCE.md` next to this file.
 
 ## Non-negotiable conventions
 
 1. **Every issue is assigned to `silverbeer.io`. Never leave one unassigned.** The helper does this automatically on `new`; for any raw `linear` call you make, pass `--assignee "silverbeer.io"`.
 2. **Every issue gets a `repo` label and a `type` label** (both are mutually-exclusive groups). The helper sets these on `new`. A ticket without them is incomplete (SB-74 shipped label-less before this skill existed — don't repeat that).
 3. **Confirm before any write.** For `new` and `move`, show the user the exact title / type / repo / epic / area labels / target state you're about to apply and wait for a yes. Reads (`list`, `epics`) run immediately.
-4. **Every epic maps to a repo (its required "project-level label").** Epics are Linear *projects*. The epic→repo map is `repos.json` (next to this file); an epic with no mapping is rejected. When you pass `--epic`, the repo label is derived from it — so `--repo` is usually unnecessary. An epic may nonetheless **span repos**: `Podtelemetry — Run Audio` defaults to `POD` (the service) but holds `STK` integration tickets. Passing an explicit `--repo` overrides the epic's default with a warning rather than failing.
+4. **Every epic maps to a repo (its required "project-level label").** Epics are Linear *projects*. The epic→repo map is `repos.json` (next to this file); an epic with no mapping is rejected. When you pass `--epic`, the repo label is derived from it — so `--repo` is usually unnecessary. An explicit `--repo` overrides the epic's default with a warning.
 
 ### Label vocabulary
 
-- `repo` (pick one, required): see `repos.json` next to this file — one entry per repo label (`label`, `dirGlobs`, `ghRepo`, `epicGlobs`). Add a repo = add an entry. Auto-detected from the current git repo; pass `--repo` to override, or `--epic` to derive it from the epic.
+- `repo` (pick one, required): see `repos.json` next to this file — one entry per repo label. Add a repo = add an entry (fields in `REFERENCE.md`). Auto-detected from the current git repo; pass `--repo` to override, or `--epic` to derive it from the epic.
 - `type` (pick one, required): `bug` · `feature` · `chore` (maintenance/refactor, no behavior change) · `docs` · `infra` (CI/k8s/helm/terraform) · `security`.
-- `driven` (pick one, auto-applied): `driven:human` · `driven:agent-supervised` · `driven:agent-auto`. **Autonomy of delivery, not whether an LLM touched the code** — every commit in every silverbeer repo already carries `Co-Authored-By: Claude`, so authorship cannot tell the two apart. `linear.sh new` stamps `driven:human` unless `--driven` says otherwise; an agent promotes its own ticket with `linear.sh driven SB-N agent-supervised` when it opens the PR.
+- `driven` (pick one, auto-applied): defaults to `driven:human`; an agent promotes its own ticket with `linear.sh driven SB-N agent-supervised` when it opens the PR. Semantics in `REFERENCE.md`.
 - area (flat, optional, multi): e.g. `backend`, `frontend`, `db`, `auth`, `qop`, `scraper-integration`. Add with repeated `--label`.
 
 ### Epics (Linear projects)
 
-Linear has no native "Epic" — its **Project** is the epic. Run `bash scripts/linear.sh epics` to list them with the repo each maps to. Pass the exact name to `--epic`. Every epic must resolve to a repo via the `epicGlobs` in `repos.json`; to add a new epic, add a lowercase glob to its repo's entry there (this is the "project-level label" requirement). Entries are matched in file order, so put a specific glob before a broader one.
+Run `bash scripts/linear.sh epics` to list them with the repo each maps to. Pass the exact name to `--epic`. New epic → add a lowercase glob to its repo's `epicGlobs` in `repos.json` (`REFERENCE.md`).
 
-### CLI gotchas (linear 2.0.0, verified 2026-06-20 — the helper targets this)
-
-This build differs sharply from the 2026-05-30 surface — the flags flipped back. Do **not** trust older notes.
-
-- Subcommand is `issue` (**singular**); `issues` (plural) just dumps usage and fails.
-- `issue create` takes `-t/--title`, `-l/--label` **repeated** (NOT a comma list), `--description` or `--description-file`, `--project "<epic>"`, and **has** `--no-interactive`. The helper uses all of these.
-- **Labels are validated against their group**: `repo`/`type` are mutually-exclusive groups — exactly one of each. `docs` lives in the `type` group (not an area label). Two type labels → `labelIds not exclusive child labels`.
-- `issue mine` / `issue list` / `issue l` are **the same command** — they all list *my* issues, not the team's. Needs `--team`, requires `--sort manual|priority` (no default), and has **no `--assignee` or `--json/-j`** — text only. Open states = `--state unstarted --state started`; `--all-states` for everything.
-- `issue query` is the real query engine across **all** assignees: `--assignee`, `-U/--unassigned`, `--all-teams`, `--search`, `--project`, `-l/--label`, `--all-states` (its default), and `-j/--json`. The helper's audit uses `issue query --team SB -U`.
-- `issue update <id>` uses `-t/--title`, `-s/--state` (name or type), `-a/--assignee`, `-l/--label`, `--project`, `--description`/`-file`.
-- `project list --team SB [-j]` lists epics (the helper parses the `-j` JSON: `.nodes[].name`); `project view <slug>` shows one.
+CLI flag quirks (linear 2.0.0): `REFERENCE.md` → "CLI gotchas".
 
 ## Commands
 
@@ -47,67 +37,36 @@ Run from inside the relevant repo so repo-detection works (or pass `--repo`).
 bash scripts/linear.sh epics    # Linear projects + the repo each maps to
 ```
 
-### Stats — `/linear stats [--days N]`
-Momentum dashboard: lifetime shipped/open/canceled, velocity over the last N days (default 7), avg open-ticket age, oldest open, approx ship time, per-repo + per-epic breakdown, a 14-day created-per-day sparkline, and a motivational closer. Read-only — runs immediately.
-```bash
-bash scripts/linear.sh stats            # last 7 days
-bash scripts/linear.sh stats --days 30  # last 30 days
-```
-Computed from `issue query --all-states -j`. **Caveat:** this CLI has no `completedAt`, so "shipped in window" and "avg ship time" use `updatedAt` as the close-time proxy — directional, not exact.
-
-### Delivery board — `/linear board`
-Renders a self-contained HTML board for a repo: **ready queue** (tickets with no
-*open* blocker — what can actually be started right now) and **critical path**
-(longest unbroken chain of `blocks` relations), plus epic cards and a full
-ledger with a live blocked-by column. Linear has no view for either of the first
-two. Read-only.
+### Pack — `/linear pack SB-N`
+Everything `/work` needs to start, in one ~400 B JSON. Replaces `view` + `repo-label` +
+the branch-name lookup + `git status`:
 
 ```bash
-bash scripts/linear.sh board                          # repo detected from cwd
-bash scripts/linear.sh board --repo BET --repo BETC   # several labels at once
-bash scripts/linear.sh board --epic "BET — Import Platform"
-bash scripts/linear.sh board --out /tmp/mt.html
+bash scripts/linear.sh pack SB-42
+# {"issue":{...brief...},"branchName":"silverbeer/sb-42-<slug>","repoLabel":"DOT",
+#  "git":{"branch":"main","dirty":false},"pr":{"number":7,"url":"...","state":"OPEN"}}
 ```
 
-Prints the path of the file it wrote. Everything is computed from Linear — epic
-order comes from the project `sortOrder`, there is no per-project config.
+`branchName` is what `branch SB-N` would check out (Linear's own name is not used — it
+conflicts with ours). `repoLabel` is `null` outside a mapped repo. `pr` is the most
+relevant PR for the branch (OPEN wins over MERGED/CLOSED); `null` if none or no `gh`.
 
-Degrades cleanly: a repo with no `blocks` relations renders epics + ledger and
-says so instead of showing an empty critical path. If the graph contains a
-**cycle** the board leads with it — a cycle makes every ticket in the loop
-permanently unstartable, and Linear will not warn you.
-
-The board is only worth much once dependencies are actually modelled. Most repos
-have none; `BET` is the worked example (108 relations).
-
-**Publishing is manual** — the script writes a file; turning it into a shareable
-Artifact is a Claude tool call, not something the script can do.
-
-### DORA metrics — `bash scripts/metrics.sh [--days N]`
-Capacity + DORA-style delivery metrics (SB-360). Unlike `stats`, this uses the **Linear API** (`linear-gql.sh`) for real `createdAt/startedAt/completedAt` → true lead time + cycle time, plus deploy frequency (merged-PRs-to-main proxy via `gh search prs`) and a revert/hotfix change-failure proxy. MTTR is not implemented (no incident tracking yet). Read-only.
-```bash
-bash scripts/metrics.sh --days 30
-```
-
-### Cycle report — `python3 scripts/cycle-report.py [--cycle N | --previous]`
-Planned vs **adhoc** split for a cycle: issues and points, completion per stream,
-adhoc share, and how many issues were created mid-cycle. Read-only.
+### View — `/linear view SB-N [--full]`
+One issue. Default is a one-line brief JSON (~300 B):
+`{identifier,title,state,estimate,priority,labels,url}`.
 
 ```bash
-python3 scripts/cycle-report.py              # active cycle
-python3 scripts/cycle-report.py --previous   # the one that just ended
+bash scripts/linear.sh view SB-42          # brief JSON
+bash scripts/linear.sh view SB-42 --full   # CLI text incl. description (markdown)
 ```
 
-The portfolio is pre-user, so unplanned work is most of the throughput — the
-`adhoc` label exists to measure that, not to scold it. Run this at every cycle
-boundary and plan the next cycle at roughly `100% − adhoc share` of capacity.
+Use `--full` only when the AC text itself is needed (SB-905, SB-922).
 
-Two things to watch in the output:
-- **Unestimated issues make the point totals lie.** The report names them; fill
-  them in before trusting the ratio.
-- **Adhoc typically completes at a higher rate than planned work** — it jumps the
-  queue by definition. If planned completion is much lower, the cycle was
-  over-committed, not the team under-delivering.
+### Branch — `/linear branch SB-N`
+```bash
+bash scripts/linear.sh branch SB-42        # checkout silverbeer/sb-42-<slug>
+```
+See "The delivery loop" below for what the name does and does not trigger.
 
 ### Create — `/linear new <free text>`
 Infer a concise title, a short markdown description, and the `type` from the conversation. Detect `repo` from cwd (or pass `--epic` to derive it). Then **show the user the proposed title + labels + epic and confirm**, then file:
@@ -122,27 +81,9 @@ bash scripts/linear.sh new --title "Streak heatmap legend" \
   --type feature --epic "Goals & Multi-Metric Tracking" --body-file /tmp/issue.md
 ```
 
-Every issue also gets a `driven` label; it defaults to `driven:human`, which is correct for
-anything filed from an interactive session. Pass `--driven agent-supervised` (or set
-`LINEAR_DRIVEN`) only when an agent filed the ticket unprompted.
 The command prints the new `SB-N` URL — relay it. (`--repo` is optional; omit to auto-detect.)
 
-**Always set an estimate.** Pass `--estimate N` to `linear.sh new` (the CLI
-supports it natively). To (re)set one on an existing issue:
-
-```bash
-linear issue update SB-123 --estimate 3
-```
-
-Fibonacci 1/2/3/5/8. A first guess is fine — revise at close if reality
-differed. Use `0` for anything closed as superseded, duplicate or won't-do, so
-velocity doesn't count work nobody did (`cycle-report.py` distinguishes a
-deliberate 0 from a missing estimate).
-
-Unestimated tickets are not a cosmetic gap: on 2026-07-28 backfilling 18 of them
-moved the cycle from an apparent 30 points to an actual 73, and adhoc's share of
-points from 34% to 58%. Point totals without estimates understate throughput by
-more than half and make capacity planning worthless.
+**Always set an estimate** — `--estimate N`, Fibonacci 1/2/3/5/8; `0` for superseded/duplicate/won't-do. Why, and how to reset one: `REFERENCE.md` → "Estimates".
 
 ### List — `/linear list [--all] [--epic E]`
 ```bash
@@ -151,65 +92,14 @@ bash scripts/linear.sh list --all                    # include done/canceled
 bash scripts/linear.sh list --epic "Local Agent Automation"        # open issues in one epic
 bash scripts/linear.sh list --epic "Local Agent Automation" --all  # all states in that epic
 ```
-Output is TSV, one issue per line: `SB-N<TAB>State<TAB>P<prio><TAB>e<est><TAB>title`. Full
-titles, no colour, no column padding — built from `issue query -j`, not the text table.
-`epics` is the same shape: `name<TAB>status<TAB>[repo]`.
+TSV, one per line: `SB-N<TAB>State<TAB>P<prio><TAB>e<est><TAB>title`. `epics` is the
+same shape: `name<TAB>status<TAB>[repo]`.
 
 ### Move — `/linear move SB-N <state>`
 States: `Backlog → Todo → In Progress → In Review → Done` (or `Canceled`). Confirm, then:
 ```bash
 bash scripts/linear.sh move SB-42 "In Progress"
 ```
-
-### Autonomy — `/linear driven SB-N <value>`
-Re-stamp who drove the work. `driven` is a mutually-exclusive group, so this rewrites the
-issue's whole label set (via `set-driven.py`) rather than appending — the CLI's `-l` would
-fail with `labelIds not exclusive child labels`. Idempotent.
-
-```bash
-bash scripts/linear.sh driven SB-42 agent-supervised   # agent built it, human merges
-bash scripts/linear.sh driven SB-42 agent-auto         # agent delivered + QE verified it
-```
-
-**When an agent should call this:** at PR-open time, on its own ticket. Tickets are filed
-`driven:human` by default, so an agent that forgets to promote its work under-reports
-itself — which is the safe direction to fail.
-
-Both `cycle-report.py` and `metrics.sh` slice completed work by this label. The slice is
-over *completed* issues only: an unfinished ticket has not been delivered by anyone yet.
-It is orthogonal to `adhoc` — an adhoc ticket can be agent-delivered, and the two are
-never merged into one number.
-
-### View — `/linear view SB-N [--full]`
-Print one issue. The default is a one-line brief JSON (~300 B):
-`{identifier,title,state,estimate,priority,labels,url}` — enough to restate,
-branch and plan without paying for the description.
-
-```bash
-bash scripts/linear.sh view SB-42          # brief JSON
-bash scripts/linear.sh view SB-42 --full   # CLI text incl. description (markdown)
-```
-
-`--full` is the old passthrough to `linear issue view`, which renders the description as
-markdown and exits 1 with a clear message on a bad key. Reach for it only when the AC
-text itself is needed. The verb lives here so callers don't reach past the wrapper for
-the single most common read (SB-905, SB-922).
-
-### Pack — `/linear pack SB-N`
-Everything `/work` needs to start, in one ~400 B JSON. Replaces `view` + `repo-label` +
-the branch-name lookup + `git status`:
-
-```bash
-bash scripts/linear.sh pack SB-42
-# {"issue":{...brief...},"branchName":"silverbeer/sb-42-<slug>","repoLabel":"DOT",
-#  "git":{"branch":"main","dirty":false},"pr":{"number":7,"url":"...","state":"OPEN"}}
-```
-
-`branchName` is the name `branch SB-N` would check out (computed by the same function);
-Linear's own branch name is not included — it conflicts with ours. `repoLabel` is `null`
-outside a mapped repo. `pr` is the most relevant PR for the branch in any state (an OPEN
-one wins if several; `MERGED`/`CLOSED` otherwise), looked up by the checked-out branch
-when it is this ticket's, else by `branchName`; `null` if none (or `gh` is unavailable).
 
 ### Link — `/linear link SB-N [PR#]`
 Adds `Fixes SB-N` to a PR body (idempotent). Defaults to the current branch's open PR:
@@ -218,39 +108,28 @@ bash scripts/linear.sh link SB-42        # current branch's PR
 bash scripts/linear.sh link SB-42 420    # explicit PR number
 ```
 
-### Audit unassigned — `/linear audit`
-Find (and optionally fix) issues with no assignee — backs convention #1:
-```bash
-bash scripts/linear.sh audit-unassigned         # list only
-bash scripts/linear.sh audit-unassigned --fix   # assign all to silverbeer.io
-```
-
-## Anything not covered
-
-Drop to the raw CLI (`linear issue ...`, **singular**) but keep conventions #1–#4. Useful raw recipes:
-- List labels (to confirm group membership): `linear label list --team SB`
-- Add a comment: `linear issue comment add SB-N --body "text"` (or `--body-file /tmp/c.md` for markdown)
-- Unassigned set: `linear issue query --team SB --unassigned --all-states` (or `--assignee <user>` for someone specific; add `-j` for JSON).
-
-For anything the CLI can't do (initiatives, cycles, team settings, metrics) use the raw GraphQL wrapper `scripts/linear-gql.sh` (reads a personal API key from `~/.config/linear/gql-key`; supports variables as `$2`). The CLI also has a native `linear api '<query>'` that uses its own keychain auth. Verify the whole setup with `scripts/doctor.sh`.
+### Everything else
+`stats`, `board`, `driven`, `audit-unassigned`, `metrics.sh`, `cycle-report.py`, raw CLI
+and GraphQL recipes: `REFERENCE.md`.
 
 ## The delivery loop (paved road)
 
-State transitions are **automatic** via the connected GitHub integration — do NOT `move` manually for these:
+State transitions are **automatic** via the GitHub integration — do NOT `move` manually
+for these. This is the canonical statement of the rule (verified by experiment SB-938,
+2026-08-29); every other doc points here.
 
-| Git event | → Linear state |
-|-----------|----------------|
-| branch pushed (name contains `sb-N`) | In Progress |
-| PR marked ready for review | In Review |
-| PR merged | Done |
+Linear keys on the `sb-<n>` token in a **PR head branch name**, any prefix. A branch
+push on its own does nothing. A draft PR links the PR to the issue but does not change
+state; a non-draft PR (or draft → ready) moves the issue to **In Progress**. Merging a PR
+whose body contains `Fixes SB-N` moves it to Done. The `silverbeer/` prefix is a naming
+convention only.
 
-So the loop is:
 ```
-linear.sh branch SB-N     # checkout silverbeer/sb-n-<slug>  → auto: In Progress
+linear.sh branch SB-N     # checkout silverbeer/sb-n-<slug>  (name carries sb-n)
 # …implement + test…
-/cppp                     # commit, push, open PR (body: "Fixes SB-N")  → auto: In Review
+/cppp                     # commit, push, open PR (body: "Fixes SB-N")  → auto: In Progress
 # merge the PR            #                                             → auto: Done
 ```
-`linear.sh move` is only for grooming (Backlog→Todo) or exceptions. Branch names **must** contain the issue id — `linear.sh branch` guarantees it.
-
-**Still open (SB-18):** first-class sub-issues in the CLI (currently done via `linear-gql.sh` `parentId`), and smarter area-label inference from changed files.
+`linear.sh move` is for grooming (Backlog→Todo), In Review, or exceptions. Branch names
+**must** contain `sb-N` — `linear.sh branch` guarantees it; `linear.sh link` guarantees
+the `Fixes` line.
