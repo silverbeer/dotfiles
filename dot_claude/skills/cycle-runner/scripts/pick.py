@@ -89,6 +89,18 @@ READY_STATE_TYPES = ("unstarted", "started")
 # checks `!= "Done"`, which is a live gap there (a Canceled blocker still
 # reads as open on the board); pick.py does not inherit it.
 CLOSED_STATES = ("Done", "Canceled")
+# A gate in one of these states is waiting on a HUMAN, so the ticket is not
+# workable no matter how ready the rest of it looks (SB-944). Draining a gate
+# is step 2 of run.sh (handle_merge_gate); picking is step 3. Without this,
+# step 3 hands a gate-blocked ticket to /work-headless every tick, pays ~180k
+# tokens to rediscover the gate, gets `blocked` back, changes nothing — and
+# does it again 30 minutes later. It also starves the queue: ready_queue()
+# sorts by priority and run.sh takes [0], so one gated ticket at the front
+# blocks everything behind it for as long as the human takes to answer.
+#
+# `gate:approved` / `gate:rejected` are deliberately NOT here: those are
+# resolved, step 2 acts on them, and the ticket is workable again.
+PENDING_GATE_LABELS = ("gate:awaiting-approval", "gate:needs-human")
 
 
 def driven_label(issue: dict) -> str | None:
@@ -109,6 +121,17 @@ def is_ready(issue: dict) -> bool:
         r["type"] == "blocks" and r["issue"]["state"]["name"] not in CLOSED_STATES
         for r in issue["inverseRelations"]["nodes"]
     )
+
+
+def pending_gate(issue: dict) -> str | None:
+    """The pending `gate:*` label on this issue, if any. `gate:*` is a
+    mutually-exclusive Linear label group (see gatekeeper/scripts/gate.py),
+    so at most one can be set — but this does not rely on that: any pending
+    one is enough to withhold the ticket."""
+    for name in (n["name"] for n in issue["labels"]["nodes"]):
+        if name in PENDING_GATE_LABELS:
+            return name
+    return None
 
 
 def policy_ok(issue: dict, driven: str) -> tuple[bool, str | None]:
@@ -143,6 +166,13 @@ def ready_queue(issues: list[dict]) -> list[dict]:
         if driven is None or driven == "driven:human":
             continue
         if issue["state"]["type"] not in READY_STATE_TYPES:
+            continue
+        gate = pending_gate(issue)
+        if gate is not None:
+            # Not a policy violation — a normal, expected state. Logged so a
+            # quiet tick is legible in the run log rather than looking like an
+            # empty queue.
+            print(f"note: pick: skipping {issue['identifier']} ({gate} — waiting on a human)", file=sys.stderr)
             continue
         if not is_ready(issue):
             continue

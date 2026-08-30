@@ -174,6 +174,36 @@ class ReadyQueueTests(unittest.TestCase):
         i = issue(driven="driven:agent-auto", estimate=5)
         self.assertEqual(pick.ready_queue([i]), [])
 
+    # SB-944: a gate is a human's turn, not the agent's. Observed in
+    # production — SB-593 (In Progress, driven:agent-supervised, no blocker,
+    # gate:awaiting-approval) was picked on two consecutive ticks, returned
+    # `blocked` both times, and would have kept going every 30 minutes.
+    def test_awaiting_approval_gate_is_skipped(self):
+        i = issue(extra_labels=["gate:awaiting-approval"])
+        self.assertEqual(pick.ready_queue([i]), [])
+
+    def test_needs_human_gate_is_skipped(self):
+        i = issue(extra_labels=["gate:needs-human"])
+        self.assertEqual(pick.ready_queue([i]), [])
+
+    # The other half of the contract: a RESOLVED gate must not withhold the
+    # ticket, or approving one would strand it instead of releasing it.
+    def test_approved_gate_is_still_pickable(self):
+        i = issue(extra_labels=["gate:approved"])
+        self.assertEqual([x["identifier"] for x in pick.ready_queue([i])], [i["identifier"]])
+
+    def test_rejected_gate_is_still_pickable(self):
+        i = issue(extra_labels=["gate:rejected"])
+        self.assertEqual([x["identifier"] for x in pick.ready_queue([i])], [i["identifier"]])
+
+    # Queue starvation, which is the half that bites even when spend does not:
+    # run.sh takes queue[0], so a gated ticket sorted to the front used to
+    # block every clean ticket behind it indefinitely.
+    def test_a_gated_ticket_does_not_starve_a_clean_one_behind_it(self):
+        gated = issue(identifier="SB-1", priority=1, extra_labels=["gate:awaiting-approval"])
+        clean = issue(identifier="SB-2", priority=3)
+        self.assertEqual([x["identifier"] for x in pick.ready_queue([gated, clean])], ["SB-2"])
+
     def test_sorted_by_priority_then_oldest(self):
         urgent = issue(identifier="SB-2", priority=1, created_at="2026-01-05T00:00:00.000Z")
         no_priority_old = issue(identifier="SB-1", priority=0, created_at="2026-01-01T00:00:00.000Z")
