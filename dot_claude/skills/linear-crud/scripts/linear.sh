@@ -17,7 +17,8 @@
 #   stats [--days N]            momentum dashboard (totals, velocity, age, sparkline)
 #   new   --title T (--body B | --body-file F) --type TYPE [--repo R] [--epic E]
 #         [--driven human|agent-supervised|agent-auto] [--label L ...] [--estimate N]
-#   branch SB-N                 checkout silverbeer/sb-n-<slug> (sb-n token links the PR)
+#   branch SB-N [--from-head]   checkout silverbeer/sb-n-<slug> off origin/<default>
+#                               (sb-n token links the PR; --from-head uses local HEAD)
 #   list  [--all] [--repo R] [--epic E]   my issues (open by default), TSV
 #   view  SB-N [--full]         brief JSON for one issue (--full: CLI text incl. description)
 #   pack  SB-N                  one JSON: brief issue + branchName + repoLabel + git + pr
@@ -493,18 +494,71 @@ branch_name_for() {
   echo "silverbeer/$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')-$slug"
 }
 
+# The ref a new ticket branch is cut from. `origin/HEAD` is the repo's own
+# answer to "what is the default branch"; it is only set if someone ran
+# `git remote set-head`, so fall back to origin/main, and to local HEAD if the
+# remote is unreachable. Printing the fallback matters: a run that quietly
+# branched off a stale local main is exactly the failure SB-946 fixed.
+branch_base_for() {
+  local base
+  if ! git fetch --quiet origin 2>/dev/null; then
+    echo "  ! git fetch origin failed — branching off local HEAD instead" >&2
+    git rev-parse --abbrev-ref HEAD
+    return 0
+  fi
+  base="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  if [ -z "$base" ]; then
+    if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+      base="origin/main"
+    else
+      echo "  ! no origin/HEAD and no origin/main — branching off local HEAD" >&2
+      git rev-parse --abbrev-ref HEAD
+      return 0
+    fi
+  fi
+  echo "$base"
+}
+
 # Create + checkout a branch carrying the sb-<n> token. Linear links the PR
 # opened from it and moves the issue to In Progress when that PR is non-draft;
 # the push itself does nothing (verified SB-938). Needs linear-gql.sh.
+#
+# Cut from origin/<default>, NOT local HEAD (SB-946): a cycle-runner tick found
+# local main 13 commits behind and raised a human gate over it, when the only
+# thing that ever mattered was which ref the branch came from. Pass --from-head
+# to branch off the current checkout instead.
 cmd_branch() {
-  local key="${1:-}"
+  local key="" from_head=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --from-head) from_head=1; shift ;;
+      *) key="$1"; shift ;;
+    esac
+  done
+  [ -n "$key" ] || die "branch: need an issue key (e.g. SB-123)"
   local title
   title="$(issue_brief "$key" branch | jq -r .title)"
   local branch
   branch="$(branch_name_for "$key" "$title")"
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "branch: not inside a git repo"
-  git checkout -b "$branch"
-  echo "→ $branch"
+
+  # An existing ticket branch is checked out as-is and NEVER reset: a resumed
+  # run must not discard commits already on it. `git checkout -B` would.
+  if git rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
+    git checkout "$branch"
+    echo "→ $branch (already existed — checked out, not reset)"
+    echo "  Opening a (non-draft) PR from this branch moves $key to In Progress."
+    return 0
+  fi
+
+  local base
+  if [ "$from_head" -eq 1 ]; then
+    base="$(git rev-parse --abbrev-ref HEAD)"
+  else
+    base="$(branch_base_for)"
+  fi
+  git checkout -b "$branch" "$base"
+  echo "→ $branch (from $base)"
   echo "  Opening a (non-draft) PR from this branch moves $key to In Progress."
 }
 

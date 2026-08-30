@@ -71,14 +71,33 @@ the phase-3 plan body; don't stop for it.
 ### 2. Branch
 
 ```bash
-git checkout main && git pull
 bash ~/.claude/skills/linear-crud/scripts/linear.sh branch SB-<n>
 ```
 
-Check `.git.dirty` from the phase-1 pack (or re-run `git status`) **before**
-`git checkout main`. Dirty, or branch already exists → `blocked` gate with
-`git status` output as the body, exit. A headless run never stashes or
-discards to force its way past this.
+That is the whole phase. `linear.sh branch` fetches and cuts the branch from
+`origin/<default>`, so **local `main` being behind is not a blocker and never
+raises a gate** — the branch does not come from local HEAD. Do not `git pull`
+or `git checkout main` first; there is nothing to bring up to date.
+
+`.git.dirty` from the phase-1 pack is the **single source of truth** for a
+dirty tree. Do not re-run `git status` and read it yourself: `.git.dirty` is
+computed with `--porcelain -uno`, so untracked files are deliberately not
+counted, and a raw `git status` will show untracked scratch dirs and a
+behind-by-N line that mean nothing here. Reading the raw output is what made a
+run stop and wake a human over a `git fetch` (SB-946).
+
+Gate **only** where work could actually be destroyed:
+
+| condition | action |
+|---|---|
+| `.git.dirty` is true (tracked files modified) | `blocked` gate, exit |
+| ticket branch exists with commits not in `origin/<default>` | `blocked` gate, exit |
+| behind origin, untracked files, both | proceed — not blockers |
+
+An existing ticket branch with no unique commits is checked out and reused;
+`linear.sh branch` never resets it, so a resumed run cannot lose commits.
+A headless run still never stashes or discards to force its way past a genuine
+dirty tree.
 
 ### 3. Plan — gate (conditional)
 
@@ -233,7 +252,24 @@ done
 ```
 
 Write the gate body to a file first (`$RUN_SCRATCH/merge.md` or `$RUN_SCRATCH/blocked.md`) —
-`gate.py --body` reads a file, never inline text:
+`gate.py --body` reads a file, never inline text.
+
+**Every `blocked` body starts with three lines, in this order, before anything
+else** (SB-946 — the first one that reached a phone was raw `git status` with
+no statement of what was wanted):
+
+```
+What: <what could not be done, naming the ticket>
+Why:  <the reason, in a sentence — not a command's output>
+Need: <the exact command or decision required of the human>
+```
+
+`Need:` names an action, never a state — "run `git -C ~/gitrepos/mt pull`" is
+an instruction, "the tree is dirty" is not. Raw command output goes **below**
+these lines, never above: `gate.py` truncates the Telegram DM at
+`SUMMARY_CHARS` and sends the full text to the Linear comment, so anything
+after the first few lines may not reach the phone at all.
+
 
 - `success` → body notes the PR URL and that CI is green; `gate.py open --kind merge
   --body "$RUN_SCRATCH/merge.md" --ticket SB-<n> --session-id "$SESSION_ID"

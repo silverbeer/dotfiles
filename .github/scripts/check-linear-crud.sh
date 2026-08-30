@@ -259,6 +259,82 @@ if (cd "$prepo" && bash "$LINEAR_SH" pack not-a-key >/dev/null 2>"$WORK/stderr")
 elif grep -q 'usage: pack SB-123' "$WORK/stderr"; then ok "pack: rejects a malformed key with usage"
 else bad "pack: 'not-a-key' failed without the usage message: $(cat "$WORK/stderr")"; fi
 
+# ------------------------------------ 3b. branch: cuts from origin (SB-946)
+
+# A cycle-runner tick woke a human because local main was 13 commits behind and
+# `cmd_branch` cut from local HEAD. These pin the fix against a real repo with a
+# real (local, offline) origin: the base is the REMOTE ref, so local staleness
+# is irrelevant, and an existing ticket branch is never reset.
+note "3b. branch: base ref and existing-branch safety"
+
+bare="$WORK/repos/origin-bc.git"
+git -c init.defaultBranch=main init -q --bare "$bare"
+git -C "$prepo" checkout -q -- README.md   # undo the dirty-tree fixture above
+git -C "$prepo" remote add origin "$bare"
+git -C "$prepo" push -q -u origin main
+
+# Advance origin/main by a commit the local checkout will not have, then rewind
+# local main — the exact "13 commits behind" shape, in miniature.
+clone="$WORK/repos/other"
+git clone -q "$bare" "$clone"
+printf 'from origin\n' >"$clone/ORIGIN_ONLY.md"
+git -C "$clone" add ORIGIN_ONLY.md
+git -C "$clone" -c user.name=ci -c user.email=ci@example.invalid commit -q -m "origin-only commit"
+git -C "$clone" push -q origin main
+
+if (cd "$prepo" && bash "$LINEAR_SH" branch SB-1 >"$WORK/branch.out" 2>&1); then
+  if [ -f "$prepo/ORIGIN_ONLY.md" ]; then
+    ok "branch: cut from origin/main, not stale local HEAD (behind-ness is not a blocker)"
+  else
+    bad "branch: branched off local HEAD — the origin-only commit is missing: $(cat "$WORK/branch.out")"
+  fi
+  if grep -q 'from origin/main' "$WORK/branch.out"; then
+    ok "branch: names the base ref it used"
+  else
+    bad "branch: did not report its base ref: $(cat "$WORK/branch.out")"
+  fi
+else
+  bad "branch: failed on a clean tree: $(cat "$WORK/branch.out")"
+fi
+
+# An existing ticket branch carrying its own commit must be checked out, NEVER
+# reset — `git checkout -B` here would silently destroy delivered work.
+printf 'wip\n' >"$prepo/WIP.md"
+git -C "$prepo" add WIP.md
+git -C "$prepo" -c user.name=ci -c user.email=ci@example.invalid commit -q -m "work in progress"
+wip_sha="$(git -C "$prepo" rev-parse HEAD)"
+git -C "$prepo" checkout -q main
+if (cd "$prepo" && bash "$LINEAR_SH" branch SB-1 >"$WORK/branch2.out" 2>&1); then
+  now_sha="$(git -C "$prepo" rev-parse HEAD)"
+  if [ "$now_sha" = "$wip_sha" ]; then
+    ok "branch: existing ticket branch reused with its commits intact, not reset"
+  else
+    bad "branch: existing branch was reset — commit $wip_sha lost, HEAD is now $now_sha"
+  fi
+  if grep -q 'already existed' "$WORK/branch2.out"; then
+    ok "branch: says the branch already existed rather than implying it made one"
+  else
+    bad "branch: reused a branch without saying so: $(cat "$WORK/branch2.out")"
+  fi
+else
+  bad "branch: failed on an existing ticket branch: $(cat "$WORK/branch2.out")"
+fi
+git -C "$prepo" checkout -q main
+
+# --from-head is the documented opt-out: base is local HEAD, no fetch needed.
+git -C "$prepo" branch -q -D "$(git -C "$prepo" branch --list 'silverbeer/sb-1-*' | tr -d ' *')" 2>/dev/null || true
+git -C "$prepo" reset -q --hard main
+if (cd "$prepo" && bash "$LINEAR_SH" branch SB-1 --from-head >"$WORK/branch3.out" 2>&1); then
+  if grep -q 'from main' "$WORK/branch3.out"; then
+    ok "branch --from-head: bases on local HEAD instead of the remote ref"
+  else
+    bad "branch --from-head: did not base on local HEAD: $(cat "$WORK/branch3.out")"
+  fi
+else
+  bad "branch --from-head: failed: $(cat "$WORK/branch3.out")"
+fi
+git -C "$prepo" checkout -q main
+
 # ----------------------------------------------- 4-6. python unit tests
 
 note "4-6. python unittest in $tests_dir"
