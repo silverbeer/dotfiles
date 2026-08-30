@@ -37,6 +37,7 @@
 !.claude/skills/session-audit
 !.claude/skills/backlog-groom
 !.claude/skills/gatekeeper
+!.claude/skills/cycle-runner
 .claude/worktrees
 # Python bytecode left by running skill tests from the source tree.
 .claude/**/__pycache__

@@ -72,19 +72,23 @@ test_readme_dropped_from_chezmoiignore_is_rejected() {
 
 # .github/tests lives under .github precisely so it inherits that protection.
 # Assert it, rather than assuming it. harness.sh and run.sh exist nowhere else
-# in the repo, so they are an unambiguous marker of THIS directory leaking —
-# unlike a bare "tests" path segment, which is no longer unique to it: a
-# skill's own tests/ (dot_claude/skills/gatekeeper/tests, SB-508) is a
-# legitimate, intentionally-managed deliverable, not a leak.
+# in the repo, so a bare basename USED TO BE an unambiguous marker of THIS
+# directory leaking — until SB-929 gave a legitimately-managed skill script
+# the same basename (dot_claude/skills/cycle-runner/scripts/run.sh, deployed
+# to .claude/skills/cycle-runner/scripts/run.sh, which is supposed to be
+# there). The marker has to be the full `.github/tests/` prefix now, not just
+# the filename — unlike a bare "tests" path segment, which was already not
+# unique to it: a skill's own tests/ (dot_claude/skills/gatekeeper/tests,
+# SB-508) is a legitimate, intentionally-managed deliverable, not a leak.
 test_github_tests_dir_is_not_a_chezmoi_target() {
   need_bin chezmoi
   work="$(new_dir)"
   dest="$work/home"; mkdir -p "$dest"
   HOME="$dest" chezmoi --source "$REPO_ROOT" --destination "$dest" --no-tty managed \
     >"$work/managed.txt"
-  if grep -qE '(^|/)(harness\.sh|run\.sh)$' "$work/managed.txt"; then
+  if grep -qE '(^|/)\.github/tests/(harness\.sh|run\.sh)$' "$work/managed.txt"; then
     fail "the .github test suite is being deployed into \$HOME:
-$(grep -nE '(^|/)(harness\.sh|run\.sh)$' "$work/managed.txt")"
+$(grep -nE '(^|/)\.github/tests/(harness\.sh|run\.sh)$' "$work/managed.txt")"
   fi
 }
 

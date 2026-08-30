@@ -121,6 +121,14 @@ jobs:
       - name: gatekeeper scripts
         run: .github/scripts/check-gatekeeper.sh
 
+      # Offline tests for the cycle-runner skill: pick.py's driven x estimate
+      # x label autonomy policy and ready-queue blocker detection (pure
+      # python), and run.sh's lock acquire/contend/stale-recovery, CI-state
+      # reduction, and merge-gate decision (sourced with a stubbed `gh`). No
+      # network, no real `claude`/`gh`/Telegram call.
+      - name: cycle-runner scripts
+        run: .github/scripts/check-cycle-runner-policy.sh
+
   chezmoi:
     name: chezmoi (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

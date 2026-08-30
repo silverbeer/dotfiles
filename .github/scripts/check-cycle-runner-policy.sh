@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+# Offline tests for the cycle-runner skill (SB-929): pick.py's driven x
+# estimate x label autonomy policy and ready-queue blocker detection (pure
+# python, no network — dot_claude/skills/cycle-runner/tests/), and run.sh's
+# bash-level mechanics (lock acquire/contend/stale-recovery, the CI
+# green/pending/failure reduction, and the merge-gate decision) sourced
+# directly with `gh` stubbed — never a real `claude`, `gh`, or Telegram call.
+#
+# run.sh is never executed for real here: it carries its own source guard
+# (`[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0`, same pattern linear.sh
+# uses) so `source`-ing it defines the functions below without running the
+# invocation body that would spawn `claude -p`, hit Telegram, or shell out to
+# `gh pr merge`.
+#
+# Marker-comment parsing (the `<!-- sb-agent:{kind}:{run_id}:{session_id} -->`
+# format) is NOT tested here — pick.py and run.sh never parse or emit it;
+# that is entirely gate.py's job and is already covered by
+# check-gatekeeper.sh's test_gate.py.
+# shellcheck disable=SC2016  # the run_sourced/sed snippets quote run.sh's $-names literally, on purpose
+set -euo pipefail
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+
+for b in python3 bash; do
+  command -v "$b" >/dev/null 2>&1 || die "$b is not installed"
+done
+
+RUN_SH="$REPO/dot_claude/skills/cycle-runner/scripts/run.sh"
+PICK_PY="$REPO/dot_claude/skills/cycle-runner/scripts/pick.py"
+TESTS_DIR="$REPO/dot_claude/skills/cycle-runner/tests"
+[ -f "$RUN_SH" ] || die "missing $RUN_SH — wrong REPO?"
+[ -f "$PICK_PY" ] || die "missing $PICK_PY — wrong REPO?"
+[ -d "$TESTS_DIR" ] || die "missing $TESTS_DIR — wrong REPO?"
+
+fails=0
+ok()  { note "ok   $*"; }
+bad() { err "$*"; fails=$((fails + 1)); }
+
+# ----------------------------------------- 1. pick.py policy — python unit tests
+
+note "1. pick.py policy + ready-queue unit tests in $TESTS_DIR"
+export PYTHONDONTWRITEBYTECODE=1  # never leave __pycache__ in the source tree
+if py_out="$(cd "$REPO" && python3 -m unittest discover -s "$TESTS_DIR" -p 'test_*.py' -v 2>&1)"; then
+  ok "python: $(printf '%s\n' "$py_out" | grep -E '^(Ran|OK)' | tr '\n' ' ')"
+else
+  bad "pick.py unit tests failed:"
+  printf '%s\n' "$py_out" | sed 's/^/    | /' >&2
+fi
+py_ran="$(printf '%s\n' "$py_out" | sed -nE 's/^Ran ([0-9]+) tests?.*/\1/p')"
+[ "${py_ran:-0}" -ge 20 ] || bad "python: expected at least 20 tests to run, unittest reported '${py_ran:-none}' — discovery broken?"
+
+# ------------------------------------------------- 2. run.sh bash mechanics
+
+note "2. run.sh lock / CI-state / merge-gate mechanics (sourced, gh stubbed)"
+
+STATE_DIR="$WORK/state"
+bin="$WORK/bin"; mkdir -p "$bin"
+
+# `gh` is replaced per-scenario below; a default stub that fails loudly means
+# any call this suite did not anticipate is a test failure, not a silent
+# no-op.
+default_gh() {
+  cat >"$bin/gh" <<'STUB'
+#!/usr/bin/env bash
+echo "check-cycle-runner-policy: unexpected gh call: $*" >&2
+exit 97
+STUB
+  chmod +x "$bin/gh"
+}
+default_gh
+export PATH="$bin:$PATH"
+
+# Source run.sh in a fresh subshell per scenario: it sets a real `trap …
+# EXIT`, so isolating each scenario in its own subshell is what stops one
+# test's lock/trap state leaking into the next, exactly like harness.sh's
+# per-test subshell.
+run_sourced() {  # CODE — bash run inside a subshell with run.sh sourced first
+  bash -c '
+    set -uo pipefail
+    export GATEKEEPER_STATE="$1"; shift
+    # shellcheck disable=SC1090
+    source "$1"; shift
+    eval "$1"
+  ' _ "$STATE_DIR" "$RUN_SH" "$1"
+}
+
+# --- 2a. lock: acquired
+
+rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR"
+if out="$(run_sourced 'acquire_lock; [[ -f "$LOCK_DIR/pid" ]] && [[ "$(cat "$LOCK_DIR/pid")" == "$$" ]] && echo LOCK_OK')" \
+   && [[ "$out" == *LOCK_OK* ]]; then
+  ok "lock: acquired cleanly, pid file matches the holder"
+else
+  bad "lock: acquire on a clear state did not succeed: $out"
+fi
+# The subshell's EXIT trap must have released it.
+[ ! -d "$STATE_DIR/lock" ] || bad "lock: still present after the acquiring process exited (release_lock trap did not fire)"
+
+# --- 2b. lock: contended (held by a running pid — this shell's own $$)
+
+rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR/lock"
+echo $$ >"$STATE_DIR/lock/pid"
+if out="$(run_sourced 'acquire_lock; echo SHOULD_NOT_REACH' 2>&1)"; rc=$?; then
+  if [[ "$rc" -eq 0 ]] && [[ "$out" == *"another invocation is in progress"* ]] && [[ "$out" != *SHOULD_NOT_REACH* ]]; then
+    ok "lock: contended by a running pid — exits 0 quietly, does not proceed past acquire_lock"
+  else
+    bad "lock: contended case did not behave as expected (rc=$rc): $out"
+  fi
+else
+  bad "lock: contended case exited non-zero ($rc): $out"
+fi
+[ "$(cat "$STATE_DIR/lock/pid")" = "$$" ] || bad "lock: contended case mutated another holder's pid file"
+
+# --- 2c. lock: stale (pid file names a process that is no longer running)
+
+rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR/lock"
+( : ) & dead_pid=$!; wait "$dead_pid" 2>/dev/null || true
+echo "$dead_pid" >"$STATE_DIR/lock/pid"
+if out="$(run_sourced 'acquire_lock; [[ -f "$LOCK_DIR/pid" ]] && [[ "$(cat "$LOCK_DIR/pid")" == "$$" ]] && echo REACQUIRED')" \
+   && [[ "$out" == *"stale lock found"* ]] && [[ "$out" == *REACQUIRED* ]]; then
+  ok "lock: stale pid recovered — old lock removed, new holder's pid written"
+else
+  bad "lock: stale-recovery case did not behave as expected: $out"
+fi
+
+# --- 2c2. lock: race window — mkdir'd, pid not written yet (SB-929 review fix)
+#
+# A lock dir that exists with NO pid file at all is ambiguous: it could be a
+# holder that mkdir'd microseconds ago and hasn't reached `echo $$ >pid`, or
+# it could be a genuinely abandoned lock (holder crashed between mkdir and
+# the pid write, vanishingly rare but not impossible). acquire_lock() must
+# not steal the former.
+
+# 2c2a. Within the grace period (the common case: nothing backdated, this
+# lock dir was created moments ago by the harness itself) -> back off, exit
+# 0, and leave the lock dir + its still-missing pid file untouched.
+rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR/lock"
+if out="$(run_sourced 'acquire_lock; echo SHOULD_NOT_REACH' 2>&1)"; rc=$?; then
+  if [[ "$rc" -eq 0 ]] && [[ "$out" == *"holder is still writing its pid"* ]] && [[ "$out" != *SHOULD_NOT_REACH* ]]; then
+    ok "lock: empty pid within grace period -> backs off quietly, does not proceed past acquire_lock"
+  else
+    bad "lock: empty-pid-within-grace case did not behave as expected (rc=$rc): $out"
+  fi
+else
+  bad "lock: empty-pid-within-grace case exited non-zero ($rc): $out"
+fi
+[ ! -f "$STATE_DIR/lock/pid" ] || bad "lock: empty-pid-within-grace case wrote a pid file — it stole the lock instead of backing off"
+
+# 2c2b. Grace period expired (LOCK_GRACE_SECS overridden to 0 so this same
+# freshly-mkdir'd, still-pid-less dir is immediately treated as past its
+# window) -> now it IS stale, gets removed and reacquired, same as 2c above.
+rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR/lock"
+if out="$(run_sourced 'LOCK_GRACE_SECS=0; acquire_lock; [[ -f "$LOCK_DIR/pid" ]] && [[ "$(cat "$LOCK_DIR/pid")" == "$$" ]] && echo REACQUIRED')" \
+   && [[ "$out" == *"stale lock found"* ]] && [[ "$out" == *REACQUIRED* ]]; then
+  ok "lock: empty pid past grace period -> treated as stale, removed and reacquired"
+else
+  bad "lock: empty-pid-past-grace case did not behave as expected: $out"
+fi
+
+# --- 2d. ci_state: success / pending / failure
+
+gh_checks_stub() {  # STATE — makes `gh pr checks … --json state --jq …` report it
+  cat >"$bin/gh" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1 \$2" == "pr checks" ]]; then echo "$1"; exit 0; fi
+echo "check-cycle-runner-policy: unexpected gh call: \$*" >&2
+exit 97
+STUB
+  chmod +x "$bin/gh"
+}
+# The stub above hands back the STATE VALUE directly (ci_state's --jq reduces
+# gh's real JSON to exactly one of success/pending/failure) — the point under
+# test is ci_state()'s own control flow, not gh's --jq expression.
+ci_state_case() {
+  local want="$1"
+  gh_checks_stub "$want"
+  local got
+  got="$(run_sourced 'ci_state "https://example.invalid/pr/1"')"
+  if [ "$got" = "$want" ]; then ok "ci_state: gh reports $want -> $got"
+  else bad "ci_state: gh reports $want, ci_state() returned '$got'"; fi
+}
+ci_state_case success
+ci_state_case pending
+ci_state_case failure
+
+# --- 2d2. ci_state: the real jq filter, exercised over the actual gh check
+# state vocabulary (SB-929 review fix) — 2d above bypasses ci_state()'s own
+# `--jq` expression entirely (its stub hands back the wanted word directly,
+# by design, per the comment above it), so a broken filter could pass 2d and
+# still fail open on, say, a CANCELLED check in reality. This stub instead
+# returns real `[{"state": ...}, ...]` JSON and pipes it through the actual
+# filter string embedded in run.sh via the real `jq` binary — `gh`'s own
+# `--jq` flag is documented to behave like `jq -r` for a scalar result, which
+# is what run.sh's `[[ "$state" != … ]]` string comparisons assume.
+states_json() {  # STATE...
+  local json="[" first=1 s
+  for s in "$@"; do
+    [ "$first" -eq 1 ] && first=0 || json+=","
+    json+="{\"state\":\"$s\"}"
+  done
+  printf '%s]' "$json"
+}
+gh_checks_real_jq_stub() {  # STATE...
+  local json; json="$(states_json "$@")"
+  cat >"$bin/gh" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1 \$2" == "pr checks" ]]; then
+  filter="\${*: -1}"
+  printf '%s' '$json' | jq -r "\$filter"
+  exit 0
+fi
+echo "check-cycle-runner-policy: unexpected gh call: \$*" >&2
+exit 97
+STUB
+  chmod +x "$bin/gh"
+}
+ci_state_real_jq_case() {  # WANT STATE...
+  local want="$1"; shift
+  gh_checks_real_jq_stub "$@"
+  local got
+  got="$(run_sourced 'ci_state "https://example.invalid/pr/1"')"
+  if [ "$got" = "$want" ]; then ok "ci_state (real jq): states=($*) -> $want"
+  else bad "ci_state (real jq): states=($*) expected $want, got '$got'"; fi
+}
+# Passing set: only SUCCESS/NEUTRAL/SKIPPED.
+ci_state_real_jq_case success SUCCESS
+ci_state_real_jq_case success SUCCESS NEUTRAL SKIPPED
+# Still running: PENDING/IN_PROGRESS/QUEUED.
+ci_state_real_jq_case pending SUCCESS PENDING
+ci_state_real_jq_case pending SUCCESS IN_PROGRESS
+ci_state_real_jq_case pending SUCCESS QUEUED
+# NEGATIVE — everything that isn't literally FAILURE/PENDING used to fall
+# through to "success" before this fix; each of these must be "failure".
+ci_state_real_jq_case failure SUCCESS CANCELLED
+ci_state_real_jq_case failure SUCCESS ERROR
+ci_state_real_jq_case failure SUCCESS TIMED_OUT
+ci_state_real_jq_case failure SUCCESS ACTION_REQUIRED
+ci_state_real_jq_case failure SUCCESS STARTUP_FAILURE
+# NEGATIVE — an unrecognized state must never be silently read as success.
+ci_state_real_jq_case failure SUCCESS SOME_FUTURE_STATE_GH_ADDS_LATER
+# A known failure state alongside a still-pending one is "failure", not
+# "pending" — failure takes priority, same as the pre-fix reduction did.
+ci_state_real_jq_case failure PENDING CANCELLED
+
+default_gh  # restore the loud default before the merge-gate scenarios below
+
+# --- 2e. handle_merge_gate: missing pr_url file -> no merge attempted
+
+rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR"
+default_gh
+if out="$(run_sourced 'handle_merge_gate SB-1 run-without-pr gate-1; printf "%s\n" "${SUMMARY_LINES[@]}"')"; then
+  if [[ "$out" == *"PR URL is missing"* ]]; then ok "handle_merge_gate: no pr_url file -> not merged, summary says so"
+  else bad "handle_merge_gate: missing pr_url case did not report correctly: $out"; fi
+else
+  bad "handle_merge_gate: missing pr_url case exited non-zero: $out"
+fi
+
+# --- 2f. handle_merge_gate: CI green -> gh pr merge is actually called
+
+rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR/runs/run-green"
+echo "https://github.com/silverbeer/dotfiles/pull/1" >"$STATE_DIR/runs/run-green/pr_url"
+MERGE_MARKER="$WORK/merge-was-called"; rm -f "$MERGE_MARKER"
+cat >"$bin/gh" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1 \$2" == "pr checks" ]]; then echo success; exit 0; fi
+if [[ "\$1 \$2" == "pr merge" ]]; then echo "\$*" >"$MERGE_MARKER"; exit 0; fi
+echo "check-cycle-runner-policy: unexpected gh call: \$*" >&2
+exit 97
+STUB
+chmod +x "$bin/gh"
+out="$(run_sourced 'handle_merge_gate SB-2 run-green gate-2; printf "%s\n" "${SUMMARY_LINES[@]}"')"
+if [ -f "$MERGE_MARKER" ] && grep -q -- '--squash' "$MERGE_MARKER" && grep -q -- '--delete-branch' "$MERGE_MARKER"; then
+  ok "handle_merge_gate: CI green -> gh pr merge --squash --delete-branch called"
+else
+  bad "handle_merge_gate: CI green did not call gh pr merge as expected: $(cat "$MERGE_MARKER" 2>/dev/null || echo '<not called>')"
+fi
+if [[ "$out" == *"SB-2 merged (https://github.com/silverbeer/dotfiles/pull/1)"* ]]; then
+  ok "handle_merge_gate: summary names the ticket and the merged PR"
+else
+  bad "handle_merge_gate: summary did not name the merged PR: $out"
+fi
+
+# --- 2g. handle_merge_gate: approval is stale (CI now failing) -> NOT merged
+
+rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR/runs/run-red"
+echo "https://github.com/silverbeer/dotfiles/pull/2" >"$STATE_DIR/runs/run-red/pr_url"
+rm -f "$MERGE_MARKER"
+cat >"$bin/gh" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1 \$2" == "pr checks" ]]; then echo failure; exit 0; fi
+if [[ "\$1 \$2" == "pr merge" ]]; then echo "\$*" >"$MERGE_MARKER"; exit 0; fi
+exit 97
+STUB
+chmod +x "$bin/gh"
+out="$(run_sourced 'handle_merge_gate SB-3 run-red gate-3; printf "%s\n" "${SUMMARY_LINES[@]}"')"
+if [ ! -f "$MERGE_MARKER" ] && [[ "$out" == *"NOT merged"* ]]; then
+  ok "handle_merge_gate: CI now failing on re-check -> gh pr merge NEVER called, approval treated as stale"
+else
+  bad "handle_merge_gate: a stale approval with red CI was merged anyway (or did not report it): $out"
+fi
+default_gh
+
+# ---------------------------------------------------------------- verdict
+
+[ "$fails" -eq 0 ] || die "check-cycle-runner-policy: $fails failure(s)"
+note "check-cycle-runner-policy: all offline tests passed"
