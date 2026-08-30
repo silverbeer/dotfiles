@@ -1,0 +1,317 @@
+"""gate.py: dual-channel gate logic, offline (SB-508).
+
+`gate.gql` is monkeypatched to a FakeLinear (fakes.py) so no subprocess ever
+runs; Gatekeeper is built directly around a FakeTransport so no socket ever
+opens. GATEKEEPER_STATE points at a fresh tempdir per test.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import unittest
+from datetime import timedelta
+from pathlib import Path
+
+SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import gate  # noqa: E402
+from fakes import FakeLinear, FakeTransport  # noqa: E402
+from tg import TelegramError  # noqa: E402
+
+
+class GateTestCase(unittest.TestCase):
+    """Common fixture: a fake Linear, a fake Telegram, one open gate."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._old_environ = dict(os.environ)
+        os.environ["GATEKEEPER_STATE"] = self._tmp.name
+        os.environ["LINEAR_ASSIGNEE_ID"] = "user-1"
+        # set_gate_label's id cache shares linear-crud's ~/.cache file by
+        # default (SB-508) — redirect it into the tempdir so tests never read
+        # or write the real machine's cache.
+        os.environ["XDG_CACHE_HOME"] = self._tmp.name
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._old_environ)))
+
+        self.linear = FakeLinear(ticket="SB-1", assignee_id="user-1")
+        self._old_gql = gate.gql
+        gate.gql = self.linear
+        self.addCleanup(lambda: setattr(gate, "gql", self._old_gql))
+
+        self.transport = FakeTransport()
+        self.gk = gate.Gatekeeper(self.transport, chat_id="42", allowed_ids={42})
+
+    def open_gate(self, kind="plan", ticket="SB-1", body="proposal body here"):
+        return self.gk.open_gate(kind, ticket, body, session_id="s1", run_id="r1", link="")
+
+    def callback(self, gate_dict, verb, user_id=42, cq_id="cb1"):
+        self.gk._handle_callback({"id": cq_id, "from": {"id": user_id}, "data": f"{gate_dict['gate_id']}:{verb}"})
+
+    def message(self, text, user_id=42, chat_id=42):
+        self.gk._handle_message({"chat": {"id": chat_id, "type": "private"}, "from": {"id": user_id}, "text": text})
+
+
+class OpenGateTests(GateTestCase):
+    def test_open_writes_state_posts_marker_comment_sets_label_and_dms_with_a_keyboard(self):
+        g = self.open_gate(kind="plan", body="do the thing carefully")
+        self.assertEqual(g["status"], "awaiting")
+        self.assertEqual(gate.load_gate(g["gate_id"])["gate_id"], g["gate_id"])
+
+        marker = f"<!-- sb-agent:plan:r1:s1 -->"  # noqa: F541 (documents the exact format)
+        [(_, comment)] = [(c["id"], c["body"]) for c in self.linear.comments]
+        self.assertTrue(comment.startswith(marker))
+        self.assertIn("do the thing carefully", comment)
+        self.assertEqual(self.linear.labels, ["type:feature", "gate:awaiting-approval"])
+
+        self.assertEqual(len(self.transport.sent), 1)
+        chat_id, text, markup = self.transport.sent[0]
+        self.assertEqual(chat_id, "42")
+        self.assertTrue(text.startswith("[plan] SB-1 — Do the thing"))
+        self.assertIsNotNone(markup)
+
+    def test_blocked_kind_gets_no_keyboard(self):
+        self.open_gate(kind="blocked")
+        _, _, markup = self.transport.sent[-1]
+        self.assertIsNone(markup)
+
+
+class CallbackTests(GateTestCase):
+    def test_callback_matches_the_gate_id_and_approves(self):
+        g = self.open_gate()
+        self.callback(g, "approve", cq_id="cb1")
+
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertEqual(loaded["status"], "approved")
+        self.assertEqual(loaded["source"], "telegram")
+        self.assertIn(("cb1", ""), self.transport.answered)
+        self.assertEqual(self.linear.labels, ["type:feature", "gate:approved"])
+        # echoed to the channel that did NOT decide
+        self.assertTrue(any("<!-- sb-agent:echo -->" in c["body"] for c in self.linear.comments))
+
+    def test_stranger_callback_is_dropped_but_still_answered(self):
+        g = self.open_gate()
+        sent_before = len(self.transport.sent)
+        self.callback(g, "approve", user_id=999, cq_id="cb-stranger")
+
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertEqual(loaded["status"], "awaiting")
+        self.assertEqual(self.transport.answered, [("cb-stranger", "")])
+        self.assertEqual(len(self.transport.sent), sent_before)
+
+    def test_note_button_then_next_message_attaches_and_gate_stays_awaiting(self):
+        g = self.open_gate()
+        self.callback(g, "note", cq_id="cb-note")
+        self.assertTrue(gate.load_gate(g["gate_id"])["note_pending"])
+
+        self.message("please re-check the migration before merging")
+
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertEqual(loaded["status"], "awaiting")
+        self.assertFalse(loaded["note_pending"])
+        self.assertEqual(loaded["note"], "please re-check the migration before merging")
+
+    def test_telegram_free_text_reject_with_reason_decides(self):
+        g = self.open_gate()
+        self.message("reject: needs another pass")
+
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertEqual(loaded["status"], "rejected")
+        self.assertEqual(loaded["source"], "telegram")
+        self.assertEqual(loaded["note"], "needs another pass")
+
+
+class LinearChannelTests(GateTestCase):
+    def test_linear_approve_with_note_is_parsed(self):
+        g = self.open_gate()
+        self.linear.add_comment("approve: looks good", user_id="user-1")
+        self.gk.check_linear(g)
+
+        self.assertEqual(g["status"], "approved")
+        self.assertEqual(g["source"], "linear")
+        self.assertEqual(g["note"], "looks good")
+        self.assertTrue(any("approved via linear" in t for t in self.transport.texts))
+
+    def test_linear_reject_with_reason_is_parsed(self):
+        g = self.open_gate()
+        self.linear.add_comment("reject: not ready", user_id="user-1")
+        self.gk.check_linear(g)
+
+        self.assertEqual(g["status"], "rejected")
+        self.assertEqual(g["source"], "linear")
+        self.assertEqual(g["note"], "not ready")
+
+    def test_discussion_comment_is_forwarded_once_and_gate_stays_open(self):
+        g = self.open_gate()
+        self.linear.add_comment("what does this affect downstream?", user_id="user-1")
+
+        self.gk.check_linear(g)
+        self.assertEqual(g["status"], "awaiting")
+        self.assertTrue(any("what does this affect downstream?" in t for t in self.transport.texts))
+        forwarded_count = sum("what does this affect downstream?" in t for t in self.transport.texts)
+
+        self.gk.check_linear(g)  # a second poll tick must not forward it again
+        self.assertEqual(sum("what does this affect downstream?" in t for t in self.transport.texts), forwarded_count)
+
+    def test_comment_before_the_marker_is_ignored(self):
+        g = self.open_gate()
+        # Inserted directly so its createdAt sorts before the marker comment,
+        # simulating a stray comment that predates the gate (e.g. from a prior
+        # gate on the same ticket).
+        self.linear.comments.insert(
+            0, {"id": "c-early", "body": "approve", "createdAt": "2026-01-01T00:00:00Z", "user": {"id": "user-1"}}
+        )
+        self.gk.check_linear(g)
+        self.assertEqual(g["status"], "awaiting")
+
+    def test_echo_comment_is_never_read_back_as_a_decision(self):
+        g = self.open_gate()
+        self.callback(g, "approve")  # decides via telegram, posts a Linear echo
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertEqual(loaded["status"], "approved")
+        # A second, already-resolved gate must not be re-decided by its own echo.
+        self.gk.check_linear(loaded)
+        self.assertEqual(loaded["source"], "telegram")
+
+
+class FirstDecisionWinsTests(GateTestCase):
+    def test_both_channels_decide_first_wins_and_source_is_recorded(self):
+        g = self.open_gate()
+        gate_id = g["gate_id"]
+        approve_cb = {"id": "cb1", "from": {"id": 42}, "data": f"{gate_id}:approve"}
+        self.transport.batches = [[{"update_id": 1, "callback_query": approve_cb}]]
+        self.linear.add_comment("reject: too slow", user_id="user-1")
+
+        resolved = self.gk.poll_once(timeout=5)
+
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(resolved[0]["status"], "approved")
+        self.assertEqual(resolved[0]["source"], "telegram")
+        loaded = gate.load_gate(gate_id)
+        self.assertEqual(loaded["status"], "approved")
+        self.assertEqual(loaded["source"], "telegram")
+        self.assertIsNone(loaded["note"])  # the Linear rejection never applied
+
+
+class TimeoutTests(GateTestCase):
+    def test_gate_older_than_the_timeout_becomes_needs_human(self):
+        g = self.open_gate()
+        loaded = gate.load_gate(g["gate_id"])
+        loaded["opened_at"] = (gate.now_utc() - timedelta(hours=100)).isoformat()
+        gate.save_gate(loaded)
+
+        self.gk.poll_once(timeout=1)
+
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertEqual(loaded["status"], "needs-human")
+        self.assertEqual(self.linear.labels, ["type:feature", "gate:needs-human"])
+        self.assertTrue(any("stuck" in t for t in self.transport.texts))
+
+    def test_a_gate_within_the_timeout_is_left_alone(self):
+        g = self.open_gate()
+        self.gk.poll_once(timeout=0)
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "awaiting")
+
+    def test_timeout_shows_up_in_poll_onces_resolved_list(self):
+        g = self.open_gate()
+        loaded = gate.load_gate(g["gate_id"])
+        loaded["opened_at"] = (gate.now_utc() - timedelta(hours=100)).isoformat()
+        gate.save_gate(loaded)
+
+        resolved = self.gk.poll_once(timeout=1)
+
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(resolved[0]["gate_id"], g["gate_id"])
+        self.assertEqual(resolved[0]["status"], "needs-human")
+        self.assertEqual(resolved[0]["decision"], "needs-human")
+        self.assertEqual(resolved[0]["source"], "timeout")
+
+
+class LabelUpdateFailureTests(GateTestCase):
+    """decide(): a failed label update or echo must not mark the gate resolved
+    — it has to stay "awaiting" on disk so `poll` retries it (SB-508 review)."""
+
+    def test_label_update_failure_leaves_the_gate_awaiting(self):
+        g = self.open_gate()
+        sent_before = len(self.transport.sent)
+        self.linear.fail_issue_update = SystemExit("linear-gql: 500 Internal Server Error")
+
+        self.gk.decide(g, "approve", None, "telegram")
+
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertEqual(loaded["status"], "awaiting")
+        self.assertIsNone(loaded["decision"])
+        self.assertIsNone(loaded["source"])
+        # No echo went out either — the label update failed before it got there.
+        self.assertEqual(self.linear.labels, ["type:feature", "gate:awaiting-approval"])
+        self.assertEqual(len(self.transport.sent), sent_before)
+
+    def test_label_update_recovers_and_resolves_on_a_later_retry(self):
+        g = self.open_gate()
+        self.linear.fail_issue_update = SystemExit("linear-gql: 500 Internal Server Error")
+        self.gk.decide(g, "approve", None, "telegram")
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "awaiting")
+
+        self.linear.fail_issue_update = None
+        self.gk.decide(gate.load_gate(g["gate_id"]), "approve", None, "telegram")
+
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertEqual(loaded["status"], "approved")
+        self.assertEqual(loaded["source"], "telegram")
+
+
+class TelegramOpenFailureTests(GateTestCase):
+    """open_gate(): a Telegram send failure must not orphan the gate — the
+    Linear comment and label are already posted, so the gate stays resolvable
+    via the Linear channel even without a DM ever going out (SB-508 review)."""
+
+    def test_telegram_failure_leaves_a_gate_resolvable_via_linear(self):
+        self.transport.fail_send = TelegramError("could not reach Telegram")
+
+        g = self.open_gate()
+
+        self.assertEqual(g["status"], "awaiting")
+        self.assertIsNone(g["tg_message_id"])
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertEqual(loaded["status"], "awaiting")
+        # The Linear side already landed despite the Telegram failure.
+        self.assertEqual(self.linear.labels, ["type:feature", "gate:awaiting-approval"])
+        self.assertEqual(len(self.linear.comments), 1)
+
+        # And the gate is still resolvable via Linear.
+        self.transport.fail_send = None
+        self.linear.add_comment("approve", user_id="user-1")
+        self.gk.check_linear(loaded)
+        self.assertEqual(loaded["status"], "approved")
+        self.assertEqual(loaded["source"], "linear")
+
+
+class NoSecretInMessagesTests(GateTestCase):
+    def test_no_message_ever_carries_anything_token_shaped(self):
+        g = self.open_gate()
+        self.callback(g, "approve")
+        self.linear.add_comment("reject: too slow", user_id="user-1")
+        self.gk.check_linear(g)
+
+        # Gatekeeper is built around a Transport, never a token — this proves
+        # nothing token-shaped rides in any outbound text.
+        for text in self.transport.texts:
+            self.assertNotRegex(text, r"\d{6,}:[A-Za-z0-9_-]{30,}")
+
+
+class ResolveTests(GateTestCase):
+    def test_manual_resolve_echoes_to_both_channels(self):
+        g = self.open_gate()
+        self.gk.decide(g, "approve", "shipped from the CLI", "cli")
+
+        self.assertEqual(g["status"], "approved")
+        self.assertTrue(any("approved via cli" in t for t in self.transport.texts))
+        self.assertTrue(any("approved via cli" in c["body"] for c in self.linear.comments))
+
+
+if __name__ == "__main__":
+    unittest.main()
