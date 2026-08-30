@@ -45,9 +45,9 @@ git checkout main && git pull
 bash ~/.claude/skills/linear-crud/scripts/linear.sh branch SB-<n>
 ```
 
-Use `linear.sh branch`, **not** a hand-rolled `git checkout -b`. The
-`silverbeer/sb-<n>-<slug>` name is what triggers Linear's auto-move to
-In Progress on push; any other name silently doesn't.
+Use `linear.sh branch`, **not** a hand-rolled `git checkout -b` — it guarantees
+the `sb-<n>` token Linear keys on. What that does and does not trigger: linear-crud
+SKILL.md, "The delivery loop".
 
 Working tree must be clean first. If it isn't, stop and show `git status`.
 
@@ -125,8 +125,8 @@ user with the reason — never silently dropped.
 accepted. Then run `/cppp`.
 
 - PR title references the ticket: `feat: thing (SB-123)`
-- PR body **must** contain `Fixes SB-123` — that is what auto-transitions the
-  ticket to Done on merge
+- PR body **must** contain `Fixes SB-123` (`linear.sh link` adds it) — see
+  linear-crud SKILL.md, "The delivery loop", for what fires when
 - Never `git add .`; stage only what belongs to this ticket
 
 ### 9. Merge and close — gate

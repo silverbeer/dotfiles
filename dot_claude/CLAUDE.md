@@ -107,9 +107,9 @@ Linear (team **SB**) is the system of record. Tools in
 bash ~/.claude/skills/linear-crud/scripts/linear.sh branch SB-123
 ```
 
-Creates `silverbeer/sb-123-<slug>` and auto-moves the ticket to In Progress on
-push. Put `Fixes SB-123` in the PR body — merging auto-transitions it to Done.
-**Merge your own green PRs; don't wait to be asked.**
+Branch name carries `sb-123`, and the PR body carries `Fixes SB-123`; opening a
+non-draft PR and merging it drive the ticket's state (details: linear-crud
+SKILL.md, "The delivery loop"). **Merge your own green PRs; don't wait to be asked.**
 
 The integration is one-way: GitHub events drive Linear, never the reverse.
 Changing a status in Linear does nothing in GitHub.
