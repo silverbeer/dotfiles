@@ -205,13 +205,26 @@ whether CI is green — it does **not** hand that job to the runner, and it
 call excludes `gh pr merge*` for exactly this reason — merge happens in the
 runner, on an approved gate, not in Claude):
 
+Same reduction as `cycle-runner/scripts/run.sh`'s `ci_state()` (kept
+byte-identical on purpose — that script re-checks this exact query on every
+merge-gate resolution rather than trusting this one): an explicit allowlist,
+not "not FAILURE/PENDING". A `gh pr checks --json state` row's `state` is
+either a StatusContext state (SUCCESS/PENDING/ERROR/FAILURE/EXPECTED) or a
+CheckRun's running status (QUEUED/IN_PROGRESS/WAITING/REQUESTED/PENDING) or
+completed conclusion (SUCCESS/FAILURE/NEUTRAL/CANCELLED/SKIPPED/TIMED_OUT/
+ACTION_REQUIRED/STALE/STARTUP_FAILURE). Only SUCCESS/NEUTRAL/SKIPPED pass;
+PENDING/IN_PROGRESS/QUEUED are still running; every other named state and
+anything unrecognized counts as failure — never fail open on an unrecognized
+state:
+
 ```bash
 pr_url="$(cat "$RUN_SCRATCH/pr_url")"   # written by phase 8; this is a fresh --resume process
 elapsed=0; interval=30; budget=1200   # 20 min bound — this is a poll, not a wait
 while true; do
   state="$(gh pr checks "$pr_url" --json state \
-    --jq '[.[].state] | if any(.=="FAILURE") then "failure"
-           elif any(.=="PENDING") then "pending" else "success" end' \
+    --jq '[.[].state] | if any(. as $s | ($s | IN("SUCCESS","NEUTRAL","SKIPPED","PENDING","IN_PROGRESS","QUEUED") | not)) then "failure"
+           elif any(.=="PENDING" or .=="IN_PROGRESS" or .=="QUEUED") then "pending"
+           else "success" end' \
     2>/dev/null || echo pending)"
   [[ "$state" != "pending" ]] && break
   elapsed=$((elapsed+interval)); [[ $elapsed -ge $budget ]] && { state=timeout; break; }
