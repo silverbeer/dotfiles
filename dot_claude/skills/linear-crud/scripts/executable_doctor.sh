@@ -13,11 +13,34 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GQL="$SCRIPT_DIR/linear-gql.sh"
 [ -f "$GQL" ] || GQL="$SCRIPT_DIR/executable_linear-gql.sh"
 KEY_FILE="${LINEAR_KEY_FILE:-$HOME/.config/linear/gql-key}"
+# The one machine cycle-runner actually runs on. Must match
+# Library/LaunchAgents/io.silverbeer.cycle-runner.plist.tmpl's own
+# `{{ if eq .chezmoi.hostname "Toms-Mac-mini" }}` gate — defined once here so
+# the two never drift apart into silently checking different things.
+CYCLE_RUNNER_HOST="Toms-Mac-mini"
+
+# A peer skill's scripts dir, resolved the same way run.sh's own
+# sibling_scripts() does: try the chezmoi source tree layout, then the
+# deployed ~/.claude one, and print whichever actually has the marker file.
+# Prints the dir on stdout, returns 1 (silently — every caller here is a
+# machine that may legitimately not have the skill provisioned) if neither
+# candidate has it.
+sibling_scripts() {
+  local skill="$1" marker="$2" f
+  for f in "$SCRIPT_DIR/../../$skill/scripts/$marker" "$HOME/.claude/skills/$skill/scripts/$marker"; do
+    if [ -f "$f" ]; then dirname "$f"; return 0; fi
+  done
+  return 1
+}
 
 pass=0 warn=0 fail=0
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; pass=$((pass+1)); }
 warnf(){ printf '  \033[33m!\033[0m %s\n     ↳ %s\n' "$1" "$2"; warn=$((warn+1)); }
 failf(){ printf '  \033[31m✗\033[0m %s\n     ↳ %s\n' "$1" "$2"; fail=$((fail+1)); }
+# Purely informational — a check that does not apply on this machine at all
+# (wrong host for a host-gated check). Does not move pass/warn/fail: it was
+# never run, so it cannot count as either a pass or a problem.
+infof(){ printf '  \033[36mi\033[0m %s\n' "$1"; }
 
 echo "── binaries ─────────────────────────────"
 for bin in git gh jq curl uv node op linear rtk chezmoi; do
@@ -25,7 +48,11 @@ for bin in git gh jq curl uv node op linear rtk chezmoi; do
 done
 
 echo "── auth ─────────────────────────────────"
-if gh auth status >/dev/null 2>&1; then ok "gh authenticated"; else warnf "gh not authenticated" "run: gh auth login"; fi
+# Captured once and reused by the cycle-runner section's summary line below —
+# `gh auth status` used to be shelled out to twice per run for the same answer.
+gh_auth_out="$(gh auth status 2>&1)"
+gh_auth_rc=$?
+if [ "$gh_auth_rc" -eq 0 ]; then ok "gh authenticated"; else warnf "gh not authenticated" "run: gh auth login"; fi
 if op account list >/dev/null 2>&1 && [ -n "$(op account list 2>/dev/null)" ]; then ok "op account configured"; else warnf "op not configured/signed in" "run: op signin (needed to bootstrap the Linear key)"; fi
 if [ -f "$HOME/.config/linear/credentials.toml" ] && grep -q '^default' "$HOME/.config/linear/credentials.toml" 2>/dev/null; then
   ok "linear CLI has a default workspace"
@@ -74,6 +101,145 @@ elif jq -e 'type=="array" and length>0' "$REPOS_JSON" >/dev/null 2>&1; then
   ok "repos.json present and parses ($(jq -r 'length' "$REPOS_JSON") repos)"
 else
   failf "repos.json does not parse as a non-empty array" "fix $REPOS_JSON (jq . to see the error)"
+fi
+
+echo "── cycle-runner (Mac mini) ───────────────"
+# These checks cover what run.sh needs to actually fire on a launchd tick
+# (SB-930). None of them are hard requirements on a laptop that never runs
+# cycle-runner — WARN, not FAIL, when the machine legitimately has no reason
+# to be provisioned for it.
+
+# .chezmoi.hostname the same way the plist template gates on it (see
+# CYCLE_RUNNER_HOST above) — NOT the OS hostname directly, so this always asks
+# the same question chezmoi apply already answered when it did or didn't
+# deploy the plist. A `chezmoi` that is missing or fails resolves to the empty
+# string, which safely reads as "not the mini" rather than crashing the check.
+CURRENT_HOSTNAME="$(chezmoi execute-template '{{ .chezmoi.hostname }}' 2>/dev/null || true)"
+on_mini=0
+[ "$CURRENT_HOSTNAME" = "$CYCLE_RUNNER_HOST" ] && on_mini=1
+
+if [ "$on_mini" -eq 1 ]; then
+  CR_SCRIPTS="$(sibling_scripts cycle-runner env.sh || true)"
+  if [ -n "$CR_SCRIPTS" ]; then
+    # shellcheck source=/dev/null
+    . "$CR_SCRIPTS/env.sh"
+  fi
+
+  if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    warnf "CLAUDE_CODE_OAUTH_TOKEN not set" "source cycle-runner/scripts/env.sh (op://agents/cycle-runner-claude/token) or export it"
+  elif ! command -v claude >/dev/null 2>&1; then
+    failf "claude not on PATH" "install it — cycle-runner cannot start without it"
+  else
+    # `claude --help` on 2.1.251 has no --max-turns (the exact gap SB-929's
+    # run.sh already flags for `claude -p`) — --tools "" (disables every tool,
+    # so this can never touch Bash/Edit/etc), --max-budget-usd (hard dollar
+    # cap) and --no-session-persistence (leaves nothing to clean up) are the
+    # real bounded/non-interactive flags `claude --help` actually documents.
+    if claude_out="$(claude -p "ok" --tools "" --max-budget-usd 0.02 --no-session-persistence --output-format text 2>&1)"; then
+      ok "claude OAuth token valid ($(printf '%s' "$claude_out" | tr '\n' ' ' | cut -c1-60))"
+    else
+      failf "claude -p failed with CLAUDE_CODE_OAUTH_TOKEN set" "$(printf '%s' "$claude_out" | head -1)"
+    fi
+  fi
+else
+  # This is the whole point of the gate: `claude -p` is a real, billed API
+  # call. Every machine that isn't the mini must never reach it, no matter
+  # what CLAUDE_CODE_OAUTH_TOKEN happens to be set to.
+  infof "not the cycle-runner host, skipping live claude -p check"
+fi
+
+# Reuses the "── auth ──" section's gh auth status call above instead of
+# shelling out to gh a second time for the same answer.
+if [ "$gh_auth_rc" -eq 0 ]; then
+  ok "gh auth status: $(printf '%s' "$gh_auth_out" | grep -m1 'Logged in' | sed 's/^ *//')"
+else
+  warnf "gh auth status failed" "$(printf '%s' "$gh_auth_out" | head -1) — run: gh auth login"
+fi
+
+# The self-check for the plist itself, ON THE MINI ONLY: guards the exact
+# hostname-drift scenario (OS reinstall/rename) that would otherwise leave
+# every other check green while cycle-runner silently never fires again.
+if [ "$on_mini" -eq 1 ]; then
+  PLIST_FILE="$HOME/Library/LaunchAgents/io.silverbeer.cycle-runner.plist"
+  if [ ! -f "$PLIST_FILE" ]; then
+    failf "cycle-runner plist missing at $PLIST_FILE" "run: chezmoi apply — this host reports as $CYCLE_RUNNER_HOST but never got the plist"
+  else
+    ok "cycle-runner plist present at $PLIST_FILE"
+    if launchctl list io.silverbeer.cycle-runner >/dev/null 2>&1; then
+      ok "cycle-runner plist loaded in launchctl"
+    else
+      warnf "cycle-runner plist not loaded in launchctl" "run: launchctl load -w $PLIST_FILE (one-time manual step)"
+    fi
+  fi
+else
+  infof "not the cycle-runner host, skipping cycle-runner plist deployment check"
+fi
+
+# GK_SCRIPTS (skill presence) is checked BEFORE the token: with the skill
+# absent, GATEKEEPER_TG_TOKEN is also unset (env.sh never sourced), so
+# checking the token first meant the more specific "skill not found" branch
+# could never fire — the "not set" branch always won.
+GK_SCRIPTS="$(sibling_scripts gatekeeper tg.py || true)"
+if [ -n "$GK_SCRIPTS" ] && [ -f "$GK_SCRIPTS/env.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$GK_SCRIPTS/env.sh"
+fi
+if [ -z "$GK_SCRIPTS" ]; then
+  warnf "gatekeeper skill not found" "cannot import tg.py — run: chezmoi apply"
+elif [ -z "${GATEKEEPER_TG_TOKEN:-}" ]; then
+  warnf "GATEKEEPER_TG_TOKEN not set" "gatekeeper creds not provisioned on this machine — skipping Telegram getMe (fine off the mini)"
+else
+  if tg_who="$(GATEKEEPER_TG_TOKEN="$GATEKEEPER_TG_TOKEN" python3 - "$GK_SCRIPTS" <<'PY' 2>&1
+import os
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from tg import TelegramError, TelegramTransport  # noqa: E402
+
+try:
+    me = TelegramTransport(os.environ["GATEKEEPER_TG_TOKEN"]).get_me()
+    print(me.get("username") or me.get("first_name") or "?")
+except TelegramError as e:
+    print(e)
+    sys.exit(1)
+PY
+)"; then
+    ok "Telegram getMe ok (@$tg_who)"
+  else
+    failf "Telegram getMe failed" "$tg_who"
+  fi
+fi
+
+LOCK_PID_FILE="$HOME/.local/state/cycle-runner/lock/pid"
+if [ -f "$LOCK_PID_FILE" ]; then
+  lock_pid="$(cat "$LOCK_PID_FILE" 2>/dev/null || true)"
+  if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+    ok "cycle-runner lock held by running pid $lock_pid (a run is in progress)"
+  else
+    warnf "cycle-runner lock present but pid '${lock_pid:-<empty>}' is not running" "looks abandoned — informational only; run.sh clears stale locks itself on its next tick, doctor does not touch it"
+  fi
+else
+  ok "no cycle-runner lock present"
+fi
+
+echo "── chezmoi sync ──────────────────────────"
+# The actual root-cause fix for PR #37 silently reverting PR #35: that
+# happened because `chezmoi re-add` was run on a machine whose ~/.claude was
+# already behind the source tree, so the re-add captured the STALE deployed
+# copy and wrote it back over someone else's already-merged work. This is not
+# cycle-runner specific — it must fail loudly before ANY re-add, always.
+if command -v chezmoi >/dev/null 2>&1; then
+  if cs_out="$(chezmoi status 2>&1)"; then
+    if [ -z "$cs_out" ]; then
+      ok "chezmoi status clean — safe to re-add"
+    else
+      failf "chezmoi status is NOT clean" "this machine's ~/.claude is not in sync with the source tree — DO NOT run chezmoi re-add until you've reconciled with 'chezmoi diff', or you risk reverting someone else's merged work (this happened: PR #37 silently reverted PR #35)"
+    fi
+  else
+    failf "chezmoi status failed to run" "$(printf '%s' "$cs_out" | head -1)"
+  fi
+else
+  warnf "chezmoi not on PATH" "cannot check sync status"
 fi
 
 echo "─────────────────────────────────────────"
