@@ -133,6 +133,32 @@ if [ "$on_mini" -eq 1 ]; then
     . "$CR_SCRIPTS/env.sh"
   fi
 
+  # The check that would have caught SB-953. Everything else in this section
+  # runs in a shell that ALREADY has OP_SERVICE_ACCOUNT_TOKEN (via ~/.zshenv),
+  # so it cannot see that launchd — which passes only HOME and PATH — had no
+  # token at all and sent `op` to the desktop app, raising a Touch ID prompt
+  # every 30 minutes and failing outright with nobody at the machine.
+  OP_AGENT_TOKEN_FILE="$HOME/.config/op/agent-token"
+  if [ ! -r "$OP_AGENT_TOKEN_FILE" ]; then
+    failf "no readable $OP_AGENT_TOKEN_FILE" "a launchd tick cannot reach the vault without it — see SETUP.md Step 2b"
+  elif [ -z "$CR_SCRIPTS" ]; then
+    warnf "cycle-runner scripts not found — skipping the launchd-environment vault check" "install the cycle-runner skill"
+  else
+    # Deliberately `env -i` with only what the plist provides: this must prove
+    # a tick is headless, not that this shell is.
+    # shellcheck disable=SC2016  # $CR and $2 must expand in the INNER shell
+    op_kind="$(env -i HOME="$HOME" PATH="$PATH" CR="$CR_SCRIPTS" bash -c '
+      . "$CR/env.sh" 2>/dev/null
+      op whoami 2>/dev/null | awk -F": *" "/User Type/ {print \$2}"
+    ' 2>/dev/null || true)"
+    if [ "$op_kind" = "SERVICE_ACCOUNT" ]; then
+      ok "launchd-shaped env reaches the vault as a service account (no desktop prompt)"
+    else
+      failf "a launchd-shaped env does not get the service account (got '${op_kind:-nothing}')" \
+        "every tick will raise the 1Password desktop prompt — env.sh must export OP_SERVICE_ACCOUNT_TOKEN"
+    fi
+  fi
+
   if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     warnf "CLAUDE_CODE_OAUTH_TOKEN not set" "source cycle-runner/scripts/env.sh (op://agents/cycle-runner-claude/token) or export it"
   elif ! command -v claude >/dev/null 2>&1; then
