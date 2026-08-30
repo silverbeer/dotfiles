@@ -21,6 +21,11 @@ class FakeTransport:
         # Set to an Exception instance to make every send_message raise it —
         # simulates a Telegram-side failure (SB-508).
         self.fail_send: Exception | None = None
+        # Same, for answerCallbackQuery: a callback id expires ~1 min after the
+        # tap and this poller runs on a 30-min tick, so in production the answer
+        # nearly always fails. SB-950 — that failure used to destroy the
+        # decision, so it needs to be reachable from a test.
+        self.fail_answer: Exception | None = None
 
     def send_message(self, chat_id: str, text: str, reply_markup: dict | None = None) -> dict:
         if self.fail_send is not None:
@@ -33,6 +38,8 @@ class FakeTransport:
         return self.batches.pop(0) if self.batches else []
 
     def answer_callback_query(self, callback_query_id: str, text: str = "") -> None:
+        if self.fail_answer is not None:
+            raise self.fail_answer
         self.answered.append((callback_query_id, text))
 
     def get_me(self) -> dict:
