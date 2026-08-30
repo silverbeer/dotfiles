@@ -50,8 +50,8 @@ them, and propose 5–8 epics that cover the set, each with a one-line scope.
 Prefer reusing an existing epic over inventing a neighbour.
 
 Epics are Linear *projects*. `apply.py` refuses to invent them, so any new epic
-must be created in Linear first — and added to `epic_repo()` in
-`~/.claude/skills/linear-crud/scripts/linear.sh`, or it will list as `[??]`.
+must be created in Linear first — and given an `epicGlobs` entry in
+`~/.claude/skills/linear-crud/repos.json`, or it will list as `[??]`.
 
 ### 2b. Score each issue
 

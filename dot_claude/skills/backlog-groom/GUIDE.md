@@ -82,8 +82,8 @@ re-run anything after editing it.
 ### Create the epics first
 
 Apply refuses until every proposed epic exists as a Linear project, and tells
-you which are missing. Create them in Linear, then add a `case` arm for each to
-`epic_repo()` in `~/.claude/skills/linear-crud/scripts/linear.sh` — otherwise
+you which are missing. Create them in Linear, then add an `epicGlobs` glob for
+each to `~/.claude/skills/linear-crud/repos.json` — otherwise
 `linear.sh epics` lists them as `[??]`.
 
 ### Apply
