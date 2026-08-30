@@ -53,6 +53,77 @@ sibling_scripts() {
   die "$skill/scripts/$marker not found — the $skill skill must be installed"
 }
 
+# ------------------------------------------------- message helpers (SB-945)
+# The Telegram summary is read on a phone by someone deciding whether they
+# need to act. Every line that names a ticket therefore carries its title and
+# a link, and no line carries a UUID — session and run ids are in the run log,
+# which is where anyone debugging already is.
+
+# A newline-delimited "KEY<tab>title" memo, NOT an associative array: the plist
+# runs this with /bin/bash, which on macOS is 3.2 and has no `declare -A`. That
+# would have failed on every tick, on the one machine this is deployed to.
+TICKET_TITLES=""
+
+# Resolved non-fatally: a machine without linear-crud still gets messages, just
+# without titles. A missing title must never be the reason a tick dies.
+LINEAR_SCRIPTS="$(sibling_scripts linear-crud linear.sh 2>/dev/null || true)"
+
+ticket_title() {  # KEY — the issue title, memoised per invocation
+  local key="$1" cached t=""
+  cached="$(printf '%s\n' "$TICKET_TITLES" | awk -F'\t' -v k="$key" '$1 == k { print $2; exit }')"
+  if [[ -n "$cached" ]]; then
+    printf '%s' "$cached"
+    return 0
+  fi
+  # </dev/null for the same reason as everywhere else here: this can be called
+  # from inside a `while read` loop.
+  if [[ -n "$LINEAR_SCRIPTS" ]]; then
+    t="$(bash "$LINEAR_SCRIPTS/linear.sh" view "$key" </dev/null 2>/dev/null | tail -1 | jq -r '.title // empty' 2>/dev/null)"
+  fi
+  t="${t:-$key}"
+  # Titles run long and several carry their own em-dash, which fights the one
+  # in the headline. 64 chars keeps a headline on one or two phone lines.
+  if [[ "${#t}" -gt 64 ]]; then
+    t="${t:0:63}…"
+  fi
+  TICKET_TITLES="$TICKET_TITLES
+$key	$t"
+  printf '%s' "$t"
+}
+
+ticket_link() {  # KEY — resolves on the bare identifier, no slug needed
+  printf 'https://linear.app/silverbeer/issue/%s' "$1"
+}
+
+# One summary entry: a headline naming the ticket and what happened, a sentence
+# saying what happens next, and a link. Blank line between entries so several
+# stay readable in one message.
+# What happens next, phrased for someone reading on a phone who wants to know
+# whether they are on the hook. `awaiting` is the common case and MUST say so —
+# it is the whole reason the message exists.
+started_next_line() {  # STATUS
+  case "$1" in
+    awaiting) printf "Planning it now. I'll ask before making any changes." ;;
+    blocked)  printf "I could not get started on it — see the ticket for why." ;;
+    *)        printf "Run finished as '%s'." "$1" ;;
+  esac
+}
+
+resume_next_line() {  # STATUS DECISION
+  case "$1" in
+    awaiting) printf "Picked it back up after you %s it. I'll come back when I need you." "${2%%:*}" ;;
+    blocked)  printf "Picked it back up but hit a blocker — see the ticket." ;;
+    *)        printf "Picked it back up; the run finished as '%s'." "$1" ;;
+  esac
+}
+
+say() {  # HEADLINE NEXT LINK
+  SUMMARY_LINES+=("$1
+$2
+$3
+")
+}
+
 gen_uuid() {
   if command -v uuidgen >/dev/null 2>&1; then
     uuidgen | tr '[:upper:]' '[:lower:]'
@@ -143,7 +214,9 @@ resume_session() {
   local ticket="$1" session_id="$2" message="$3"
   if [[ -z "$session_id" || "$session_id" == "null" ]]; then
     note "gate for $ticket resolved but recorded no session_id — cannot resume"
-    SUMMARY_LINES+=("• $ticket: resolved but no session_id to resume — needs a human")
+    say "$ticket needs you — $(ticket_title "$ticket")" \
+        "Your decision was recorded but the run it belongs to was not, so I cannot pick it back up. Re-run it from scratch when you want it." \
+        "$(ticket_link "$ticket")"
     return 0
   fi
   note "resuming $ticket session $session_id: $message"
@@ -158,10 +231,16 @@ resume_session() {
       --allowedTools "$ALLOWED_TOOLS" --disallowedTools "$DISALLOWED_TOOLS" \
       </dev/null 2>&1)"; then
     note "resume for $ticket: $out"
-    SUMMARY_LINES+=("• $ticket resumed ($message) — status $(jq -r '.status // "?"' <<<"$out" 2>/dev/null || echo '?')")
+    local st
+    st="$(jq -r '.structured_output.status // "unknown"' <<<"$out" 2>/dev/null || echo unknown)"
+    say "Resumed $ticket — $(ticket_title "$ticket")" \
+        "$(resume_next_line "$st" "$message")" \
+        "$(ticket_link "$ticket")"
   else
     note "resume for $ticket FAILED: $out"
-    SUMMARY_LINES+=("• $ticket resume FAILED — needs a human")
+    say "$ticket needs you — $(ticket_title "$ticket")" \
+        "I could not resume the run after your decision. It will need starting again." \
+        "$(ticket_link "$ticket")"
   fi
 }
 
@@ -196,7 +275,9 @@ handle_merge_gate() {
   local pr_file="$STATE/runs/$run_id/pr_url"
   if [[ ! -f "$pr_file" ]]; then
     note "merge gate $gate_id ($ticket): no $pr_file — cannot find the PR, not merging"
-    SUMMARY_LINES+=("• $ticket: merge approved but PR URL is missing — needs a human")
+    say "$ticket needs you — $(ticket_title "$ticket")" \
+        "You approved the merge but I lost track of which PR it was. Merge it by hand, or re-run the ticket." \
+        "$(ticket_link "$ticket")"
     return 0
   fi
   local pr_url state
@@ -204,17 +285,23 @@ handle_merge_gate() {
   state="$(ci_state "$pr_url")"
   if [[ "$state" != "success" ]]; then
     note "merge gate $gate_id ($ticket): CI is '$state' on re-check — approval is stale, not merging"
-    SUMMARY_LINES+=("• $ticket: merge approved, but CI is now '$state' — NOT merged, needs a human")
+    say "$ticket not merged — $(ticket_title "$ticket")" \
+        "You approved it, but CI is now '$state', so I stopped. Nothing was merged." \
+        "$pr_url"
     return 0
   fi
   # </dev/null for the same reason as resume_session (SB-952) — gh reads stdin
   # and this is called from inside the same `while read` loop.
   if gh pr merge "$pr_url" --squash --delete-branch </dev/null; then
     note "merged $pr_url for $ticket — 'Fixes $ticket' in the PR body moves Linear to Done automatically"
-    SUMMARY_LINES+=("• $ticket merged ($pr_url)")
+    say "Merged $ticket — $(ticket_title "$ticket")" \
+        "CI was green. Linear closes the ticket automatically." \
+        "$pr_url"
   else
     note "gh pr merge FAILED for $ticket ($pr_url)"
-    SUMMARY_LINES+=("• $ticket: CI green and approved, but gh pr merge FAILED — needs a human")
+    say "$ticket needs you — $(ticket_title "$ticket")" \
+        "CI was green and you approved, but the merge itself failed. Worth merging by hand." \
+        "$pr_url"
   fi
 }
 
@@ -243,7 +330,9 @@ drain_resolved_gates() {  # RESOLVED_JSON on stdin as TSV lines
       resume_session "$ticket" "$session_id" "rejected: $note_text"
     else
       note "gate $gate_id ($ticket, $kind) resolved as '$status' — no runner action, already flagged"
-      SUMMARY_LINES+=("• $ticket [$kind] $status — needs a human, already flagged")
+      say "$ticket is waiting on you — $(ticket_title "$ticket")" \
+          "The $kind gate came back as $status, which I cannot act on myself." \
+          "$(ticket_link "$ticket")"
     fi
   done
 }
@@ -277,6 +366,11 @@ scan_log_clean() {
 
 post_telegram_summary() {
   local gatekeeper_scripts="$1" text="$2"
+  # An idle tick has nothing to say, so it says nothing (SB-945).
+  if [[ -z "${text//[[:space:]]/}" ]]; then
+    note "nothing happened this tick — no Telegram summary sent"
+    return 0
+  fi
   if [[ -z "${GATEKEEPER_TG_TOKEN:-}" || -z "${GATEKEEPER_TG_CHAT_ID:-}" ]]; then
     note "GATEKEEPER_TG_TOKEN/GATEKEEPER_TG_CHAT_ID not set — skipping the Telegram summary"
     return 0
@@ -364,7 +458,9 @@ if [[ "$acted" -eq 0 ]]; then
   ticket="$(python3 "$PICK_PY")"
   if [[ -z "$ticket" ]]; then
     note "nothing resolved, no ready ticket — nothing to do this tick"
-    SUMMARY_LINES+=("nothing to do")
+    # Deliberately no summary line: an idle tick posts nothing. Silence means
+    # idle. 48 "nothing to do" messages a day teaches the reader to ignore the
+    # channel, which is the one thing this channel cannot afford (SB-945).
   else
     session_id="$(gen_uuid)"
     run_id="$INVOCATION_ID"
@@ -375,18 +471,24 @@ if [[ "$acted" -eq 0 ]]; then
         --permission-mode acceptEdits \
         --allowedTools "$ALLOWED_TOOLS" --disallowedTools "$DISALLOWED_TOOLS" 2>&1)"; then
       note "work-headless for $ticket: $claude_out"
-      SUMMARY_LINES+=("• started $ticket (session $session_id) — status $(jq -r '.status // "?"' <<<"$claude_out" 2>/dev/null || echo '?')")
+      started_st="$(jq -r '.structured_output.status // "unknown"' <<<"$claude_out" 2>/dev/null || echo unknown)"
+      say "Started $ticket — $(ticket_title "$ticket")" \
+          "$(started_next_line "$started_st")" \
+          "$(ticket_link "$ticket")"
     else
       note "work-headless for $ticket FAILED: $claude_out"
-      SUMMARY_LINES+=("• $ticket: work-headless invocation FAILED — needs a human")
+      say "$ticket needs you — $(ticket_title "$ticket")" \
+          "I could not start the run at all — that is usually a setup problem on the mini, not the ticket." \
+          "$(ticket_link "$ticket")"
     fi
   fi
 fi
 
 # --------------------------------------------------------------- 4. wrap-up
 
-summary="cycle-runner $(date -u +%Y-%m-%dT%H:%M:%SZ) (run $INVOCATION_ID)
-$(printf '%s\n' "${SUMMARY_LINES[@]+"${SUMMARY_LINES[@]}"}")"
+# No run id, no timestamp, no bullet scaffolding: the entries say what
+# happened and link where to act. The run log keeps the ids for debugging.
+summary="$(printf '%s\n' "${SUMMARY_LINES[@]+"${SUMMARY_LINES[@]}"}")"
 
 scan_rc=0
 scan_log_clean "$LOG_FILE" "$RUN_LOG_DIR/$INVOCATION_ID.gitleaks.out" || scan_rc=$?

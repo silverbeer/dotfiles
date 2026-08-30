@@ -250,7 +250,7 @@ default_gh  # restore the loud default before the merge-gate scenarios below
 rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR"
 default_gh
 if out="$(run_sourced 'handle_merge_gate SB-1 run-without-pr gate-1; printf "%s\n" "${SUMMARY_LINES[@]}"')"; then
-  if [[ "$out" == *"PR URL is missing"* ]]; then ok "handle_merge_gate: no pr_url file -> not merged, summary says so"
+  if [[ "$out" == *"lost track of which PR"* ]]; then ok "handle_merge_gate: no pr_url file -> not merged, summary says so"
   else bad "handle_merge_gate: missing pr_url case did not report correctly: $out"; fi
 else
   bad "handle_merge_gate: missing pr_url case exited non-zero: $out"
@@ -275,7 +275,7 @@ if [ -f "$MERGE_MARKER" ] && grep -q -- '--squash' "$MERGE_MARKER" && grep -q --
 else
   bad "handle_merge_gate: CI green did not call gh pr merge as expected: $(cat "$MERGE_MARKER" 2>/dev/null || echo '<not called>')"
 fi
-if [[ "$out" == *"SB-2 merged (https://github.com/silverbeer/dotfiles/pull/1)"* ]]; then
+if [[ "$out" == *"Merged SB-2"* ]] && [[ "$out" == *"https://github.com/silverbeer/dotfiles/pull/1"* ]]; then
   ok "handle_merge_gate: summary names the ticket and the merged PR"
 else
   bad "handle_merge_gate: summary did not name the merged PR: $out"
@@ -294,7 +294,7 @@ exit 97
 STUB
 chmod +x "$bin/gh"
 out="$(run_sourced 'handle_merge_gate SB-3 run-red gate-3; printf "%s\n" "${SUMMARY_LINES[@]}"')"
-if [ ! -f "$MERGE_MARKER" ] && [[ "$out" == *"NOT merged"* ]]; then
+if [ ! -f "$MERGE_MARKER" ] && [[ "$out" == *"Nothing was merged"* ]]; then
   ok "handle_merge_gate: CI now failing on re-check -> gh pr merge NEVER called, approval treated as stale"
 else
   bad "handle_merge_gate: a stale approval with red CI was merged anyway (or did not report it): $out"
@@ -336,7 +336,7 @@ out="$(printf '%s\n' "$resolved_tsv" | run_sourced '
 ')"
 
 for t in SB-1 SB-2 SB-3; do
-  if grep -q "$t resumed" <<<"$out"; then
+  if grep -q "Resumed $t" <<<"$out"; then
     ok "drain_resolved_gates: $t was handled"
   else
     bad "drain_resolved_gates: $t was NOT handled — the loop stopped early: $out"
@@ -344,6 +344,60 @@ for t in SB-1 SB-2 SB-3; do
 done
 rm -f "$bin/claude" "$bin/gate-stub.py"
 default_gh
+
+# --- 2g3. summary messages read like a teammate (SB-945)
+
+# The Telegram summary is read on a phone by someone deciding whether they are
+# on the hook. These pin the parts that made the old messages useless: no
+# UUIDs, always a title and a link, and an idle tick that says nothing.
+msg_out="$(run_sourced '
+  LINEAR_SCRIPTS=""            # no network: ticket_title falls back to the key
+  SUMMARY_LINES=()
+  say "Started SB-1 — $(ticket_title SB-1)" "$(started_next_line awaiting)" "$(ticket_link SB-1)"
+  printf "%s\n" "${SUMMARY_LINES[@]}"
+')"
+
+if grep -q 'https://linear.app/silverbeer/issue/SB-1' <<<"$msg_out"; then
+  ok "summary: a ticket line carries a link"
+else
+  bad "summary: no Linear link in the message: $msg_out"
+fi
+if grep -qE '[0-9a-f]{8}-[0-9a-f]{4}-' <<<"$msg_out"; then
+  bad "summary: a UUID leaked into the message: $msg_out"
+else
+  ok "summary: no session/run UUID in the message"
+fi
+if grep -q "I'll ask before making any changes" <<<"$msg_out"; then
+  ok "summary: says what happens next, so the reader knows if they must act"
+else
+  bad "summary: no 'what happens next' line: $msg_out"
+fi
+if grep -q 'status ?' <<<"$msg_out"; then
+  bad "summary: still emitting the literal 'status ?'"
+else
+  ok "summary: no 'status ?' placeholder"
+fi
+
+# An idle tick must post nothing at all — 48 "nothing to do" messages a day
+# teach the reader to ignore the channel.
+idle_out="$(run_sourced '
+  GATEKEEPER_TG_TOKEN="t"; GATEKEEPER_TG_CHAT_ID="1"
+  post_telegram_summary "/nonexistent" ""
+')"
+if grep -q 'nothing happened this tick' <<<"$idle_out"; then
+  ok "summary: an idle tick sends no Telegram message"
+else
+  bad "summary: an idle tick still tried to post: $idle_out"
+fi
+
+# The plist runs this with /bin/bash, which is 3.2 on macOS. `declare -A` and
+# other bash-4 constructs parse fine under the CI runner'"'"'s bash 5 and then
+# fail on every tick on the only machine this is deployed to.
+if /bin/bash -n "$RUN_SH" 2>"$WORK/bash32.err"; then
+  ok "run.sh parses under /bin/bash ($(/bin/bash -c 'echo $BASH_VERSION'))"
+else
+  bad "run.sh does not parse under /bin/bash: $(cat "$WORK/bash32.err")"
+fi
 
 # --- 2h. scan_log_clean: the run-log scanner gates the outbound post (SB-943)
 
