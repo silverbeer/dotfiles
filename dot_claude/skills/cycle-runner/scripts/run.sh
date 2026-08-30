@@ -148,10 +148,15 @@ resume_session() {
   fi
   note "resuming $ticket session $session_id: $message"
   local out
+  # </dev/null is load-bearing (SB-952): this runs inside `while read` over a
+  # process substitution, and `claude` reads stdin. Without it the first resume
+  # swallows every remaining line and the loop handles exactly ONE gate per
+  # tick, however many resolved — silently dropping the others' approvals.
   if out="$(claude -p --resume "$session_id" "$message" \
       --output-format json --json-schema "$JSON_SCHEMA" \
       --permission-mode acceptEdits \
-      --allowedTools "$ALLOWED_TOOLS" --disallowedTools "$DISALLOWED_TOOLS" 2>&1)"; then
+      --allowedTools "$ALLOWED_TOOLS" --disallowedTools "$DISALLOWED_TOOLS" \
+      </dev/null 2>&1)"; then
     note "resume for $ticket: $out"
     SUMMARY_LINES+=("• $ticket resumed ($message) — status $(jq -r '.status // "?"' <<<"$out" 2>/dev/null || echo '?')")
   else
@@ -202,13 +207,45 @@ handle_merge_gate() {
     SUMMARY_LINES+=("• $ticket: merge approved, but CI is now '$state' — NOT merged, needs a human")
     return 0
   fi
-  if gh pr merge "$pr_url" --squash --delete-branch; then
+  # </dev/null for the same reason as resume_session (SB-952) — gh reads stdin
+  # and this is called from inside the same `while read` loop.
+  if gh pr merge "$pr_url" --squash --delete-branch </dev/null; then
     note "merged $pr_url for $ticket — 'Fixes $ticket' in the PR body moves Linear to Done automatically"
     SUMMARY_LINES+=("• $ticket merged ($pr_url)")
   else
     note "gh pr merge FAILED for $ticket ($pr_url)"
     SUMMARY_LINES+=("• $ticket: CI green and approved, but gh pr merge FAILED — needs a human")
   fi
+}
+
+# Extracted so the "every resolved gate is handled" contract is testable
+# (SB-952) — the loop used to live inline, below the sourcing guard, where no
+# test could reach it.
+drain_resolved_gates() {  # RESOLVED_JSON on stdin as TSV lines
+  local gate_id ticket status detail kind session_id run_id note_text
+  while IFS=$'\t' read -r gate_id ticket status; do
+    [[ -z "$gate_id" ]] && continue
+    acted=1
+    detail="$(python3 "$GATE_PY" status "$gate_id")"
+    kind="$(jq -r '.kind' <<<"$detail")"
+    session_id="$(jq -r '.session_id' <<<"$detail")"
+    run_id="$(jq -r '.run_id' <<<"$detail")"
+    note_text="$(jq -r '.note // ""' <<<"$detail")"
+
+    if [[ "$status" == "approved" && "$kind" == "merge" ]]; then
+      handle_merge_gate "$ticket" "$run_id" "$gate_id"
+    elif [[ "$status" == "approved" ]]; then
+      resume_session "$ticket" "$session_id" "approved: $note_text"
+    elif [[ "$status" == "rejected" ]]; then
+      # work-headless.md has no "resume-on-reject" phase defined yet — this
+      # resumes it anyway and lets that turn fail/report naturally, per the
+      # ticket's own instruction. Flagged again in the delivery report.
+      resume_session "$ticket" "$session_id" "rejected: $note_text"
+    else
+      note "gate $gate_id ($ticket, $kind) resolved as '$status' — no runner action, already flagged"
+      SUMMARY_LINES+=("• $ticket [$kind] $status — needs a human, already flagged")
+    fi
+  done
 }
 
 # -------------------------------------------------------- wrap-up helpers
@@ -315,30 +352,10 @@ RESOLVED_JSON="$(python3 "$GATE_PY" poll --once)"
 resolved_count="$(jq '.resolved | length' <<<"$RESOLVED_JSON")"
 acted=0
 
-if [[ "$resolved_count" -gt 0 ]]; then
-  while IFS=$'\t' read -r gate_id ticket status; do
-    [[ -z "$gate_id" ]] && continue
-    acted=1
-    detail="$(python3 "$GATE_PY" status "$gate_id")"
-    kind="$(jq -r '.kind' <<<"$detail")"
-    session_id="$(jq -r '.session_id' <<<"$detail")"
-    run_id="$(jq -r '.run_id' <<<"$detail")"
-    note_text="$(jq -r '.note // ""' <<<"$detail")"
 
-    if [[ "$status" == "approved" && "$kind" == "merge" ]]; then
-      handle_merge_gate "$ticket" "$run_id" "$gate_id"
-    elif [[ "$status" == "approved" ]]; then
-      resume_session "$ticket" "$session_id" "approved: $note_text"
-    elif [[ "$status" == "rejected" ]]; then
-      # work-headless.md has no "resume-on-reject" phase defined yet — this
-      # resumes it anyway and lets that turn fail/report naturally, per the
-      # ticket's own instruction. Flagged again in the delivery report.
-      resume_session "$ticket" "$session_id" "rejected: $note_text"
-    else
-      note "gate $gate_id ($ticket, $kind) resolved as '$status' — no runner action, already flagged"
-      SUMMARY_LINES+=("• $ticket [$kind] $status — needs a human, already flagged")
-    fi
-  done < <(jq -r '.resolved[] | [.gate_id, .ticket, .status] | @tsv' <<<"$RESOLVED_JSON")
+if [[ "$resolved_count" -gt 0 ]]; then
+  drain_resolved_gates \
+    < <(jq -r '.resolved[] | [.gate_id, .ticket, .status] | @tsv' <<<"$RESOLVED_JSON")
 fi
 
 # ------------------------------------------------------- 3. pick, if idle
