@@ -77,12 +77,15 @@ release_lock() { rm -rf "$LOCK_DIR"; }
 # "stale" would steal a lock someone else is mid-way through acquiring — a
 # real race, not theoretical, since launchd can in principle fire two ticks
 # close together. An empty/missing pid file is only treated as abandoned once
-# the lock DIRECTORY's own mtime (set at mkdir time) is older than this grace
-# period; a launchd tick every 30 min makes a few seconds of grace free.
+# a "created_at" timestamp file (written right after mkdir, before pid) is
+# older than this grace period. A plain epoch number in a file we control
+# avoids stat(1)'s BSD-vs-GNU flag incompatibility (-f %m vs -c %Y) entirely —
+# a launchd tick every 30 min makes a few seconds of grace free.
 LOCK_GRACE_SECS=10
 
 acquire_lock() {
   if mkdir "$LOCK_DIR" 2>/dev/null; then
+    date +%s >"$LOCK_DIR/created_at"
     echo $$ >"$LOCK_DIR/pid"
     trap release_lock EXIT  # only once we actually own it — never on a lock we lost the race for
     return 0
@@ -94,10 +97,16 @@ acquire_lock() {
     exit 0
   fi
   if [[ -z "$pid" ]]; then
-    local dir_mtime now age
-    dir_mtime="$(stat -f %m "$LOCK_DIR" 2>/dev/null || stat -c %Y "$LOCK_DIR" 2>/dev/null || echo 0)"
+    local created now age
+    # Missing created_at (a holder between mkdir and the created_at write, the
+    # very first instant of the race) is treated as age 0 — the freshest
+    # possible state, not a special case — so it still respects
+    # LOCK_GRACE_SECS=0 (a deliberate "treat as stale right now" override)
+    # the same way an aged timestamp would.
+    created="$(cat "$LOCK_DIR/created_at" 2>/dev/null || true)"
     now="$(date +%s)"
-    age=$((now - dir_mtime))
+    [[ -z "$created" ]] && created="$now"
+    age=$((now - created))
     if [[ "$age" -lt "$LOCK_GRACE_SECS" ]]; then
       note "lock dir exists with no pid yet (${age}s old, under ${LOCK_GRACE_SECS}s grace) — holder is still writing its pid, backing off quietly"
       exit 0
