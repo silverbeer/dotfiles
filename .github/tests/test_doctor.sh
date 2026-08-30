@@ -74,7 +74,10 @@ test_reworded_oauth_warning_fails() {
 test_max_turns_regression_fails() {
   need_bin bash python3
   src="$(copy_source)"
-  edit 's/--tools "" --max-budget-usd 0.02/--tools "" --max-turns 1/' "$src/$DOCTOR"
+  # Anchored on `--tools ""` alone: SB-942 rewrote the rest of this invocation
+  # (pinned model, $0.10 cap) and a fixture keyed to the old literal silently
+  # stops mutating anything, which turns this negative test into a no-op.
+  edit 's/--tools ""/--tools "" --max-turns 1/' "$src/$DOCTOR"
   grep -q -- '--max-turns 1' "$src/$DOCTOR" || fail "fixture did not reintroduce --max-turns"
   export REPO="$src"
   assert_fail check-doctor.sh
