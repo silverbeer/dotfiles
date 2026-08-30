@@ -320,13 +320,19 @@ STUB
 
 gitleaks_stub 0
 rc=0; run_sourced "scan_log_clean '$scan_log' '$WORK/scan.out'" >/dev/null 2>&1 || rc=$?
-[ "$rc" -eq 0 ] && ok "scan_log_clean: clean log -> rc 0 (summary may be posted)" \
-  || bad "scan_log_clean: a clean log did not return 0 (rc=$rc)"
+if [ "$rc" -eq 0 ]; then
+  ok "scan_log_clean: clean log -> rc 0 (summary may be posted)"
+else
+  bad "scan_log_clean: a clean log did not return 0 (rc=$rc)"
+fi
 
 gitleaks_stub 1
 rc=0; run_sourced "scan_log_clean '$scan_log' '$WORK/scan.out'" >/dev/null 2>&1 || rc=$?
-[ "$rc" -eq 1 ] && ok "scan_log_clean: gitleaks finding -> rc 1 (post suppressed)" \
-  || bad "scan_log_clean: a gitleaks finding did not return 1 (rc=$rc)"
+if [ "$rc" -eq 1 ]; then
+  ok "scan_log_clean: gitleaks finding -> rc 1 (post suppressed)"
+else
+  bad "scan_log_clean: a gitleaks finding did not return 1 (rc=$rc)"
+fi
 
 rm -f "$bin/gitleaks"
 rc=0
