@@ -15,15 +15,15 @@ Reads through linear-gql.sh (same auth as the `linear` CLI). Read-only.
 import argparse
 import functools
 import html
-import json
 import pathlib
-import subprocess
 import sys
 from collections import defaultdict
 
 HERE = pathlib.Path(__file__).resolve().parent
-GQL  = HERE / "linear-gql.sh"
 CSS  = HERE / "board.css"
+
+sys.path.insert(0, str(HERE))
+from linear_api import gql, warn_if_capped  # noqa: E402
 
 # repo label -> GitHub repo name. Inverse of repo_label() in linear.sh.
 GH = {
@@ -49,17 +49,6 @@ Q_ISSUES = """query($labels:[String!], $team:String!) {
 
 Q_CYCLE = """query($team:String!) {
   team(id:$team) { activeCycle { number startsAt endsAt } } }"""
-
-
-def gql(query, variables):
-    r = subprocess.run(["bash", str(GQL), query, json.dumps(variables)],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        sys.exit(f"board: linear-gql failed: {r.stderr.strip()}")
-    out = json.loads(r.stdout)
-    if "errors" in out:
-        sys.exit("board: Linear API error: " + json.dumps(out["errors"][:1]))
-    return out["data"]
 
 
 def longest_path(graph):
@@ -282,6 +271,7 @@ def main():
         sys.exit("board: no repo label — pass --repo (linear.sh board detects it from cwd)")
 
     issues = gql(Q_ISSUES, {"labels": a.repo, "team": a.team})["issues"]["nodes"]
+    warn_if_capped(issues, 250, "board issues")
     if a.epic:
         issues = [i for i in issues if i["project"] and i["project"]["name"] == a.epic]
     if not issues:

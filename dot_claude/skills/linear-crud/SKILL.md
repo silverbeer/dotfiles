@@ -127,11 +127,11 @@ anything filed from an interactive session. Pass `--driven agent-supervised` (or
 `LINEAR_DRIVEN`) only when an agent filed the ticket unprompted.
 The command prints the new `SB-N` URL — relay it. (`--repo` is optional; omit to auto-detect.)
 
-**Always set an estimate.** `linear.sh new` has no `--estimate` flag, so set it
-immediately after filing:
+**Always set an estimate.** Pass `--estimate N` to `linear.sh new` (the CLI
+supports it natively). To (re)set one on an existing issue:
 
 ```bash
-bash scripts/linear-gql.sh 'mutation { issueUpdate(id: "<uuid>", input: { estimate: 3 }) { success } }'
+linear issue update SB-123 --estimate 3
 ```
 
 Fibonacci 1/2/3/5/8. A first guess is fine — revise at close if reality
@@ -232,7 +232,7 @@ Drop to the raw CLI (`linear issue ...`, **singular**) but keep conventions #1�
 - Add a comment: `linear issue comment add SB-N --body "text"` (or `--body-file /tmp/c.md` for markdown)
 - Unassigned set: `linear issue query --team SB --unassigned --all-states` (or `--assignee <user>` for someone specific; add `-j` for JSON).
 
-For anything the CLI can't do (initiatives, cycles, estimates, team settings, metrics) use the raw GraphQL wrapper `scripts/linear-gql.sh` (reads a personal API key from `~/.config/linear/gql-key`; supports variables as `$2`). The CLI also has a native `linear api '<query>'` that uses its own keychain auth. Verify the whole setup with `scripts/doctor.sh`.
+For anything the CLI can't do (initiatives, cycles, team settings, metrics) use the raw GraphQL wrapper `scripts/linear-gql.sh` (reads a personal API key from `~/.config/linear/gql-key`; supports variables as `$2`). The CLI also has a native `linear api '<query>'` that uses its own keychain auth. Verify the whole setup with `scripts/doctor.sh`.
 
 ## The delivery loop (paved road)
 

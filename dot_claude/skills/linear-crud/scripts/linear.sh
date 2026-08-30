@@ -16,7 +16,7 @@
 #   board [--repo L] [--epic E] render a delivery board (ready queue + critical path)
 #   stats [--days N]            momentum dashboard (totals, velocity, age, sparkline)
 #   new   --title T (--body B | --body-file F) --type TYPE [--repo R] [--epic E]
-#         [--driven human|agent-supervised|agent-auto] [--label L ...]
+#         [--driven human|agent-supervised|agent-auto] [--label L ...] [--estimate N]
 #   branch SB-N                 checkout silverbeer/sb-n-<slug> (triggers auto → In Progress)
 #   list  [--all] [--repo R] [--epic E]   my issues (open by default), TSV
 #   view  SB-N [--full]         brief JSON for one issue (--full: CLI text incl. description)
@@ -39,9 +39,11 @@
 #     -j/--json. Used by audit-unassigned.
 #   - `issue create`: -t/--title, -a/--assignee <username>, -l/--label
 #     (REPEATABLE, not a comma list), --description / --description-file,
-#     --team, --project, --no-interactive, -s/--state, -p/--priority.
+#     --team, --project, --no-interactive, -s/--state, -p/--priority,
+#     --estimate N.
 #   - `issue update <id>`: -a/--assignee, -s/--state, -t/--title, -l/--label,
-#     --project, --description/-file. (state accepts a name or type.)
+#     --project, --description/-file, --estimate N. (state accepts a name or
+#     type; <id> is the identifier, e.g. SB-123.)
 #   - `issue view <id>` shows one issue; `issue comment add <id>` comments.
 #   - `project list --team SB [-j]` lists projects; `project view <slug>` for one.
 export NO_COLOR=1
@@ -53,11 +55,6 @@ LINEAR_ASSIGNEE="${LINEAR_ASSIGNEE:-silverbeer.io}"
 
 die() { echo "error: $*" >&2; exit 1; }
 warn() { echo "warn: $*" >&2; }
-
-# Strip ANSI color codes from CLI text output. NO_COLOR (exported above) now
-# covers list/epics, which read JSON; this remains only for audit-unassigned's
-# text scrape (migration tracked in SB-923).
-strip_ansi() { sed -E 's/\x1b\[[0-9;]*m//g'; }
 
 # Path to a sibling helper (linear-gql.sh, board.py, set-driven.py). Deployed it
 # is NAME; in the chezmoi source tree it may carry the executable_ prefix.
@@ -81,7 +78,7 @@ issue_brief() {
   command -v jq >/dev/null || die "jq not found"
   local raw
   raw="$(bash "$(sibling linear-gql.sh)" \
-    "{ issue(id:\"$key\"){ identifier title state{name} estimate priority labels{nodes{name}} url } }" 2>/dev/null)" \
+    "{ issue(id:\"$key\"){ identifier title state{name} estimate priority labels{nodes{name}} url } }")" \
     || die "$key: GraphQL call failed (is linear-gql.sh set up? run doctor.sh)"
   jq -e . >/dev/null 2>&1 <<<"$raw" || die "$key: non-JSON response from Linear"
   if [[ "$(jq -r '.errors // empty | length' <<<"$raw")" -gt 0 ]]; then
@@ -165,8 +162,9 @@ cmd_repo_label() { repo_label || die "unknown repo '$(basename "$(git rev-parse 
 cmd_epics() {
   command -v jq >/dev/null || die "epics: jq not found"
   # name<TAB>status<TAB>[repo]; [??] = not mapped in epic_repo() — add it before use.
-  linear project list --team "$LINEAR_TEAM" -j 2>/dev/null \
-    | jq -r '.nodes[] | "\(.name)\t\(.status.name // "?")"' \
+  local out
+  out="$(linear project list --team "$LINEAR_TEAM" -j)" || die "epics: linear CLI failed"
+  jq -r '.nodes[] | "\(.name)\t\(.status.name // "?")"' <<<"$out" \
     | while IFS=$'\t' read -r name status; do
         local repo; repo="$(epic_repo "$name" 2>/dev/null || echo '??')"
         printf '%s\t%s\t[%s]\n' "$name" "$status" "$repo"
@@ -174,7 +172,7 @@ cmd_epics() {
 }
 
 cmd_new() {
-  local title="" body="" body_file="" type="" repo="" epic="" driven="" extra_labels=()
+  local title="" body="" body_file="" type="" repo="" epic="" driven="" estimate="" extra_labels=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --title)     title="$2"; shift 2 ;;
@@ -185,11 +183,13 @@ cmd_new() {
       --epic)      epic="$2"; shift 2 ;;
       --driven)    driven="$2"; shift 2 ;;
       --label)     extra_labels+=("$2"); shift 2 ;;
+      --estimate)  estimate="$2"; shift 2 ;;
       *) die "new: unknown arg '$1'" ;;
     esac
   done
   [[ -n "$title" ]] || die "new: --title required"
   [[ -n "$type"  ]] || die "new: --type required (bug|feature|chore|docs|infra|security)"
+  [[ -z "$estimate" || "$estimate" =~ ^[0-9]+$ ]] || die "new: --estimate must be an integer (got '$estimate')"
 
   # Autonomy attribution (SB-507). Defaults to human because that is what an
   # interactive session is; an agent must opt in explicitly, and the only way to
@@ -234,7 +234,9 @@ cmd_new() {
     args+=(--description "$body")
   fi
 
-  linear "${args[@]}"
+  [[ -n "$estimate" ]] && args+=(--estimate "$estimate")
+
+  linear "${args[@]}" || die "new: linear CLI failed"
 }
 
 cmd_list() {
@@ -328,13 +330,17 @@ cmd_link() {
   local id="${1:-}" pr="${2:-}"
   [[ -n "$id" ]] || die "link: usage: link SB-N [PR#]"
   command -v gh >/dev/null || die "link: gh CLI not found"
+  # ${sel[@]+"${sel[@]}"}: bash 3.2 (macOS /bin/bash) treats an empty array
+  # as unset under set -u, so the plain expansion aborts when PR# is omitted.
   local sel=(); [[ -n "$pr" ]] && sel=("$pr")
   local body
-  body="$(gh pr view "${sel[@]}" --json body --jq .body 2>/dev/null)" || die "link: no PR found (specify PR#)"
+  body="$(gh pr view ${sel[@]+"${sel[@]}"} --json body --jq .body 2>/dev/null)" || die "link: no PR found (specify PR#)"
   if grep -qiE "(fixes|closes|ref) ${id}\b" <<<"$body"; then
     echo "link: PR already references ${id}"; return 0
   fi
-  gh pr edit "${sel[@]}" --body "${body}"$'\n\n'"Fixes ${id}"
+  # An empty body is fine: the result is just the Fixes line.
+  [[ -n "$body" ]] && body="${body}"$'\n\n'
+  gh pr edit ${sel[@]+"${sel[@]}"} --body "${body}Fixes ${id}"
   echo "link: added 'Fixes ${id}' to PR body"
 }
 
@@ -343,9 +349,11 @@ cmd_link() {
 # unassigned issues across all assignees directly.
 cmd_audit_unassigned() {
   local fix=0; [[ "${1:-}" == "--fix" ]] && fix=1
-  local ids
-  ids="$(linear issue query --team "$LINEAR_TEAM" --unassigned --all-states --limit 0 --no-pager 2>/dev/null \
-        | strip_ansi | grep -oE "${LINEAR_TEAM}-[0-9]+" | sort -u || true)"
+  command -v jq >/dev/null || die "audit: jq not found"
+  local out ids
+  out="$(linear issue query --team "$LINEAR_TEAM" --unassigned --all-states --limit 0 -j)" \
+    || die "audit: linear CLI failed"
+  ids="$(jq -r '.nodes[].identifier' <<<"$out" | sort -u)" || die "audit: non-JSON response from linear CLI"
   if [[ -z "$ids" ]]; then echo "audit: no unassigned ${LINEAR_TEAM} issues 🎉"; return 0; fi
   echo "Issues not assigned to ${LINEAR_ASSIGNEE}:"
   # shellcheck disable=SC2001 # indents every line of a multi-line list; ${//} can't do that
@@ -374,7 +382,7 @@ cmd_stats() {
   done
 
   local json
-  json="$(linear issue query --team "$LINEAR_TEAM" --all-states --limit 0 -j 2>/dev/null)" \
+  json="$(linear issue query --team "$LINEAR_TEAM" --all-states --limit 0 -j)" \
     || die "stats: query failed"
   [[ -n "$json" ]] || die "stats: empty result"
 

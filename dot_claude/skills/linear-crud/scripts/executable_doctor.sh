@@ -8,7 +8,10 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Deployed it is linear-gql.sh; in the chezmoi source tree it carries the
+# executable_ prefix (same resolution as sibling() in linear.sh).
 GQL="$SCRIPT_DIR/linear-gql.sh"
+[ -f "$GQL" ] || GQL="$SCRIPT_DIR/executable_linear-gql.sh"
 KEY_FILE="${LINEAR_KEY_FILE:-$HOME/.config/linear/gql-key}"
 
 pass=0 warn=0 fail=0
@@ -35,12 +38,22 @@ if [ -f "$KEY_FILE" ]; then
   perms="$(stat -f '%A' "$KEY_FILE" 2>/dev/null || stat -c '%a' "$KEY_FILE" 2>/dev/null)"
   # shellcheck disable=SC2015 # ok/warnf always return 0, so the || branch can only fire on a false test
   [ "$perms" = "600" ] && ok "gql-key present (perms 600)" || warnf "gql-key perms $perms" "chmod 600 $KEY_FILE"
-  if resp="$(bash "$GQL" '{ viewer { id name } }' 2>/dev/null)" && printf '%s' "$resp" | jq -e '.data.viewer.id' >/dev/null 2>&1; then
+  gql_err="$(mktemp "${TMPDIR:-/tmp}/doctor-gql.XXXXXX")"
+  if resp="$(bash "$GQL" '{ viewer { id name } }' 2>"$gql_err")" && printf '%s' "$resp" | jq -e '.data.viewer.id' >/dev/null 2>&1; then
     who="$(printf '%s' "$resp" | jq -r '.data.viewer.name')"
     ok "linear-gql.sh authenticates ($who)"
   else
-    failf "linear-gql.sh API call failed" "key invalid/expired — re-create gql-key from op (see below)"
+    # Classify from the wrapper's own message: a 401/403 is the key, anything
+    # else (curl failure, 5xx) is Linear itself — re-creating the key won't help.
+    err="$(head -c 300 "$gql_err")"
+    case "$err" in
+      *"HTTP 401"*|*"HTTP 403"*) hint="key invalid/expired — re-create gql-key from op (see below)" ;;
+      *"HTTP 000"*|*"HTTP 5"*)   hint="Linear unreachable / outage — not a key problem" ;;
+      *)                          hint="see message above" ;;
+    esac
+    failf "linear-gql.sh API call failed: ${err:-no output}" "$hint"
   fi
+  rm -f "$gql_err"
 else
   failf "gql-key missing at $KEY_FILE" "op read 'op://agents/linear_api_key/password' > $KEY_FILE  (then chmod 600)"
 fi

@@ -1,45 +1,31 @@
 #!/usr/bin/env bash
-# linear-gql.sh — run a raw GraphQL query/mutation against the Linear API,
-# authenticating with the key the `linear` CLI already stored. The key is read
-# internally and never printed. Scope: only ever talks to api.linear.app.
+# linear-gql.sh — run a raw GraphQL query/mutation against the Linear API.
+# The key is read internally and never printed. Scope: only ever talks to
+# api.linear.app.
+#
+# Key sources, in order: $LINEAR_API_KEY, then the key file
+# (~/.config/linear/gql-key, override: LINEAR_KEY_FILE). Nothing else — the
+# CLI's credentials.toml is deliberately NOT scraped (SB-923). doctor.sh shows
+# how to bootstrap the key file from op.
+#
+# Transient failures (curl error, HTTP 429, 5xx) are retried 3× with backoff
+# (1s, 2s, 4s) — for QUERIES only. A mutation gets exactly one attempt: a
+# retry after an ambiguous failure could apply the write twice. Any other 4xx
+# (401 bad key, 400 bad query) fails immediately.
 #
 # Usage:
 #   bash linear-gql.sh '{ viewer { id name email } }'
 #   echo '<query>' | bash linear-gql.sh
-#   bash linear-gql.sh "$(cat query.graphql)"        # variables not supported here
+#   bash linear-gql.sh "$(cat query.graphql)"
+#   bash linear-gql.sh '<query>' '{"var":1}'          # variables as JSON in $2
 set -euo pipefail
 
-CRED="${LINEAR_CRED:-$HOME/.config/linear/credentials.toml}"
-
-# --fmt: print the credential file's structure with values REDACTED (field name
-# + value length only), to debug key parsing without exposing the secret.
-if [ "${1:-}" = "--fmt" ]; then
-  [ -f "$CRED" ] || { echo "no cred file at $CRED" >&2; exit 1; }
-  while IFS= read -r line; do
-    case "$line" in
-      *=*) name="${line%%=*}"; val="${line#*=}"; val="${val//\"/}"; val="${val# }"
-           printf '%s= <%d chars, starts %s>\n' "$name" "${#val}" "$(printf '%s' "$val" | cut -c1-5)" ;;
-      *)   printf '%s\n' "$line" ;;
-    esac
-  done < "$CRED"
-  exit 0
-fi
-
-# Key resolution order: explicit env → dedicated key file → CLI credential toml.
 KEY_FILE="${LINEAR_KEY_FILE:-$HOME/.config/linear/gql-key}"
 KEY="${LINEAR_API_KEY:-}"
 if [ -z "$KEY" ] && [ -f "$KEY_FILE" ]; then
   KEY=$(tr -d ' \t\r\n' < "$KEY_FILE")
 fi
-if [ -z "$KEY" ] && [ -f "$CRED" ]; then
-  KEY=$(grep -oE 'lin_(api|oauth)_[A-Za-z0-9]+' "$CRED" 2>/dev/null | head -1 || true)
-  if [ -z "$KEY" ]; then
-    # Fallback: first long quoted or =-assigned token in the file.
-    KEY=$(grep -oE '(=[[:space:]]*"?)[A-Za-z0-9_.-]{24,}' "$CRED" 2>/dev/null \
-      | sed -E 's/^=[[:space:]]*"?//' | head -1 || true)
-  fi
-fi
-[ -z "$KEY" ] && { echo "linear-gql: no API key found (set LINEAR_API_KEY or check $CRED)" >&2; exit 1; }
+[ -z "$KEY" ] && { echo "linear-gql: no API key — set LINEAR_API_KEY or create $KEY_FILE (run doctor.sh)" >&2; exit 1; }
 
 QUERY="${1:-$(cat)}"
 [ -z "$QUERY" ] && { echo "linear-gql: empty query" >&2; exit 1; }
@@ -52,7 +38,41 @@ else
   PAYLOAD=$(jq -nc --arg q "$QUERY" '{query:$q}')
 fi
 
-curl -sS https://api.linear.app/graphql \
-  -H "Authorization: $KEY" \
-  -H "Content-Type: application/json" \
-  --data "$PAYLOAD"
+BODY="$(mktemp "${TMPDIR:-/tmp}/linear-gql.XXXXXX")"
+trap 'rm -f "$BODY" "$BODY.err"' EXIT
+
+# Mutations are never retried. Strip leading whitespace and #-comments before
+# looking at the first keyword.
+stripped="$(sed -e 's/^[[:space:]]*//' -e '/^#/d' -e '/^$/d' <<<"$QUERY" | head -1)"
+case "$stripped" in
+  mutation*) max_attempts=1 ;;
+  *)         max_attempts=4 ;;
+esac
+
+delay=1
+curl_err=""
+for attempt in $(seq 1 "$max_attempts"); do
+  status="$(curl -sS https://api.linear.app/graphql \
+    --connect-timeout 10 --max-time 60 \
+    -H "Authorization: $KEY" \
+    -H "Content-Type: application/json" \
+    --data "$PAYLOAD" -o "$BODY" -w '%{http_code}' 2>"$BODY.err")" || status=000
+  curl_err="$(cat "$BODY.err" 2>/dev/null || true)"
+  case "$status" in
+    2*) cat "$BODY"; exit 0 ;;
+    000|429|5*) ;;                       # transient: fall through to retry
+    *)  break ;;                         # other 4xx: retrying cannot help
+  esac
+  [ "$attempt" -lt "$max_attempts" ] || break
+  echo "linear-gql: HTTP $status, retry $attempt/$((max_attempts - 1)) in ${delay}s" >&2
+  sleep "$delay"; delay=$((delay * 2))
+done
+
+# Final failure: status + a body excerpt. The body is Linear's response, never
+# the request, so it cannot contain the key.
+{
+  printf 'linear-gql: HTTP %s' "$status"
+  [ "$status" = 000 ] && printf ' (curl failed: %s)' "${curl_err:-no stderr}"
+  printf ' — '; head -c 200 "$BODY"; echo
+} >&2
+exit 1
