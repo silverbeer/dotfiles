@@ -335,6 +335,89 @@ else
 fi
 git -C "$prepo" checkout -q main
 
+# ------------------------------ 3c. worktree: the primary clone is never touched (SB-947)
+
+# A tick left ~/gitrepos/dotfiles — chezmoi's SOURCE OF TRUTH — detached four
+# commits behind main. A `chezmoi apply` then would have reverted five merged
+# fixes. These pin the property that makes that impossible: work happens in a
+# worktree, and the primary checkout does not move.
+note "3c. worktree isolation (SB-947)"
+
+# A tick left ~/gitrepos/dotfiles — chezmoi's SOURCE OF TRUTH — detached four
+# commits behind main. A `chezmoi apply` then would have reverted five merged
+# fixes. These pin the property that makes that impossible.
+#
+# HOME is sandboxed for every call: cmd_worktree resolves the primary checkout
+# from $HOME/gitrepos by design, so an unsandboxed run would create worktrees
+# in the developer's real repositories. (It did, while this test was being
+# written.)
+wt_home="$WORK/wthome"
+wt_primary="$wt_home/gitrepos/dotfiles"      # SB-1's stub labels include DOT
+mkdir -p "$wt_home/gitrepos"
+git -c init.defaultBranch=main init -q "$wt_primary"
+printf 'seed\n' >"$wt_primary/README.md"
+git -C "$wt_primary" add README.md
+git -C "$wt_primary" -c user.name=ci -c user.email=ci@example.invalid commit -q -m seed
+git -C "$wt_primary" remote add origin "$bare" 2>/dev/null || true
+
+wt_run() {  # STATE_DIR -- run cmd_worktree with a sandboxed HOME
+  local state="$1"; shift
+  ( cd "$wt_primary" && HOME="$wt_home" GATEKEEPER_STATE="$state" bash "$LINEAR_SH" worktree SB-1 "$@" )
+}
+
+# --- the human is on the ticket branch: must refuse, and say why
+git -C "$wt_primary" checkout -q -B silverbeer/sb-1-add-board-delivery-view-v2
+if wt_run "$WORK/wtstate_guard" >/dev/null 2>"$WORK/wt_guard.err"; then
+  bad "worktree: created a tree for a branch the primary has checked out"
+elif grep -q "a human is working there" "$WORK/wt_guard.err"; then
+  ok "worktree: refuses when the primary has that branch checked out, and says why"
+else
+  bad "worktree: refused, but not with the expected explanation: $(head -2 "$WORK/wt_guard.err")"
+fi
+
+# --- the normal case: a human on their own branch, with uncommitted work
+git -C "$wt_primary" checkout -q -b human/in-progress
+printf 'human wip\n' >>"$wt_primary/README.md"
+before_branch="$(git -C "$wt_primary" branch --show-current)"
+before_head="$(git -C "$wt_primary" rev-parse HEAD)"
+before_dirty="$(git -C "$wt_primary" status --porcelain | wc -l | tr -d ' ')"
+
+if wt="$(wt_run "$WORK/wtstate" 2>"$WORK/wt.err")"; then
+  if [ -d "$wt" ] && [ "$wt" != "$wt_primary" ]; then
+    ok "worktree: created outside the primary checkout"
+  else
+    bad "worktree: not a separate directory: $wt"
+  fi
+
+  if [ "$before_branch" = "$(git -C "$wt_primary" branch --show-current)" ] \
+     && [ "$before_head" = "$(git -C "$wt_primary" rev-parse HEAD)" ]; then
+    ok "worktree: primary checkout stayed on its own branch and commit"
+  else
+    bad "worktree: the primary checkout MOVED — this is the SB-947 regression"
+  fi
+
+  if [ "$before_dirty" = "$(git -C "$wt_primary" status --porcelain | wc -l | tr -d ' ')" ]; then
+    ok "worktree: the human's uncommitted work is untouched"
+  else
+    bad "worktree: primary dirty count changed"
+  fi
+  [ "$before_dirty" -gt 0 ] && ok "worktree: succeeded despite a dirty primary checkout"
+
+  if [[ "$(git -C "$wt" branch --show-current 2>/dev/null)" == silverbeer/sb-1-* ]]; then
+    ok "worktree: checked out the ticket branch"
+  else
+    bad "worktree: unexpected branch in the worktree"
+  fi
+
+  if wt2="$(wt_run "$WORK/wtstate" 2>/dev/null)" && [ "$wt2" = "$wt" ]; then
+    ok "worktree: second call reuses the same tree (a resumed run keeps its commits)"
+  else
+    bad "worktree: not idempotent — got '$wt2', expected '$wt'"
+  fi
+else
+  bad "worktree: failed: $(head -2 "$WORK/wt.err")"
+fi
+
 # ----------------------------------------------- 4-6. python unit tests
 
 note "4-6. python unittest in $tests_dir"
