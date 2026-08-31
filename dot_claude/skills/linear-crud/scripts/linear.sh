@@ -17,6 +17,8 @@
 #   stats [--days N]            momentum dashboard (totals, velocity, age, sparkline)
 #   new   --title T (--body B | --body-file F) --type TYPE [--repo R] [--epic E]
 #         [--driven human|agent-supervised|agent-auto] [--label L ...] [--estimate N]
+#   worktree SB-N               print (creating if needed) an isolated worktree for
+#                               the issue's repo — never touches ~/gitrepos/<repo>
 #   branch SB-N [--from-head]   checkout silverbeer/sb-n-<slug> off origin/<default>
 #                               (sb-n token links the PR; --from-head uses local HEAD)
 #   list  [--all] [--repo R] [--epic E]   my issues (open by default), TSV
@@ -484,6 +486,113 @@ cmd_stats() {
   echo
 }
 
+# ------------------------------------------------------- worktrees (SB-947)
+# A cycle-runner tick used to run git operations in ~/gitrepos/<repo>, the
+# human's own checkout. That switched branches under a person mid-session and,
+# on 2026-08-31, left ~/gitrepos/dotfiles — which is chezmoi's SOURCE OF TRUTH —
+# detached four commits behind main. A `chezmoi apply` in that state would have
+# silently reverted five merged fixes. A worktree makes the shared clone
+# unreachable, so the whole class cannot recur.
+
+worktree_root() {
+  printf '%s/worktrees' "${GATEKEEPER_STATE:-$HOME/.local/state/cycle-runner}"
+}
+
+# LABEL -> the primary checkout for that repo, i.e. the one a worktree is cut
+# from. First dirGlob under ~/gitrepos that is actually a git repo wins.
+repo_dir_for_label() {
+  local label="$1" f g d
+  f="$(repos_json)"
+  while read -r g; do
+    [ -z "$g" ] && continue
+    for d in "$HOME/gitrepos"/$g; do
+      [ -d "$d/.git" ] && { printf '%s' "$d"; return 0; }
+    done
+  done < <(jq -r --arg l "$label" '.[] | select(.label==$l) | (.dirGlobs // [])[]' "$f")
+  return 1
+}
+
+# Gitignored paths a fresh worktree does not get but the run needs: heavy
+# dependency dirs are symlinked (never copied — node_modules is 243 MB on MT),
+# small config files are copied. Both declared per repo in repos.json; a repo
+# that declares neither needs no setup and costs nothing to run in a worktree.
+worktree_provision() {
+  local label="$1" primary="$2" wt="$3" f rel
+  f="$(repos_json)"
+  while read -r rel; do
+    [ -z "$rel" ] && continue
+    [ -e "$primary/$rel" ] || continue
+    [ -e "$wt/$rel" ] && continue
+    mkdir -p "$(dirname "$wt/$rel")"
+    ln -s "$primary/$rel" "$wt/$rel" && echo "  linked $rel" >&2
+  done < <(jq -r --arg l "$label" '.[] | select(.label==$l) | (.worktreeLink // [])[]' "$f")
+  while read -r rel; do
+    [ -z "$rel" ] && continue
+    [ -e "$primary/$rel" ] || continue
+    [ -e "$wt/$rel" ] && continue
+    mkdir -p "$(dirname "$wt/$rel")"
+    cp "$primary/$rel" "$wt/$rel" && echo "  copied $rel" >&2
+  done < <(jq -r --arg l "$label" '.[] | select(.label==$l) | (.worktreeCopy // [])[]' "$f")
+}
+
+# Print the worktree path for an issue, creating it if absent. Idempotent: a
+# resumed run gets the same tree back, with its commits intact.
+cmd_worktree() {
+  local key="${1:-}"
+  [ -n "$key" ] || die "usage: worktree SB-123"
+  command -v jq >/dev/null || die "jq not found"
+
+  local brief label title
+  brief="$(issue_brief "$key" worktree)"
+  title="$(jq -r .title <<<"$brief")"
+  label="$(jq -r --argjson j "$(jq -c '[.[].label]' "$(repos_json)")" \
+    '[.labels[]] | map(select(. as $x | $j | index($x))) | .[0] // empty' <<<"$brief")"
+  [ -n "$label" ] || die "worktree: $key has no repo label — add one (its labels: $(jq -r '.labels | join(", ")' <<<"$brief"))"
+
+  local primary
+  primary="$(repo_dir_for_label "$label")" \
+    || die "worktree: no checkout found for repo label '$label' under ~/gitrepos"
+
+  local branch wt
+  branch="$(branch_name_for "$key" "$title")"
+  wt="$(worktree_root)/$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')"
+
+  if [ -d "$wt" ]; then
+    echo "  reusing worktree (branch $(git -C "$wt" branch --show-current 2>/dev/null))" >&2
+    printf '%s\n' "$wt"
+    return 0
+  fi
+
+  git -C "$primary" fetch --quiet origin 2>/dev/null \
+    || echo "  ! git fetch failed — cutting from whatever origin/ refs are local" >&2
+
+  local base
+  base="$(git -C "$primary" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  [ -n "$base" ] || base="origin/main"
+
+  mkdir -p "$(worktree_root)"
+  # An existing ticket branch is checked out as-is, never reset (same rule as
+  # cmd_branch): a resumed run must not lose commits already on it.
+  if git -C "$primary" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
+    # A branch checked out in the primary clone cannot also live in a worktree.
+    # That is git refusing the very collision this command exists to prevent —
+    # say so, rather than leaking git's wording.
+    if [ "$(git -C "$primary" branch --show-current 2>/dev/null)" = "$branch" ]; then
+      die "worktree: $key's branch is checked out in $primary — a human is working there. Switch that checkout off $branch first."
+    fi
+    git -C "$primary" worktree add --quiet "$wt" "$branch" \
+      || die "worktree: could not attach existing branch $branch"
+    echo "  worktree $wt (existing branch $branch)" >&2
+  else
+    git -C "$primary" worktree add --quiet -b "$branch" "$wt" "$base" \
+      || die "worktree: could not create $wt from $base"
+    echo "  worktree $wt (new branch $branch from $base)" >&2
+  fi
+
+  worktree_provision "$label" "$primary" "$wt"
+  printf '%s\n' "$wt"
+}
+
 # Branch name for an issue: silverbeer/sb-<n>-<title-slug>. Shared by branch
 # and pack so the two can never disagree.
 branch_name_for() {
@@ -607,6 +716,7 @@ case "$sub" in
   stats)             cmd_stats "$@" ;;
   new)               cmd_new "$@" ;;
   branch)            cmd_branch "$@" ;;
+  worktree)          cmd_worktree "$@" ;;
   pack)              cmd_pack "$@" ;;
   list)              cmd_list "$@" ;;
   view)              cmd_view "$@" ;;

@@ -68,36 +68,53 @@ mid-run. Empty description (not just thin) → `blocked` gate, body "no
 acceptance criteria to act on", exit. Missing estimate → propose one inline in
 the phase-3 plan body; don't stop for it.
 
-### 2. Branch
+### 2. Worktree and branch
 
 ```bash
-bash ~/.claude/skills/linear-crud/scripts/linear.sh branch SB-<n>
+WT="$(bash ~/.claude/skills/linear-crud/scripts/linear.sh worktree SB-<n>)"
+cd "$WT"
 ```
 
-That is the whole phase. `linear.sh branch` fetches and cuts the branch from
-`origin/<default>`, so **local `main` being behind is not a blocker and never
-raises a gate** — the branch does not come from local HEAD. Do not `git pull`
-or `git checkout main` first; there is nothing to bring up to date.
+**Every git and file operation for this ticket happens inside `$WT`. Never work
+in `~/gitrepos/<repo>` (SB-947.)** That directory is a human's own checkout —
+and for `dotfiles` it is chezmoi's source of truth, so leaving it on the wrong
+commit desynchronises the deployed system from its source. On 2026-08-31 a run
+left it detached four commits behind main; a routine `chezmoi apply` would have
+silently reverted five merged fixes.
 
-`.git.dirty` from the phase-1 pack is the **single source of truth** for a
-dirty tree. Do not re-run `git status` and read it yourself: `.git.dirty` is
-computed with `--porcelain -uno`, so untracked files are deliberately not
-counted, and a raw `git status` will show untracked scratch dirs and a
-behind-by-N line that mean nothing here. Reading the raw output is what made a
-run stop and wake a human over a `git fetch` (SB-946).
+`linear.sh worktree` fetches, cuts the branch from `origin/<default>`, and
+prints the path. It is idempotent — a resumed run gets the same tree back with
+its commits intact — and it never resets an existing branch. Repos that need
+gitignored dependencies (`node_modules`, `.venv`, `.env`) get them linked or
+copied per `worktreeLink` / `worktreeCopy` in `repos.json`.
+
+Do **not** also run `linear.sh branch`: `worktree` has already created and
+checked out the branch. `branch` remains for interactive use in a normal
+checkout.
+
+The branch comes from `origin/<default>`, never local HEAD, so **a stale local
+`main` is not a blocker and never raises a gate** (SB-946). Do not `git pull`
+or `git checkout main` first — there is nothing to bring up to date, and the
+primary clone is not yours to move.
+
+Do not re-run `git status` on the primary checkout and reason about it. Its
+state — dirty, behind, full of untracked scratch — is now irrelevant to this
+run by construction. Reading that raw output is what once made a run stop and
+wake a human over a `git fetch` (SB-946).
 
 Gate **only** where work could actually be destroyed:
 
 | condition | action |
 |---|---|
-| `.git.dirty` is true (tracked files modified) | `blocked` gate, exit |
-| ticket branch exists with commits not in `origin/<default>` | `blocked` gate, exit |
-| behind origin, untracked files, both | proceed — not blockers |
+| the ticket's branch is checked out in the primary clone (a human is on it) | `blocked` gate, exit |
+| behind origin, untracked files, a dirty primary clone | proceed — a worktree is unaffected by any of it |
 
-An existing ticket branch with no unique commits is checked out and reused;
-`linear.sh branch` never resets it, so a resumed run cannot lose commits.
-A headless run still never stashes or discards to force its way past a genuine
-dirty tree.
+A fresh worktree is clean by construction, so a dirty primary checkout is no
+longer a reason to stop — whatever state a human has left their own clone in
+cannot reach this run. An existing ticket branch is reused with its commits
+intact; neither `worktree` nor `branch` ever resets one, which is what makes a
+resumed run safe. A headless run still never stashes or discards to force its
+way past anything.
 
 ### 3. Plan — gate (conditional)
 
