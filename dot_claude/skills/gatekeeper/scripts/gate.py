@@ -311,7 +311,7 @@ class Gatekeeper:
         # already live, so a DM failure below must not orphan the gate — it
         # stays resolvable via the Linear channel, and `poll` can find it.
         save_gate(gate)
-        text = telegram_text(kind, ticket, issue["title"], body, link or issue["url"])
+        text = telegram_text(kind, ticket, issue["title"], body, link or issue["url"], issue["url"])
         keyboard = approve_keyboard(gate_id) if kind != "blocked" else None
         try:
             sent = send_text(self.transport, self.chat_id, text, keyboard)
@@ -533,11 +533,29 @@ class Gatekeeper:
 # ------------------------------------------------------------------ wiring
 
 
-def telegram_text(kind: str, ticket: str, title: str, body: str, link: str) -> str:
+def telegram_text(kind: str, ticket: str, title: str, body: str, link: str, issue_url: str = "") -> str:
+    """The DM for one gate.
+
+    The ticket link is ALWAYS present (SB-954). `pr` and `merge` gates pass the
+    PR as `link`, and with a single-link trailer that silently replaced the only
+    route back to the ticket — on exactly the gates where a human wants both:
+    read the PR, decide on the ticket. It also matters for answering: until the
+    long-poll agent lands (SB-951), a Linear comment is the more reliable
+    channel, and the message has to say so.
+    """
     summary = body.strip()
     if len(summary) > SUMMARY_CHARS:
         summary = summary[:SUMMARY_CHARS].rstrip() + "…"
-    return f"[{kind}] {ticket} — {title}\n\n{summary}\n\n{link}"
+
+    ticket_url = issue_url or link
+    trailer = [f"Ticket: {ticket_url}"]
+    if link and link != ticket_url:
+        trailer.append(f"PR:     {link}")
+    # `blocked` gets no keyboard, so telling its reader to tap would be a lie.
+    if kind != "blocked":
+        trailer.append("Approve with the buttons, or comment `approve` on the ticket.")
+
+    return f"[{kind}] {ticket} — {title}\n\n{summary}\n\n" + "\n".join(trailer)
 
 
 def gatekeeper_from_env() -> Gatekeeper:
@@ -565,7 +583,12 @@ def cmd_open(args: argparse.Namespace) -> int:
                     "ticket": args.ticket,
                     "marker": f"<!-- sb-agent:{args.kind}:{args.run_id}:{args.session_id} -->",
                     "telegram": telegram_text(
-                        args.kind, args.ticket, "(title not fetched)", body, args.link or "(issue url)"
+                        args.kind,
+                        args.ticket,
+                        "(title not fetched)",
+                        body,
+                        args.link or "(issue url)",
+                        "(issue url)",
                     ),
                     "keyboard": args.kind != "blocked",
                 },

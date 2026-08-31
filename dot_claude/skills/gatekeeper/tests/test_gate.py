@@ -127,6 +127,48 @@ class CallbackTests(GateTestCase):
         self.assertEqual(loaded["note"], "needs another pass")
 
 
+class TelegramTextTests(unittest.TestCase):
+    """SB-954. A `pr` gate arrived carrying only the PR link, so the message
+    had no route back to the ticket — on exactly the gate where a human wants
+    both, and where a Linear comment is currently the more reliable way to
+    answer (SB-951)."""
+
+    TICKET_URL = "https://linear.app/silverbeer/issue/SB-940"
+    PR_URL = "https://github.com/silverbeer/missing-table/pull/590"
+
+    def test_pr_gate_carries_both_links_labelled(self):
+        text = gate.telegram_text("pr", "SB-940", "Dark mode", "body", self.PR_URL, self.TICKET_URL)
+        self.assertIn(f"Ticket: {self.TICKET_URL}", text)
+        self.assertIn(self.PR_URL, text.split("Ticket:")[1])
+
+    def test_plan_gate_shows_one_link_when_both_are_the_same(self):
+        text = gate.telegram_text("plan", "SB-624", "Prep", "body", self.TICKET_URL, self.TICKET_URL)
+        self.assertEqual(text.count(self.TICKET_URL), 1)
+        self.assertNotIn("PR:", text)
+
+    def test_every_kind_carries_the_ticket_link(self):
+        for kind in ("plan", "pr", "merge", "blocked"):
+            text = gate.telegram_text(kind, "SB-940", "t", "body", self.PR_URL, self.TICKET_URL)
+            self.assertIn(self.TICKET_URL, text, f"{kind} gate lost the ticket link")
+
+    def test_a_decidable_gate_says_how_to_answer_it(self):
+        text = gate.telegram_text("pr", "SB-940", "t", "body", self.PR_URL, self.TICKET_URL)
+        self.assertIn("comment `approve` on the ticket", text)
+
+    def test_blocked_gate_does_not_promise_buttons_it_does_not_have(self):
+        # open_gate sends no keyboard for `blocked`, so telling the reader to
+        # tap would be a lie.
+        text = gate.telegram_text("blocked", "SB-593", "t", "body", self.TICKET_URL, self.TICKET_URL)
+        self.assertNotIn("buttons", text)
+
+    def test_the_body_is_still_truncated_and_the_trailer_survives(self):
+        long_body = "x" * (gate.SUMMARY_CHARS + 500)
+        text = gate.telegram_text("pr", "SB-940", "t", long_body, self.PR_URL, self.TICKET_URL)
+        self.assertIn("…", text)
+        # The trailer is what the reader acts on; truncation must never eat it.
+        self.assertIn(f"Ticket: {self.TICKET_URL}", text)
+
+
 class CallbackAnswerFailureTests(GateTestCase):
     """SB-950. A callback query id expires about a minute after the tap; this
     poller runs on a 30-minute tick, so `answerCallbackQuery` nearly always
