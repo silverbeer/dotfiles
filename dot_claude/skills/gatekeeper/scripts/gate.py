@@ -95,7 +95,7 @@ def parse_decision(text: str) -> tuple[str, str | None] | None:
 def issue_info(ticket: str) -> dict:
     q = """
     query($key: String!) {
-      issue(id: $key) { id title url assignee { id } labels { nodes { id name } } }
+      issue(id: $key) { id title url assignee { id } state { name type } labels { nodes { id name } } }
     }
     """
     issue = gql(q, {"key": ticket})["issue"]
@@ -264,6 +264,47 @@ def all_gates() -> list[dict]:
             except ValueError:
                 print(f"warn: unreadable gate state {p}", file=sys.stderr)
     return out
+
+
+# A ticket can reach Done without its gate ever being answered: the PR merges,
+# Linear closes the issue via "Fixes SB-N", and nothing tells the gate. It then
+# sits `awaiting` forever, and SB-944 makes a pending gate skip the ticket — so
+# a stale gate is not merely clutter, it can park a ticket permanently. Four of
+# these accumulated in two days (SB-949).
+CLOSED_STATE_TYPES = ("completed", "canceled")
+
+
+def superseded_gates() -> list[dict]:
+    """Awaiting gates whose ticket has already finished. Resolves each as
+    `superseded`, clears its `gate:*` label, and returns what it closed."""
+    closed = []
+    for gate in awaiting_gates():
+        try:
+            issue = issue_info(gate["ticket"])
+        except SystemExit:
+            continue  # a deleted ticket is not this function's problem
+        if (issue.get("state") or {}).get("type") not in CLOSED_STATE_TYPES:
+            continue
+        gate["status"] = "superseded"
+        gate["source"] = "ticket-closed"
+        gate["note"] = f"ticket reached {issue['state']['name']} without this gate being answered"
+        save_gate(gate)
+        # Drop the gate:* label entirely rather than stamping another value —
+        # the question is moot, and gate:approved would imply a human answered.
+        keep = [n["id"] for n in issue["labels"]["nodes"] if not n["name"].startswith("gate:")]
+        try:
+            gql(
+                """
+                mutation($id: String!, $labelIds: [String!]!) {
+                  issueUpdate(id: $id, input: {labelIds: $labelIds}) { success }
+                }
+                """,
+                {"id": issue["id"], "labelIds": keep},
+            )
+        except SystemExit:
+            print(f"gate: could not clear gate label on {gate['ticket']}", file=sys.stderr)
+        closed.append(gate)
+    return closed
 
 
 def awaiting_gates() -> list[dict]:
@@ -511,6 +552,13 @@ class Gatekeeper:
     # --------------------------------------------------------------- poll
 
     def poll_once(self, timeout: int) -> list[dict]:
+        # Before anything else: a gate whose ticket is already finished has no
+        # question left to ask (SB-949).
+        for gate in superseded_gates():
+            print(
+                f"gate: {gate['gate_id']} ({gate['ticket']}, {gate['kind']}) superseded — {gate['note']}",
+                file=sys.stderr,
+            )
         timeout_hours = float(os.environ.get("GATE_TIMEOUT_HOURS", DEFAULT_TIMEOUT_HOURS))
         cutoff = now_utc() - timedelta(hours=timeout_hours)
         timed_out = set()
@@ -617,6 +665,17 @@ def cmd_poll(args: argparse.Namespace) -> int:
                     for g in resolved
                 ],
                 "awaiting": len(awaiting_gates()),
+                # Named, not just counted (SB-949): an idle tick sends no
+                # Telegram summary, so a parked ticket is invisible — "you are
+                # the bottleneck" looks exactly like "nothing to do".
+                "parked": [
+                    {
+                        "ticket": g["ticket"],
+                        "kind": g["kind"],
+                        "hours": round((now_utc() - datetime.fromisoformat(g["opened_at"])).total_seconds() / 3600, 1),
+                    }
+                    for g in awaiting_gates()
+                ],
             },
             indent=2,
         )

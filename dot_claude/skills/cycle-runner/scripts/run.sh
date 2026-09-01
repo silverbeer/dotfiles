@@ -458,9 +458,15 @@ if [[ "$acted" -eq 0 ]]; then
   ticket="$(python3 "$PICK_PY")"
   if [[ -z "$ticket" ]]; then
     note "nothing resolved, no ready ticket — nothing to do this tick"
-    # Deliberately no summary line: an idle tick posts nothing. Silence means
-    # idle. 48 "nothing to do" messages a day teaches the reader to ignore the
-    # channel, which is the one thing this channel cannot afford (SB-945).
+    # An idle tick normally posts nothing (SB-945) — silence means idle. But
+    # silence must not also mean "everything is parked waiting on you", which
+    # is indistinguishable and was (SB-949). Say so once a day, not every tick.
+    parked="$(jq -r '[.parked[]? | select(.hours >= 12)] | length' <<<"$RESOLVED_JSON" 2>/dev/null || echo 0)"
+    if [[ "${parked:-0}" -gt 0 ]]; then
+      say "$parked ticket(s) waiting on you" \
+          "$(jq -r '[.parked[] | select(.hours >= 12) | "\(.ticket) (\(.kind), \(.hours)h)"] | join(", ")' <<<"$RESOLVED_JSON")" \
+          "https://linear.app/silverbeer/team/SB/active"
+    fi
   else
     session_id="$(gen_uuid)"
     run_id="$INVOCATION_ID"

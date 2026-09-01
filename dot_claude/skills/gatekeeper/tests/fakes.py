@@ -64,12 +64,18 @@ class FakeLinear:
         url: str = "https://linear.app/silverbeer/issue/SB-1",
         assignee_id: str = "user-1",
         labels: list[str] | None = None,
+        state_name: str = "In Progress",
+        state_type: str = "started",
     ) -> None:
         self.ticket = ticket
         self.issue_id = "issue-uuid-1"
         self.title = title
         self.url = url
         self.assignee_id = assignee_id
+        # A gate whose ticket has already reached Done has no question left to
+        # ask (SB-949). Mutable so a test can close the ticket mid-flight.
+        self.state_name = state_name
+        self.state_type = state_type
         self.labels: list[str] = list(labels if labels is not None else ["type:feature"])
         self.label_catalog: dict[str, str] = {
             "type:feature": "lbl-type-feature",
@@ -130,6 +136,7 @@ class FakeLinear:
                 "title": self.title,
                 "url": self.url,
                 "assignee": {"id": self.assignee_id},
+                "state": {"name": self.state_name, "type": self.state_type},
                 "labels": {"nodes": [{"id": self.label_catalog.get(n, n), "name": n} for n in self.labels]},
             }
         }
