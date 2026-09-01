@@ -61,7 +61,23 @@ echo "── auth ────────────────────�
 gh_auth_out="$(gh auth status 2>&1)"
 gh_auth_rc=$?
 if [ "$gh_auth_rc" -eq 0 ]; then ok "gh authenticated"; else warnf "gh not authenticated" "run: gh auth login"; fi
-if op account list >/dev/null 2>&1 && [ -n "$(op account list 2>/dev/null)" ]; then ok "op account configured"; else warnf "op not configured/signed in" "run: op signin (needed to bootstrap the Linear key)"; fi
+# `op account list` enumerates DESKTOP APP accounts. A service account has none,
+# so the command ignores OP_SERVICE_ACCOUNT_TOKEN and falls through to the
+# desktop integration — raising "op would like to access data from other apps"
+# and a Touch ID prompt on EVERY doctor run, twice (it was called twice here).
+# SB-953 fixed the same class of bug for launchd; this call site survived it.
+# `op whoami` is service-account aware and stays headless.
+if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]; then
+  if op_kind_out="$(op whoami 2>/dev/null)" && [ -n "$op_kind_out" ]; then
+    ok "op authenticated ($(printf '%s' "$op_kind_out" | awk -F': *' '/User Type/ {print $2}'))"
+  else
+    failf "op service-account token present but 'op whoami' failed" "the token may have expired — see CLAUDE.md's expiry note"
+  fi
+elif op_accounts="$(op account list 2>/dev/null)" && [ -n "$op_accounts" ]; then
+  ok "op account configured (desktop app)"
+else
+  warnf "op not configured/signed in" "run: op signin (needed to bootstrap the Linear key)"
+fi
 if [ -f "$HOME/.config/linear/credentials.toml" ] && grep -q '^default' "$HOME/.config/linear/credentials.toml" 2>/dev/null; then
   ok "linear CLI has a default workspace"
 else

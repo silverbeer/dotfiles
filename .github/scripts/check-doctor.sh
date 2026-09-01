@@ -193,6 +193,46 @@ else
   bad "token-set-success case did not report as expected: $out"
 fi
 
+# SB-972: with a service-account token set, doctor must NOT call
+# `op account list`. That subcommand enumerates DESKTOP APP accounts, ignores
+# the token, and raises a Touch ID prompt on an unattended machine — the same
+# class of bug SB-953 fixed for launchd, surviving at doctor's own call site.
+# The marker is a FILE, not a stream: doctor redirects both stdout and stderr
+# of its `op` calls, so a printed marker would be invisible to the assertion.
+OP_ACCOUNT_MARKER="$WORK/op-account-list-called"; export OP_ACCOUNT_MARKER
+stub op <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  account) : >"$OP_ACCOUNT_MARKER"; echo "desktop-account" ;;
+  whoami)  echo "User Type: SERVICE_ACCOUNT" ;;
+esac
+exit 0
+STUB
+rm -f "$OP_ACCOUNT_MARKER"
+out="$(run_doctor env OP_SERVICE_ACCOUNT_TOKEN=fake-service-token CLAUDE_CODE_OAUTH_TOKEN=fake-token-for-testing)"
+if [ -e "$OP_ACCOUNT_MARKER" ]; then
+  bad "doctor called 'op account list' with a service-account token set — that takes the desktop path and prompts (SB-972)"
+else
+  ok "op: service-account token present -> no 'op account list', no desktop prompt"
+fi
+if [[ "$out" == *"SERVICE_ACCOUNT"* ]]; then
+  ok "op: the auth line names the identity it authenticated as"
+else
+  bad "op: auth line does not name the identity: $out"
+fi
+
+# Without a token, the desktop check is still the right one for a human
+# terminal. `env -u` is load-bearing: the operator's own shell exports the
+# service-account token, so an inherited one would make this scenario
+# unreachable — the same environment-fidelity trap SB-953 turned on.
+rm -f "$OP_ACCOUNT_MARKER"
+out="$(run_doctor env -u OP_SERVICE_ACCOUNT_TOKEN CLAUDE_CODE_OAUTH_TOKEN=fake-token-for-testing)"
+if [ -e "$OP_ACCOUNT_MARKER" ]; then
+  ok "op: no service-account token -> falls back to the desktop account check"
+else
+  bad "op: without a token it must still check the desktop app"
+fi
+
 # Budget-exceeded is NOT an auth failure (SB-942): reaching the cap means the
 # call authenticated and started billing. The old $0.02 cap made this the
 # outcome for every token, valid or not, and it was reported as a credential
