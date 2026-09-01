@@ -71,10 +71,21 @@ else
   note "plutil not on PATH (non-macOS runner) — skipping the plist syntax lint, byte-count and content checks below still ran"
 fi
 
-for want in 'io.silverbeer.cycle-runner' '<integer>1800</integer>' '<false/>' \
+# SB-971: the cadence is StartCalendarInterval at :00 and :30, NOT
+# StartInterval. An interval timer is a hint launchd may coalesce, and it
+# deferred this job for 11h and 16h on two consecutive nights while the machine
+# was awake. Reverting to StartInterval silently restores that, so guard both
+# the presence of the calendar entries and the absence of the interval key.
+for want in 'io.silverbeer.cycle-runner' '<key>StartCalendarInterval</key>' \
+            '<integer>0</integer>' '<integer>30</integer>' '<false/>' \
             '.local/state/cycle-runner'; do
   grep -qF -- "$want" "$mini_out" || { err "mini-hostname render is missing '$want'"; rc=1; }
 done
+
+if grep -qF -- '<key>StartInterval</key>' "$mini_out"; then
+  err "mini-hostname render uses StartInterval — launchd coalesces interval timers and skipped this job overnight (SB-971); use StartCalendarInterval"
+  rc=1
+fi
 
 # ------------------------------------------------ 2. non-mini: nothing at all
 
