@@ -266,8 +266,11 @@ class RenderReviewTests(unittest.TestCase):
     def test_changed_and_untouched_sections_split_correctly(self):
         changed_issue = fetch_issue(identifier="SB-1", title="Fix crash", estimate=None, labels=[])
         untouched_issue = fetch_issue(
-            identifier="SB-2", title="Already triaged", state_type="triage",
-            estimate=2, labels=["chore", "driven:agent-supervised"],
+            identifier="SB-2",
+            title="Already triaged",
+            state_type="triage",
+            estimate=2,
+            labels=["chore", "driven:agent-supervised"],
         )
         drafts = [triage.draft_changes(changed_issue), triage.draft_changes(untouched_issue)]
         issues_by_id = {"SB-1": changed_issue, "SB-2": untouched_issue}
@@ -299,7 +302,10 @@ class ProposeTests(unittest.TestCase, GqlPatchMixin):
     def _run(self, fetch_nodes, out_review, out_apply):
         self.patch_gql(FakeGql(fetch_nodes=fetch_nodes))
         args = SimpleNamespace(
-            team="SB", out_review=str(out_review), out_apply=str(out_apply), today="2026-01-01",
+            team="SB",
+            out_review=str(out_review),
+            out_apply=str(out_apply),
+            today="2026-01-01",
         )
         rc = triage.cmd_propose(args)
         self.assertEqual(rc, 0)
@@ -466,12 +472,13 @@ class ApplyTests(unittest.TestCase, GqlPatchMixin):
         self.assertEqual(fake.mutations, [])
 
     def test_confirm_writes_labels_and_estimate_for_planned_changes(self):
-        p = self._changes_file(
-            [{"id": "SB-1", "title": "t", "type": "bug", "estimate": 2, "driven": "agent-auto"}]
-        )
+        p = self._changes_file([{"id": "SB-1", "title": "t", "type": "bug", "estimate": 2, "driven": "agent-auto"}])
         live = {"SB-1": live_node("SB-1", linear_id="lid-1", estimate=None, labels=["adhoc"])}
         fake = self.patch_gql(
-            FakeGql(live_by_id=live, label_map={"bug": "lbl-bug", "driven:agent-auto": "lbl-auto", "adhoc": "lbl-adhoc"})
+            FakeGql(
+                live_by_id=live,
+                label_map={"bug": "lbl-bug", "driven:agent-auto": "lbl-auto", "adhoc": "lbl-adhoc"},
+            )
         )
         args = SimpleNamespace(changes=str(p), confirm=True)
         rc = triage.cmd_apply(args)
