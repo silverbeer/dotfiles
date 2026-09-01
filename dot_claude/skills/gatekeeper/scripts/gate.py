@@ -307,6 +307,32 @@ def superseded_gates() -> list[dict]:
     return closed
 
 
+REMINDER_AFTER_HOURS = 12.0
+REMINDER_EVERY_HOURS = 24.0
+
+
+def issue_url(ticket: str) -> str:
+    """The ticket's own URL. A reminder that names a ticket must link to THAT
+    ticket — a team-board link makes the reader go find it, which is the
+    friction this channel exists to remove (SB-973)."""
+    return f"https://linear.app/silverbeer/issue/{ticket}"
+
+
+def _due_for_reminder(gate: dict) -> bool:
+    """True at most once every REMINDER_EVERY_HOURS, and never before the gate
+    has been parked REMINDER_AFTER_HOURS. Stamps the gate when it returns True,
+    so a caller cannot accidentally re-notify."""
+    opened = datetime.fromisoformat(gate["opened_at"])
+    if (now_utc() - opened).total_seconds() / 3600 < REMINDER_AFTER_HOURS:
+        return False
+    last = gate.get("reminded_at")
+    if last and (now_utc() - datetime.fromisoformat(last)).total_seconds() / 3600 < REMINDER_EVERY_HOURS:
+        return False
+    gate["reminded_at"] = now_utc().isoformat()
+    save_gate(gate)
+    return True
+
+
 def awaiting_gates() -> list[dict]:
     return sorted((g for g in all_gates() if g["status"] == "awaiting"), key=lambda g: g["opened_at"])
 
@@ -668,11 +694,18 @@ def cmd_poll(args: argparse.Namespace) -> int:
                 # Named, not just counted (SB-949): an idle tick sends no
                 # Telegram summary, so a parked ticket is invisible — "you are
                 # the bottleneck" looks exactly like "nothing to do".
+                # `notify` is the rate limit (SB-973). The first version keyed
+                # the reminder on `hours >= 12`, which stays true forever, so it
+                # fired on EVERY tick once a gate crossed 12h — five messages in
+                # 96 minutes, the exact nagging SB-945 removed. A parked gate is
+                # worth one reminder a day, not one every 30 minutes.
                 "parked": [
                     {
                         "ticket": g["ticket"],
                         "kind": g["kind"],
+                        "url": issue_url(g["ticket"]),
                         "hours": round((now_utc() - datetime.fromisoformat(g["opened_at"])).total_seconds() / 3600, 1),
+                        "notify": _due_for_reminder(g),
                     }
                     for g in awaiting_gates()
                 ],

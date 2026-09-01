@@ -127,6 +127,46 @@ class CallbackTests(GateTestCase):
         self.assertEqual(loaded["note"], "needs another pass")
 
 
+class ParkedReminderTests(GateTestCase):
+    """SB-973. The first version of the parked-gate reminder keyed on
+    `hours >= 12`, which stays true forever — so it fired on EVERY tick once a
+    gate crossed 12h. Five messages arrived in 96 minutes, each linking to a
+    team board rather than the ticket. That is the nagging SB-945 removed and
+    the generic link the user had explicitly asked against."""
+
+    def _age_gate(self, g, hours):
+        g["opened_at"] = (gate.now_utc() - timedelta(hours=hours)).isoformat()
+        gate.save_gate(g)
+        return g
+
+    def test_no_reminder_before_the_threshold(self):
+        g = self._age_gate(self.open_gate(), 3)
+        self.assertFalse(gate._due_for_reminder(gate.load_gate(g["gate_id"])))
+
+    def test_first_reminder_after_the_threshold(self):
+        g = self._age_gate(self.open_gate(), 13)
+        self.assertTrue(gate._due_for_reminder(gate.load_gate(g["gate_id"])))
+
+    def test_a_second_tick_does_not_re_notify(self):
+        # The whole bug: every 30-minute tick sent another message.
+        g = self._age_gate(self.open_gate(), 13)
+        self.assertTrue(gate._due_for_reminder(gate.load_gate(g["gate_id"])))
+        for _ in range(5):
+            self.assertFalse(gate._due_for_reminder(gate.load_gate(g["gate_id"])))
+
+    def test_it_reminds_again_a_day_later(self):
+        g = self._age_gate(self.open_gate(), 13)
+        gate._due_for_reminder(gate.load_gate(g["gate_id"]))
+        stale = gate.load_gate(g["gate_id"])
+        stale["reminded_at"] = (gate.now_utc() - timedelta(hours=25)).isoformat()
+        gate.save_gate(stale)
+        self.assertTrue(gate._due_for_reminder(gate.load_gate(g["gate_id"])))
+
+    def test_the_link_is_the_ticket_not_a_board(self):
+        self.assertEqual(gate.issue_url("SB-964"), "https://linear.app/silverbeer/issue/SB-964")
+        self.assertNotIn("/team/", gate.issue_url("SB-964"))
+
+
 class SupersededGateTests(GateTestCase):
     """SB-949. A ticket can reach Done without its gate ever being answered:
     the PR merges, Linear closes the issue via "Fixes SB-N", and nothing tells
