@@ -47,15 +47,18 @@ test_hostname_typo_fails() {
   assert_out 'rendered to 0 bytes — the mini must get a real plist'
 }
 
-# NEGATIVE: StartInterval drifts off 1800 (30 min) — the number the whole
-# "never more than one tick's worth of work queued" design leans on.
-test_wrong_start_interval_fails() {
-  need_bin chezmoi jq
+# NEGATIVE: the cadence reverts to StartInterval — the exact regression SB-971
+# fixed. launchd coalesces interval timers and deferred this job for 16h
+# overnight while the machine was awake; the calendar entries are what survive
+# an idle GUI session.
+test_start_interval_regression_fails() {
+  need_bin bash
   src="$(copy_source)"
-  edit 's/<integer>1800<\/integer>/<integer>60<\/integer>/' "$src/$TMPL"
+  edit 's|<key>StartCalendarInterval</key>|<key>StartInterval</key><integer>1800</integer><key>Unused</key>|' "$src/$TMPL"
+  grep -q '<key>StartInterval</key>' "$src/$TMPL" || fail "fixture did not reintroduce StartInterval"
   export REPO="$src"
   assert_fail check-launchd-plist.sh
-  assert_out "is missing '<integer>1800</integer>'"
+  assert_out 'uses StartInterval'
 }
 
 # NEGATIVE: RunAtLoad flips to true — the plist would fire a cycle the
