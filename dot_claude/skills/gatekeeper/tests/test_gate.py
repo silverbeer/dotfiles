@@ -127,6 +127,52 @@ class CallbackTests(GateTestCase):
         self.assertEqual(loaded["note"], "needs another pass")
 
 
+class SupersededGateTests(GateTestCase):
+    """SB-949. A ticket can reach Done without its gate ever being answered:
+    the PR merges, Linear closes the issue via "Fixes SB-N", and nothing tells
+    the gate. It then sits `awaiting` forever — and since SB-944 makes a
+    pending gate skip the ticket, a stale gate can park a ticket permanently.
+    Four accumulated in two days."""
+
+    def test_gate_on_a_done_ticket_is_closed_as_superseded(self):
+        g = self.open_gate()
+        self.linear.state_name, self.linear.state_type = "Done", "completed"
+
+        closed = gate.superseded_gates()
+
+        self.assertEqual([c["gate_id"] for c in closed], [g["gate_id"]])
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertEqual(loaded["status"], "superseded")
+        self.assertEqual(loaded["source"], "ticket-closed")
+        self.assertIn("Done", loaded["note"])
+
+    def test_the_gate_label_is_removed_not_restamped(self):
+        # gate:approved would imply a human answered. Nobody did.
+        self.open_gate()
+        self.linear.state_name, self.linear.state_type = "Done", "completed"
+        gate.superseded_gates()
+        self.assertEqual([n for n in self.linear.labels if n.startswith("gate:")], [])
+
+    def test_a_canceled_ticket_counts_too(self):
+        g = self.open_gate()
+        self.linear.state_name, self.linear.state_type = "Canceled", "canceled"
+        gate.superseded_gates()
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "superseded")
+
+    def test_an_open_ticket_is_left_alone(self):
+        g = self.open_gate()
+        self.assertEqual(gate.superseded_gates(), [])
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "awaiting")
+
+    def test_poll_closes_superseded_gates_before_draining(self):
+        g = self.open_gate()
+        self.linear.state_name, self.linear.state_type = "Done", "completed"
+        self.gk.poll_once(timeout=0)
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "superseded")
+        # and it must no longer count as awaiting, or it keeps parking the ticket
+        self.assertEqual([x["gate_id"] for x in gate.awaiting_gates()], [])
+
+
 class TelegramTextTests(unittest.TestCase):
     """SB-954. A `pr` gate arrived carrying only the PR link, so the message
     had no route back to the ticket — on exactly the gate where a human wants
