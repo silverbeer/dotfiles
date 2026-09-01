@@ -1,0 +1,65 @@
+{{- /*
+io.silverbeer.triage.plist — launchd agent for the weekly /triage batch
+(SB-624 / T9).
+
+Mac mini only, same hostname gate as io.silverbeer.cycle-runner.plist.tmpl:
+`.chezmoi.hostname` is the SHORT hostname (no domain), measured against this
+machine's `chezmoi data` output. A template that renders to the empty string
+creates no target at all on every other Mac — no `.chezmoiignore` exception
+needed for that, same as the cycle-runner plist.
+
+`StartCalendarInterval {Weekday:1, Hour:9, Minute:0}` = Monday 9am (launchd
+Weekday: 0 and 7 both mean Sunday, so 1 is Monday) — already reviewed and
+approved by the ticket owner in a prior plan iteration; kept as-is here.
+`RunAtLoad` false for the same reason as the cycle-runner plist: logging in
+to the mini should not itself fire a triage run.
+
+launchd does not source ~/.zshrc or ~/.zprofile, so PATH here is the same
+explicit toolchain list the cycle-runner plist uses (triage-run.sh needs a
+strict subset of it — python3, claude, jq — but there is no `gh`/`git` call
+in this path; the full list is kept anyway so the two plists stay easy to
+diff against each other rather than silently drifting apart).
+*/ -}}
+{{- if eq .chezmoi.hostname "Toms-Mac-mini" -}}
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.silverbeer.triage</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>{{ .chezmoi.homeDir }}/.claude/skills/cycle-runner/scripts/triage-run.sh</string>
+	</array>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>{{ .chezmoi.homeDir }}</string>
+		<key>PATH</key>
+		<string>{{ .chezmoi.homeDir }}/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Weekday</key>
+		<integer>1</integer>
+		<key>Hour</key>
+		<integer>9</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+
+	<key>RunAtLoad</key>
+	<false/>
+
+	<key>StandardOutPath</key>
+	<string>{{ .chezmoi.homeDir }}/.local/state/cycle-runner/triage-launchd.out.log</string>
+
+	<key>StandardErrorPath</key>
+	<string>{{ .chezmoi.homeDir }}/.local/state/cycle-runner/triage-launchd.err.log</string>
+</dict>
+</plist>
+{{- end -}}
