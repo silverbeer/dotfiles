@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 # cycle-runner/scripts/run.sh — SB-929. ONE entry point, ONE unit of work, exit.
 #
-# Invoked by launchd (SB-930, not built yet) on a timer. It never loops —
-# that is what makes it safe to run on a schedule. Each invocation:
+# Invoked by a k3s CronJob every 30 minutes (SB-976). It never loops — that is
+# what makes it safe to run on a schedule. Each invocation:
 #
-#   1. Acquires a lock (mkdir-atomic, pid-staleness checked). Contended by a
-#      still-running previous invocation -> exit 0 quietly.
-#   2. Drains `gate.py poll --once`. For every gate that resolved:
+#   1. Drains `gate.py poll --once`. For every gate that resolved:
 #      - approved `merge`  -> THIS SCRIPT re-confirms CI is green (never trusts
 #        the gate answer as a substitute for that check) and runs
 #        `gh pr merge --squash --delete-branch` itself — never Claude
@@ -15,29 +13,34 @@
 #      - approved, any other kind -> `claude -p --resume <session_id> "approved: <note>"`
 #      - rejected                 -> `claude -p --resume <session_id> "rejected: <reason>"`
 #      - needs-human              -> nothing further; already flagged
-#   3. If nothing resolved to act on, picks ONE ready ticket via pick.py and
+#   2. If nothing resolved to act on, picks ONE ready ticket via pick.py and
 #      starts it: `claude --session-id S -p "/work-headless SB-N --session-id S
 #      --run-id R" ...`.
-#   4. Releases the lock, writes a run log, gitleaks-scans it (skipped with a
+#   3. Writes a run log, gitleaks-scans it (skipped with a
 #      note if gitleaks is not on PATH — never blocks on a missing binary),
 #      and posts a short summary to Telegram via gatekeeper's own tg.py
 #      transport (reused, never reimplemented).
 #
-# `--max-turns` is NOT passed to `claude -p` below: `claude --help` on the
-# version this was built against (2.1.251) has no such flag. The ticket asked
-# for real flag names, not a guess — this is the one requested item this
-# script could not carry, and it is flagged in the delivery report, not
-# silently dropped.
+# Nothing here locks. `concurrencyPolicy: Forbid` on the CronJob is the
+# concurrency guarantee now; see the "concurrency" section below for why
+# keeping the old mkdir/pid lock as well would have been the mistake.
+#
+# `--max-turns` is NOT passed to `claude -p` below: `claude --help` has no such
+# flag. It was assumed once and the run failed. That is now asserted at image
+# build time by k3s/cycle-runner/claude-cli-contract.sh, which checks every
+# flag this script DOES pass still exists — so the next `claude` release that
+# renames one fails a build instead of a 2am tick.
 # shellcheck disable=SC2016  # ci_state()'s jq filter quotes its own $s literally, on purpose
 set -euo pipefail
 export NO_COLOR=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Same root gate.py's own state_dir() defaults to, and the same env var — lock,
-# runs/ (RUN_SCRATCH, written by work-headless.md) and logs/ all live under it.
+# Same root gate.py's own state_dir() defaults to, and the same env var —
+# runs/ (RUN_SCRATCH, written by work-headless.md), logs/ and the worktrees
+# linear-crud cuts all live under it. In the pod it is on the PVC, which is
+# what makes a resumed run find the worktree an earlier tick left behind.
 STATE="${GATEKEEPER_STATE:-$HOME/.local/state/cycle-runner}"
 RUN_LOG_DIR="$STATE/logs"
-LOCK_DIR="$STATE/lock"
 
 die() { echo "cycle-runner: $*" >&2; exit 1; }
 note() { echo "cycle-runner: $*"; }
@@ -132,68 +135,27 @@ gen_uuid() {
   fi
 }
 
-# --------------------------------------------------------------------- lock
+# ------------------------------------------------------------ concurrency
 #
-# mkdir is atomic on every POSIX filesystem, so "did I just create the
-# directory" is a safe test-and-set with no separate lock file needed. The pid
-# file inside it is only for staleness: a lock left behind by a process that
-# is no longer running (crash, `kill -9`, a reboot) must not wedge every
-# future tick forever.
-
-release_lock() { rm -rf "$LOCK_DIR"; }
-
-# mkdir and the pid write are two separate steps, not one atomic operation: a
-# holder that just mkdir'd but hasn't reached `echo $$ >pid` yet leaves a
-# window where the lock dir exists with no pid file at all. Reading that as
-# "stale" would steal a lock someone else is mid-way through acquiring — a
-# real race, not theoretical, since launchd can in principle fire two ticks
-# close together. An empty/missing pid file is only treated as abandoned once
-# a "created_at" timestamp file (written right after mkdir, before pid) is
-# older than this grace period. A plain epoch number in a file we control
-# avoids stat(1)'s BSD-vs-GNU flag incompatibility (-f %m vs -c %Y) entirely —
-# a launchd tick every 30 min makes a few seconds of grace free.
-LOCK_GRACE_SECS=10
-
-acquire_lock() {
-  if mkdir "$LOCK_DIR" 2>/dev/null; then
-    date +%s >"$LOCK_DIR/created_at"
-    echo $$ >"$LOCK_DIR/pid"
-    trap release_lock EXIT  # only once we actually own it — never on a lock we lost the race for
-    return 0
-  fi
-  local pid
-  pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    note "lock held by running pid $pid — another invocation is in progress, exiting quietly"
-    exit 0
-  fi
-  if [[ -z "$pid" ]]; then
-    local created now age
-    # Missing created_at (a holder between mkdir and the created_at write, the
-    # very first instant of the race) is treated as age 0 — the freshest
-    # possible state, not a special case — so it still respects
-    # LOCK_GRACE_SECS=0 (a deliberate "treat as stale right now" override)
-    # the same way an aged timestamp would.
-    created="$(cat "$LOCK_DIR/created_at" 2>/dev/null || true)"
-    now="$(date +%s)"
-    [[ -z "$created" ]] && created="$now"
-    age=$((now - created))
-    if [[ "$age" -lt "$LOCK_GRACE_SECS" ]]; then
-      note "lock dir exists with no pid yet (${age}s old, under ${LOCK_GRACE_SECS}s grace) — holder is still writing its pid, backing off quietly"
-      exit 0
-    fi
-  fi
-  note "stale lock found (pid ${pid:-?} is not running) — removing it and retrying"
-  rm -rf "$LOCK_DIR"
-  if mkdir "$LOCK_DIR" 2>/dev/null; then
-    echo $$ >"$LOCK_DIR/pid"
-    trap release_lock EXIT
-    return 0
-  fi
-  # Lost the race to a concurrent invocation also clearing the stale lock.
-  note "lost the race for the lock after clearing a stale one — exiting quietly"
-  exit 0
-}
+# There is no lock here any more (SB-976).
+#
+# There used to be: an atomic `mkdir`, a pid file, a staleness grace period and
+# a race window between the mkdir and the pid write, all of it existing because
+# launchd will happily fire a second tick while the first is still running.
+#
+# The scheduler does that now. The CronJob sets `concurrencyPolicy: Forbid`,
+# which is the same guarantee enforced one level up, by the thing that actually
+# decides when a tick starts — so it cannot be defeated by a crashed holder, a
+# reused pid, or a clock change.
+#
+# Keeping both would have been the mistake. Two mechanisms that can disagree
+# about whether a run is in progress is precisely the shape behind SB-949 and
+# SB-952, and the migration would have carried its own bug across.
+#
+# `activeDeadlineSeconds: 1500` replaces the other half of what the lock was
+# doing badly: SB-965's unbounded `claude -p` held the lock for 10.5h and
+# killed the loop overnight. A deadline kills the pod and marks the Job failed,
+# which is visible; a wedged lock was not.
 
 # ----------------------------------------------------------------- claude -p
 
@@ -422,13 +384,11 @@ INVOCATION_ID="$(gen_uuid)"
 LOG_FILE="$RUN_LOG_DIR/$INVOCATION_ID.log"
 
 # Everything printed from here on — including from sourced env.sh, gate.py,
-# and claude itself — lands in the run log AND still reaches launchd's own
-# stdout/stderr capture. gitleaks scans $LOG_FILE specifically, at the end,
+# and claude itself — lands in the run log AND still reaches the pod's own
+# stdout/stderr, which is what `kubectl logs` shows. gitleaks scans $LOG_FILE specifically, at the end,
 # before the one place any of this could leave the machine (Telegram).
 exec > >(tee -a "$LOG_FILE") 2>&1
 note "invocation $INVOCATION_ID starting"
-
-acquire_lock
 
 # CLAUDE_CODE_OAUTH_TOKEN from 1Password if unset (never printed); the
 # gatekeeper's own Telegram vars the same way, since the wrap-up summary below

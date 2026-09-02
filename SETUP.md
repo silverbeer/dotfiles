@@ -171,6 +171,38 @@ by chezmoi) and only ever talks to `api.linear.app`.
 
 ---
 
+## Step 5c — cycle-runner in k3s (the Mac mini only)
+
+The cycle-runner is a k3s CronJob, not a launchd agent (SB-976). It runs on
+whichever machine hosts the cluster — today that is rancher-desktop on the
+mini. **Do not deploy it on a second machine**: two schedulers would race for
+the same tickets, gates and merge queue, and `concurrencyPolicy: Forbid`
+governs only one CronJob's own jobs.
+
+```bash
+kubectl apply -f ~/gitrepos/dotfiles/k3s/cycle-runner/namespace.yaml
+
+# Copies the three cycle-runner secrets from the files Step 3 provisioned, the
+# Linear key from Step 5b, and a token from `gh auth token`. It never calls op.
+bash ~/gitrepos/dotfiles/k3s/cycle-runner/provision-cluster-secret.sh
+
+kubectl apply -f ~/gitrepos/dotfiles/k3s/cycle-runner/pvc.yaml \
+               -f ~/gitrepos/dotfiles/k3s/cycle-runner/cronjob.yaml
+```
+
+The first tick clones every repo in `repos.json` onto the PVC and takes a few
+minutes; later ticks reuse them. Watch it:
+
+```bash
+kubectl -n cycle-runner get cronjob,jobs
+kubectl -n cycle-runner logs -l job-name --tail=100 --prefix
+```
+
+Re-run `provision-cluster-secret.sh` after any credential rotation — a CronJob
+reads the Secret at pod start, so the next tick picks it up. `doctor.sh`
+reports the CronJob's last schedule and flags a suspended one.
+
+---
 ## Step 6 — Verify everything
 
 The agentic-dev **doctor** checks the whole environment (tools, auth, Linear API,

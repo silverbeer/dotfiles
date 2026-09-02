@@ -2,7 +2,7 @@
 # Offline tests for the cycle-runner skill (SB-929): pick.py's driven x
 # estimate x label autonomy policy and ready-queue blocker detection (pure
 # python, no network — dot_claude/skills/cycle-runner/tests/), and run.sh's
-# bash-level mechanics (lock acquire/contend/stale-recovery, the CI
+# bash-level mechanics (the CI
 # green/pending/failure reduction, and the merge-gate decision) sourced
 # directly with `gh` stubbed — never a real `claude`, `gh`, or Telegram call.
 #
@@ -52,7 +52,7 @@ py_ran="$(printf '%s\n' "$py_out" | sed -nE 's/^Ran ([0-9]+) tests?.*/\1/p')"
 
 # ------------------------------------------------- 2. run.sh bash mechanics
 
-note "2. run.sh lock / CI-state / merge-gate mechanics (sourced, gh stubbed)"
+note "2. run.sh CI-state / merge-gate mechanics (sourced, gh stubbed)"
 
 STATE_DIR="$WORK/state"
 bin="$WORK/bin"; mkdir -p "$bin"
@@ -71,10 +71,9 @@ STUB
 default_gh
 export PATH="$bin:$PATH"
 
-# Source run.sh in a fresh subshell per scenario: it sets a real `trap …
-# EXIT`, so isolating each scenario in its own subshell is what stops one
-# test's lock/trap state leaking into the next, exactly like harness.sh's
-# per-test subshell.
+# Source run.sh in a fresh subshell per scenario, exactly like harness.sh's
+# per-test subshell: one scenario's stubs, traps and state must not leak into
+# the next.
 run_sourced() {  # CODE — bash run inside a subshell with run.sh sourced first
   bash -c '
     set -uo pipefail
@@ -85,78 +84,23 @@ run_sourced() {  # CODE — bash run inside a subshell with run.sh sourced first
   ' _ "$STATE_DIR" "$RUN_SH" "$1"
 }
 
-# --- 2a. lock: acquired
-
-rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR"
-if out="$(run_sourced 'acquire_lock; [[ -f "$LOCK_DIR/pid" ]] && [[ "$(cat "$LOCK_DIR/pid")" == "$$" ]] && echo LOCK_OK')" \
-   && [[ "$out" == *LOCK_OK* ]]; then
-  ok "lock: acquired cleanly, pid file matches the holder"
-else
-  bad "lock: acquire on a clear state did not succeed: $out"
-fi
-# The subshell's EXIT trap must have released it.
-[ ! -d "$STATE_DIR/lock" ] || bad "lock: still present after the acquiring process exited (release_lock trap did not fire)"
-
-# --- 2b. lock: contended (held by a running pid — this shell's own $$)
-
-rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR/lock"
-echo $$ >"$STATE_DIR/lock/pid"
-if out="$(run_sourced 'acquire_lock; echo SHOULD_NOT_REACH' 2>&1)"; rc=$?; then
-  if [[ "$rc" -eq 0 ]] && [[ "$out" == *"another invocation is in progress"* ]] && [[ "$out" != *SHOULD_NOT_REACH* ]]; then
-    ok "lock: contended by a running pid — exits 0 quietly, does not proceed past acquire_lock"
-  else
-    bad "lock: contended case did not behave as expected (rc=$rc): $out"
-  fi
-else
-  bad "lock: contended case exited non-zero ($rc): $out"
-fi
-[ "$(cat "$STATE_DIR/lock/pid")" = "$$" ] || bad "lock: contended case mutated another holder's pid file"
-
-# --- 2c. lock: stale (pid file names a process that is no longer running)
-
-rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR/lock"
-( : ) & dead_pid=$!; wait "$dead_pid" 2>/dev/null || true
-echo "$dead_pid" >"$STATE_DIR/lock/pid"
-if out="$(run_sourced 'acquire_lock; [[ -f "$LOCK_DIR/pid" ]] && [[ "$(cat "$LOCK_DIR/pid")" == "$$" ]] && echo REACQUIRED')" \
-   && [[ "$out" == *"stale lock found"* ]] && [[ "$out" == *REACQUIRED* ]]; then
-  ok "lock: stale pid recovered — old lock removed, new holder's pid written"
-else
-  bad "lock: stale-recovery case did not behave as expected: $out"
-fi
-
-# --- 2c2. lock: race window — mkdir'd, pid not written yet (SB-929 review fix)
+# --- 2a. concurrency is the scheduler's now (SB-976)
 #
-# A lock dir that exists with NO pid file at all is ambiguous: it could be a
-# holder that mkdir'd microseconds ago and hasn't reached `echo $$ >pid`, or
-# it could be a genuinely abandoned lock (holder crashed between mkdir and
-# the pid write, vanishingly rare but not impossible). acquire_lock() must
-# not steal the former.
+# The lock scenarios that used to live here — acquired, contended, stale pid,
+# and the mkdir/pid race window — are gone with the code they tested.
+# `concurrencyPolicy: Forbid` on the CronJob is the guarantee, enforced by the
+# thing that decides when a tick starts, so there is nothing in run.sh left to
+# unit-test. What replaces them is an assertion that the lock did not quietly
+# come back: a second mechanism alongside Forbid is the two-sources-of-truth
+# shape behind SB-949 and SB-952, and it would be easy to reintroduce "just
+# for local runs".
 
-# 2c2a. Within the grace period (the common case: nothing backdated, this
-# lock dir was created moments ago by the harness itself) -> back off, exit
-# 0, and leave the lock dir + its still-missing pid file untouched.
-rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR/lock"
-if out="$(run_sourced 'acquire_lock; echo SHOULD_NOT_REACH' 2>&1)"; rc=$?; then
-  if [[ "$rc" -eq 0 ]] && [[ "$out" == *"holder is still writing its pid"* ]] && [[ "$out" != *SHOULD_NOT_REACH* ]]; then
-    ok "lock: empty pid within grace period -> backs off quietly, does not proceed past acquire_lock"
-  else
-    bad "lock: empty-pid-within-grace case did not behave as expected (rc=$rc): $out"
+for sym in acquire_lock release_lock LOCK_DIR LOCK_GRACE_SECS; do
+  if grep -qE "(^|[^[:alnum:]_])$sym([^[:alnum:]_]|$)" "$RUN_SH"; then
+    bad "run.sh mentions $sym — the hand-rolled lock is back alongside concurrencyPolicy: Forbid (SB-976)"
   fi
-else
-  bad "lock: empty-pid-within-grace case exited non-zero ($rc): $out"
-fi
-[ ! -f "$STATE_DIR/lock/pid" ] || bad "lock: empty-pid-within-grace case wrote a pid file — it stole the lock instead of backing off"
-
-# 2c2b. Grace period expired (LOCK_GRACE_SECS overridden to 0 so this same
-# freshly-mkdir'd, still-pid-less dir is immediately treated as past its
-# window) -> now it IS stale, gets removed and reacquired, same as 2c above.
-rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR/lock"
-if out="$(run_sourced 'LOCK_GRACE_SECS=0; acquire_lock; [[ -f "$LOCK_DIR/pid" ]] && [[ "$(cat "$LOCK_DIR/pid")" == "$$" ]] && echo REACQUIRED')" \
-   && [[ "$out" == *"stale lock found"* ]] && [[ "$out" == *REACQUIRED* ]]; then
-  ok "lock: empty pid past grace period -> treated as stale, removed and reacquired"
-else
-  bad "lock: empty-pid-past-grace case did not behave as expected: $out"
-fi
+done
+ok "no hand-rolled lock in run.sh — concurrency is concurrencyPolicy: Forbid"
 
 # --- 2d. ci_state: success / pending / failure
 

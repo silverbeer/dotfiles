@@ -1,0 +1,33 @@
+# The runner's $HOME.
+#
+# SB-966 called a PVC the "acceptable first cut" for gate state, and this is
+# it — but it carries more than that, because $HOME is where three separate
+# things the runner needs already live:
+#
+#   .local/state/cycle-runner/  gate JSON, run logs, runs/<id>/pr_url, worktrees
+#   gitrepos/<repo>/            the primary clones worktrees are cut from
+#   .claude/                    skills, commands, agents — refreshed every tick
+#
+# The first is SB-977's to remove (reconstruct from Linear). The second is not:
+# `repo_dir_for_label` resolves `$HOME/gitrepos/<glob>`, so a truly ephemeral
+# pod would re-clone fourteen repositories every thirty minutes. Persisting
+# them is the cheap, correct answer, and it also makes a resumed run see the
+# same worktree the earlier tick left behind — which is the whole point of
+# SB-947.
+#
+# So the honest framing: this is not a workaround, it is the runner's disk.
+# SB-977 shrinks what has to be on it; it does not remove it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cycle-runner-home
+  namespace: cycle-runner
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # Fourteen blobless clones plus worktrees plus run logs. local-path on
+      # k3s does not enforce this, but SB-967 (janitor retention) will need a
+      # number to compare against.
+      storage: 20Gi

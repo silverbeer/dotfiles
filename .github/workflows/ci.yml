@@ -138,6 +138,12 @@ jobs:
       - name: claude CLI contract covers what the runner passes
         run: .github/scripts/check-claude-cli-contract.sh
 
+      # The CronJob's invariants. Each was fifty lines of bash in run.sh before
+      # SB-976 and is now one line of YAML — much easier to delete by accident,
+      # and deleting one is silent: the CronJob still applies and still ticks.
+      - name: k3s/cycle-runner manifest invariants
+        run: .github/scripts/check-k3s-manifests.sh
+
       # Offline tests for doctor.sh's cycle-runner + chezmoi-sync checks
       # (SB-930): OAuth-token, gh auth, Telegram getMe and stale-lock logic,
       # run for real against a scratch $HOME with `op`/`gh`/`chezmoi`/`claude`

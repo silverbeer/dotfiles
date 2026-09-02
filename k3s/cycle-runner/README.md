@@ -1,7 +1,71 @@
-# cycle-runner image
+# cycle-runner in k3s
 
-The container the cycle-runner CronJob runs (SB-975). The CronJob, Secret and
-PVC that use it are SB-976; nothing here is applied to the cluster.
+The cycle-runner runs as a CronJob every 30 minutes (SB-976), on the
+rancher-desktop cluster. This directory holds the image it runs (SB-975) and
+the manifests that schedule it.
+
+## Deploy
+
+```bash
+kubectl apply -f k3s/cycle-runner/namespace.yaml
+bash k3s/cycle-runner/provision-cluster-secret.sh   # reads the mini's files, not 1Password
+kubectl apply -f k3s/cycle-runner/pvc.yaml -f k3s/cycle-runner/cronjob.yaml
+```
+
+The Secret carries five keys. Three are read as **files** by `env.sh` in both
+the cycle-runner and gatekeeper skills, via `CYCLE_RUNNER_SECRETS_DIR=/secrets`
+— `claude-token`, `telegram-token`, `telegram-chat-id`. Two are read as
+**environment variables**, because `~/.zshenv` exported them on the mini and
+there is no zsh in a pod — `linear-api-key`, `gh-token`.
+
+`provision-cluster-secret.sh` never calls `op`. The three cycle-runner secrets
+are already on disk from `provision-secrets.sh`; this copies them in. Re-run it
+after any rotation — a CronJob reads the Secret at pod start, so the next tick
+picks it up.
+
+## What the scheduler replaced
+
+| `run.sh` before | now |
+| -- | -- |
+| `acquire_lock` — mkdir-atomic, pid file, staleness grace, race window | `concurrencyPolicy: Forbid` |
+| nothing; SB-965's unbounded `claude -p` held the lock 10.5h | `activeDeadlineSeconds: 1500` |
+| launchd catch-up, "whatever it feels like" | `startingDeadlineSeconds: 300` |
+| files a human provisioned on one machine | a Secret |
+
+The lock was **removed**, not disabled. Two mechanisms that can disagree about
+whether a run is in progress is the shape behind SB-949 and SB-952.
+`.github/scripts/check-k3s-manifests.sh` fails the build if any of those YAML
+lines goes missing, and `check-cycle-runner-policy.sh` fails it if the lock
+comes back.
+
+## The pod's $HOME is the PVC
+
+`/data/home`, on `cycle-runner-home`. Four things live there and all four have
+to persist:
+
+| | |
+| -- | -- |
+| `.local/state/cycle-runner/` | gate JSON, run logs, `runs/<id>/pr_url`, worktrees |
+| `gitrepos/<repo>/` | the primary clones worktrees are cut from |
+| `.claude/` | skills, commands, agents — re-synced every tick |
+| `.gitconfig` | identity and the `gh` credential helper |
+
+`repo_dir_for_label` resolves `$HOME/gitrepos/<glob>`, so without the clones
+there is nothing to cut a worktree from. `bootstrap.sh` (the initContainer)
+creates any that are missing, blobless, and is a no-op afterwards.
+
+**The skills are not baked into the image.** The image is the toolchain and
+moves weekly at most (SB-978); the skills move several times a day and are what
+the runner delivers. `bootstrap.sh` clones `dotfiles@main` on every tick, so a
+tick always runs the merged code.
+
+## What this does NOT buy
+
+Availability. The cluster is rancher-desktop on Lima — a VM on the same Mac.
+Mac down, k3s down. Same blast radius as launchd; this buys scheduling
+semantics and isolation.
+
+## The image
 
 ```bash
 # from the repo root — the build context is the repo, not this directory

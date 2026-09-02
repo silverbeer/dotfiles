@@ -21,9 +21,7 @@ test_the_check_passes_on_the_current_tree() {
   export REPO="$src"
   assert_ok check-cycle-runner-policy.sh
   assert_out 'ok   python: Ran '
-  assert_out 'ok   lock: acquired cleanly'
-  assert_out 'ok   lock: contended by a running pid'
-  assert_out 'ok   lock: stale pid recovered'
+  assert_out 'ok   no hand-rolled lock in run.sh'
   assert_out 'ok   ci_state: gh reports success -> success'
   assert_out 'ok   ci_state: gh reports pending -> pending'
   assert_out 'ok   ci_state: gh reports failure -> failure'
@@ -83,18 +81,20 @@ test_missing_test_files_fails() {
   assert_out 'NO TESTS RAN'
 }
 
-# NEGATIVE: acquire_lock's staleness check is defeated (every existing lock
-# reads as "still running"), so a genuinely stale lock left by a crashed
-# invocation would wedge the runner forever. The check's own stale-recovery
-# scenario must catch it.
-test_broken_staleness_check_fails_the_stale_lock_scenario() {
+# NEGATIVE: the hand-rolled lock comes back (SB-976). It was removed because
+# `concurrencyPolicy: Forbid` on the CronJob is the same guarantee enforced by
+# the thing that actually decides when a tick starts. Keeping both would be two
+# mechanisms that can disagree about whether a run is in progress — the shape
+# behind SB-949 and SB-952 — and it is easy to reintroduce "just for local
+# runs", which is exactly when nobody would notice.
+test_a_reintroduced_hand_rolled_lock_is_rejected() {
   need_bin python3 bash
   src="$(copy_source)"
-  edit 's|kill -0 "\$pid" 2>/dev/null; then|true; then|' "$src/$RUN_SH"
-  grep -q 'true; then' "$src/$RUN_SH" || fail "fixture did not break the staleness check"
+  printf '\nacquire_lock() { mkdir "$LOCK_DIR" 2>/dev/null; }\n' >>"$src/$RUN_SH"
+  grep -q 'acquire_lock' "$src/$RUN_SH" || fail "fixture did not reintroduce the lock"
   export REPO="$src"
   assert_fail check-cycle-runner-policy.sh
-  assert_out 'lock: stale-recovery case did not behave as expected'
+  assert_out 'the hand-rolled lock is back'
 }
 
 # NEGATIVE: handle_merge_gate's CI re-check is defeated (the "state != success"
