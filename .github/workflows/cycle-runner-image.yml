@@ -39,7 +39,11 @@ env:
 
 jobs:
   image:
-    name: build${{ github.event_name == 'pull_request' && '' || ' and push' }}
+    # `A && '' || B` does NOT work here: GitHub treats the empty string as
+    # falsy, so the true branch falls through to B and a pull_request job
+    # announced itself as "build and push" while pushing nothing. Both sides
+    # have to be non-empty.
+    name: ${{ github.event_name != 'pull_request' && 'build and push' || 'build' }}
     # arm64 native. The k3s node is rancher-desktop on Lima on Apple silicon,
     # and the Dockerfile refuses any other architecture rather than fetching
     # assets whose checksums it does not carry. Emulated cross-build would take
@@ -86,7 +90,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build${{ github.event_name == 'pull_request' && '' || ' and push' }}
+      - name: ${{ github.event_name != 'pull_request' && 'Build and push' || 'Build' }}
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
