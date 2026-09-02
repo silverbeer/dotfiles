@@ -23,8 +23,26 @@ set -euo pipefail
 KEY_FILE="${LINEAR_KEY_FILE:-$HOME/.config/linear/gql-key}"
 KEY="${LINEAR_API_KEY:-}"
 if [ -z "$KEY" ] && [ -f "$KEY_FILE" ]; then
-  KEY=$(tr -d ' \t\r\n' < "$KEY_FILE")
+  KEY=$(cat "$KEY_FILE")
 fi
+# Strip whitespace from BOTH sources, not just the file.
+#
+# The file path always did; the environment path did not, and on the mini that
+# never mattered because ~/.zshenv reads the key as `$(<file)`, which strips
+# the trailing newline `op read > file` leaves. A k8s `secretKeyRef` does not
+# strip anything, so the pod got a key ending in \n and sent
+#
+#     Authorization: lin_api_…\n
+#
+# The embedded newline terminated the header block early: curl's Content-Type
+# never reached Linear, which saw the default x-www-form-urlencoded and
+# rejected the request as possible CSRF. The symptom named neither the
+# credential nor the newline — over HTTP/2 it was only "PROTOCOL_ERROR", and
+# over HTTP/1.1 a 400 about content-type.
+#
+# A newline in a header value is a header-injection shape regardless of where
+# the key came from, so this is defence, not a workaround for one provisioner.
+KEY="$(printf '%s' "$KEY" | tr -d ' \t\r\n')"
 [ -z "$KEY" ] && { echo "linear-gql: no API key — set LINEAR_API_KEY or create $KEY_FILE (run doctor.sh)" >&2; exit 1; }
 
 QUERY="${1:-$(cat)}"

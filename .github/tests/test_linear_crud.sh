@@ -196,4 +196,21 @@ test_dropping_http11_from_linear_gql_is_rejected() {
   assert_out 'PROTOCOL_ERROR'
 }
 
+# NEGATIVE: the env-supplied key stops being stripped. This is the exact defect
+# that broke every tick in the pod: `secretKeyRef` preserves the trailing
+# newline `op read > file` leaves, the newline terminates curl's header block,
+# Content-Type is lost, and Linear rejects the call as possible CSRF.
+#
+# It was invisible on the mini for months because ~/.zshenv reads the key as
+# `$(<file)`, which strips it — so "works on my machine" was not evidence.
+test_an_unstripped_env_key_is_rejected() {
+  need_bin python3 jq
+  src="$(copy_source)"
+  edit 's|^KEY="\$(printf .*$|KEY="$KEY"|' "$src/$GQL"
+  grep -q 'tr -d' "$src/$GQL" && fail "fixture did not remove the strip"
+  export REPO="$src"
+  assert_fail check-linear-crud.sh
+  assert_out 'whitespace-dirty key'
+}
+
 run_tests
