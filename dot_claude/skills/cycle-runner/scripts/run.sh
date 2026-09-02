@@ -390,6 +390,16 @@ LOG_FILE="$RUN_LOG_DIR/$INVOCATION_ID.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 note "invocation $INVOCATION_ID starting"
 
+# The toolchain this tick ran on, in the run log (SB-978).
+#
+# Without it, correlating a behaviour change with a `claude` bump means
+# guessing from the date. The file is written at image build time and is the
+# artefact's own account of itself, not a restatement that could disagree with
+# it. Absent outside the pod, where this is simply not applicable.
+if [[ -r /etc/cycle-runner-versions ]]; then
+  note "image toolchain: $(tr '\n' ' ' </etc/cycle-runner-versions)"
+fi
+
 # CLAUDE_CODE_OAUTH_TOKEN from 1Password if unset (never printed); the
 # gatekeeper's own Telegram vars the same way, since the wrap-up summary below
 # reuses gate.py's transport and needs the same two vars gate.py does.

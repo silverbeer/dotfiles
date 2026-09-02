@@ -86,6 +86,37 @@ has '^[[:space:]]*value:[[:space:]]*/secrets[[:space:]]*$' \
 has '^[[:space:]]*claimName:[[:space:]]*cycle-runner-home[[:space:]]*$' \
   "cronjob.yaml does not mount the cycle-runner-home PVC — gate state, clones and worktrees would not survive the pod"
 
+# The CronJob's image tag and the Dockerfile's CLAUDE_VERSION name the same
+# thing in two files (SB-978). If they drift, the cluster silently runs a
+# different claude from the one the repo's contract test was built against —
+# and the contract is the whole reason the version is pinned at all.
+dockerfile_ver="$(sed -n 's/^ARG CLAUDE_VERSION=\(.*\)$/\1/p' "$DIR/Dockerfile" | head -1)"
+[ -n "$dockerfile_ver" ] || bad "could not read CLAUDE_VERSION out of the Dockerfile"
+
+# Every image: line, so the initContainer cannot quietly diverge from the tick.
+#
+# The count is asserted first. This loop already went green while iterating
+# ZERO times, because the extractor used \S — a GNU shorthand BSD sed does not
+# know — so on macOS it matched nothing and the check passed on a manifest
+# pinned to :latest. A loop over an empty list is indistinguishable from a
+# loop that found nothing wrong.
+n_images="$(grep -cE '^[[:space:]]*image:' "$CJ" || true)"
+[ "${n_images:-0}" -ge 2 ] \
+  || bad "found $n_images image: lines in cronjob.yaml — expected at least 2 (bootstrap + tick); has the extractor gone stale?"
+
+while read -r img; do
+  [ -z "$img" ] && continue
+  case "$img" in
+    *:latest)
+      bad "cronjob.yaml uses '$img' — :latest is not revertible and gives doctor no version to read (SB-978)" ;;
+    *":claude-$dockerfile_ver") ;;
+    *)
+      bad "cronjob.yaml runs '$img' but the Dockerfile pins CLAUDE_VERSION=$dockerfile_ver — the cluster would run a different claude from the one the contract test was built against" ;;
+  esac
+# [^[:space:]] rather than \S: BSD sed (macOS) does not know the shorthand and
+# matches nothing, which made this loop iterate zero times and pass silently.
+done < <(sed -nE 's|^[[:space:]]*image:[[:space:]]*([^[:space:]]+).*|\1|p' "$CJ")
+
 # Anything that looks like a credential literal in a manifest is a hard stop.
 if grep -nE '^[[:space:]]*(value|password|token):[[:space:]]*["'"'"']?(gh[pousr]_|sk-|xox|ey[JI])' "$DIR"/*.yaml; then
   bad "a credential literal appears in a k3s manifest — these are tracked in a PUBLIC repo"

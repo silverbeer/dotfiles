@@ -56,8 +56,8 @@ spec:
             # times a day and are what the runner delivers. Cloning at tick
             # time means a tick runs the merged code.
             - name: bootstrap
-              image: ghcr.io/silverbeer/cycle-runner:latest
-              imagePullPolicy: Always
+              image: ghcr.io/silverbeer/cycle-runner:claude-2.1.258
+              imagePullPolicy: IfNotPresent
               command:
                 - bash
                 - -eu
@@ -86,8 +86,22 @@ spec:
 
           containers:
             - name: tick
-              image: ghcr.io/silverbeer/cycle-runner:latest
-              imagePullPolicy: Always
+              # PINNED to a claude version, not :latest (SB-978).
+              #
+              # `:latest` with `imagePullPolicy: Always` means a rebuild lands
+              # in the next tick with nobody having looked at it — which is
+              # precisely what SB-966 asked to avoid when it said the bump
+              # should "open a PR rather than pushing to main, so it is visible
+              # and revertible". With :latest there is nothing to revert TO.
+              #
+              # It also gives doctor.sh something exact to read: the tag names
+              # the claude version, so drift against the mini's own claude is a
+              # string comparison rather than an inspection of a running pod.
+              #
+              # The weekly refresh workflow bumps this line and the Dockerfile's
+              # ARG together; check-k3s-manifests.sh fails if they disagree.
+              image: ghcr.io/silverbeer/cycle-runner:claude-2.1.258
+              imagePullPolicy: IfNotPresent
               command:
                 - bash
                 - /data/home/.claude/skills/cycle-runner/scripts/run.sh

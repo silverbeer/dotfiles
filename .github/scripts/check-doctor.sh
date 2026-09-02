@@ -446,6 +446,66 @@ fi
 # otherwise find the machine's real kubectl again.
 default_kubectl
 
+# ------------------------------------- 4f. claude drift, image vs machine
+#
+# Two runtimes now exist and drift independently (SB-978). A behaviour
+# difference between an interactive /work and a headless tick is otherwise
+# unattributable.
+
+# `claude` is stubbed per case so the machine's real version cannot leak in.
+claude_stub() {  # VERSION
+  cat >"$bin/claude" <<STUB
+#!/usr/bin/env bash
+if [ "\$1" = "--version" ]; then echo "$1 (Claude Code)"; exit 0; fi
+echo "Ready. What's the task?"
+STUB
+  chmod +x "$bin/claude"
+}
+cj_image_stub() {  # IMAGE
+  cat >"$bin/kubectl" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"jsonpath={.spec.jobTemplate.spec.template.spec.containers[0].image}"*) printf '%s' "$1" ;;
+  *"get cronjob cycle-runner -n cycle-runner -o jsonpath"*) printf "false\\t2026-09-02T11:30:00Z\\t2026-09-02T11:31:12Z" ;;
+  *"get cronjob"*) exit 0 ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$bin/kubectl"
+}
+
+claude_stub 2.1.258
+cj_image_stub ghcr.io/silverbeer/cycle-runner:claude-2.1.258
+out="$(run_doctor)"
+if [[ "$out" == *"claude 2.1.258 in the image and on this machine — no drift"* ]]; then
+  ok "same claude in image and machine -> ok, no drift"
+else
+  bad "no-drift case did not report as expected: $out"
+fi
+
+cj_image_stub ghcr.io/silverbeer/cycle-runner:claude-2.1.300
+out="$(run_doctor)"
+if [[ "$out" == *"claude drift: the image runs 2.1.300, this machine runs 2.1.258"* ]]; then
+  ok "different claude in image and machine -> warn, names both versions"
+else
+  bad "drift case did not report as expected: $out"
+fi
+
+# :latest is a warning of its own: nothing to compare, and a rebuild lands
+# unreviewed.
+cj_image_stub ghcr.io/silverbeer/cycle-runner:latest
+out="$(run_doctor)"
+if [[ "$out" == *"the CronJob runs :latest"* ]]; then
+  ok ":latest image -> warn, no version to compare"
+else
+  bad ":latest case did not report as expected: $out"
+fi
+
+default_kubectl
+# Back to the loud default: an unexpected `claude` call after this section is a
+# test bug, not a silent no-op.
+loud_default claude
+
 # ---------------------------------------------- 5. cycle-runner plist check
 #
 # ON THE MINI ONLY. Guards the hostname-drift scenario: an OS reinstall or
