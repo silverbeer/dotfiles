@@ -287,9 +287,14 @@ fi
 #
 # kubectl absent is INFO, not a failure: this same doctor runs on the Air,
 # where there is no cluster and nothing to report.
-if command -v kubectl >/dev/null 2>&1 \
-   && kubectl get cronjob cycle-runner -n cycle-runner >/dev/null 2>&1; then
-  cj="$(kubectl get cronjob cycle-runner -n cycle-runner \
+# Which binary to ask, overridable so the offline suite can test the
+# "not installed" branch deterministically. Trimming $PATH instead does not
+# work: GitHub's ubuntu runner ships a kubectl in /usr/bin, so the case that
+# was meant to prove the absent path silently proved nothing there.
+KUBECTL="${KUBECTL:-kubectl}"
+if command -v "$KUBECTL" >/dev/null 2>&1 \
+   && "$KUBECTL" get cronjob cycle-runner -n cycle-runner >/dev/null 2>&1; then
+  cj="$("$KUBECTL" get cronjob cycle-runner -n cycle-runner \
         -o jsonpath='{.spec.suspend}{"\t"}{.status.lastScheduleTime}{"\t"}{.status.lastSuccessfulTime}' 2>/dev/null || true)"
   cj_suspend="$(printf '%s' "$cj" | cut -f1)"
   cj_last="$(printf '%s' "$cj" | cut -f2)"
@@ -302,7 +307,7 @@ if command -v kubectl >/dev/null 2>&1 \
   else
     ok "cycle-runner CronJob last scheduled $cj_last (last success ${cj_ok:-none yet})"
   fi
-elif command -v kubectl >/dev/null 2>&1; then
+elif command -v "$KUBECTL" >/dev/null 2>&1; then
   warnf "no cycle-runner CronJob in the cluster" "run: kubectl apply -f k3s/cycle-runner/"
 else
   infof "kubectl not installed, skipping the cycle-runner CronJob check"

@@ -160,8 +160,7 @@ GK_ABSENT_DOCTOR="$GK_ABSENT_ROOT/dot_claude/skills/linear-crud/scripts/executab
 # Fresh scratch $HOME per call: doctor.sh reads $HOME/.config/linear/gql-key
 # (left absent -> the Linear API section fails closed without ever shelling
 # out to linear-gql.sh, so no curl to the real API), $HOME/.claude/skills/*,
-# $HOME/Library/LaunchAgents/io.silverbeer.cycle-runner.plist and
-# $HOME/.local/state/cycle-runner/lock/pid.
+# and $HOME/Library/LaunchAgents/io.silverbeer.cycle-runner.plist.
 run_doctor_at() {  # DOCTOR_PATH [env assignments...]
   local doctor="$1"; shift
   local h
@@ -370,27 +369,26 @@ $1
 STUB
   chmod +x "$bin/kubectl"
 }
-no_kubectl() { rm -f "$bin/kubectl"; }
 
 # 4a. kubectl absent -> INFO. This doctor also runs on the Air, where there is
 # no cluster and nothing to say about one.
 #
-# Removing the stub is NOT enough: the developer running this suite very
-# likely has a real kubectl further down $PATH, and doctor would then query
-# their actual cluster. Measured — it reported "no cycle-runner CronJob in the
-# cluster" from a live k3s. So this case runs with $PATH cut back to $bin plus
-# the system directories, and asserts kubectl is genuinely unreachable there
-# before drawing any conclusion from the output.
-no_kubectl
-if PATH="$bin:/usr/bin:/bin" command -v kubectl >/dev/null 2>&1; then
-  bad "cannot test the kubectl-absent case: a kubectl is installed in /usr/bin or /bin"
+# Removing the stub is NOT enough: the machine running this suite very likely
+# has a real kubectl further down $PATH, and doctor would then query its actual
+# cluster — measured, it reported on a live k3s from a laptop.
+#
+# Trimming $PATH does not work either: GitHub's ubuntu runner ships a kubectl
+# in /usr/bin, so on CI — the one place this must hold — the case proved
+# nothing and the guard for it failed the build instead.
+#
+# So doctor takes the binary name from $KUBECTL, and this points it at one that
+# cannot exist. The seam is real, not test-only: a machine with kubectl outside
+# $PATH can use it too.
+out="$(run_doctor env KUBECTL=kubectl-definitely-not-installed)"
+if [[ "$out" == *"kubectl not installed, skipping the cycle-runner CronJob check"* ]]; then
+  ok "no kubectl -> info, not a failure"
 else
-  out="$(PATH="$bin:/usr/bin:/bin" run_doctor)"
-  if [[ "$out" == *"kubectl not installed, skipping the cycle-runner CronJob check"* ]]; then
-    ok "no kubectl -> info, not a failure"
-  else
-    bad "kubectl-absent case did not report as expected: $out"
-  fi
+  bad "kubectl-absent case did not report as expected: $out"
 fi
 
 # 4b. healthy: scheduled, not suspended.
@@ -444,8 +442,8 @@ if [[ "$out" == *"no cycle-runner CronJob in the cluster"* && "$out" == *"kubect
 else
   bad "missing-CronJob case did not report as expected: $out"
 fi
-# Back to the default stub, NOT no_kubectl: every doctor run after this section
-# would otherwise find the developer's real kubectl again.
+# Back to the default stub: every doctor run after this section would
+# otherwise find the machine's real kubectl again.
 default_kubectl
 
 # ---------------------------------------------- 5. cycle-runner plist check
