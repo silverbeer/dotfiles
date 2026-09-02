@@ -51,6 +51,13 @@ README.md
 SETUP.md
 docs
 
+# Cluster manifests and the runner's Dockerfile — repo-only, and NOT
+# dot-prefixed, so this entry is the only thing between them and ~/k3s.
+# Added before the directory existed, deliberately: README.md and SETUP.md
+# were written into $HOME for months because the entry came after.
+# check-no-ci-config-in-home.sh is the actual guard.
+k3s
+
 # CI config — repo-only. These document intent; they are NOT a second line of
 # defence. They name the DOTTED targets, and chezmoi skipping dot-prefixed
 # source entries is why those targets never exist in the first place. Rename

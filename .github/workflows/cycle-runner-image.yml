@@ -1,0 +1,121 @@
+# Build (and on main, publish) the image the cycle-runner CronJob runs.
+#
+# Separate from ci.yml deliberately. ci.yml is the fast gate every PR waits on;
+# this one only has anything to do when k3s/cycle-runner/** changes, and it
+# pulls a Node tarball, the gh and gitleaks releases and an npm package. Making
+# every documentation PR wait on that would be the wrong trade.
+#
+# The real gate is inside the image, not here: k3s/cycle-runner/Dockerfile runs
+# claude-cli-contract as a build step, so a `claude` release that renames a flag
+# run.sh passes fails THIS build. That is the whole point — the alternative is
+# discovering it at 2am in a run log.
+#
+# SB-978 adds the weekly rebuild that bumps CLAUDE_VERSION and opens a PR;
+# workflow_dispatch below is the entry point it will use.
+name: cycle-runner image
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'k3s/cycle-runner/**'
+      - '.github/workflows/cycle-runner-image.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'k3s/cycle-runner/**'
+      - '.github/workflows/cycle-runner-image.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: cycle-runner-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/silverbeer/cycle-runner
+
+jobs:
+  image:
+    name: build${{ github.event_name == 'pull_request' && '' || ' and push' }}
+    # arm64 native. The k3s node is rancher-desktop on Lima on Apple silicon,
+    # and the Dockerfile refuses any other architecture rather than fetching
+    # assets whose checksums it does not carry. Emulated cross-build would take
+    # minutes for an arch nothing runs.
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # The tag has to name the thing that actually changes between builds.
+      # `:latest` alone is not revertible: SB-978's weekly bump would overwrite
+      # it in place, and rolling back a bad `claude` would mean rebuilding from
+      # a reverted commit instead of repointing the CronJob at a tag that still
+      # exists.
+      - name: Derive tags
+        id: tags
+        run: |
+          set -euo pipefail
+          claude_version="$(sed -n 's/^ARG CLAUDE_VERSION=\(.*\)$/\1/p' k3s/cycle-runner/Dockerfile)"
+          [ -n "$claude_version" ] || { echo "no CLAUDE_VERSION in the Dockerfile" >&2; exit 1; }
+          sha="$(git rev-parse --short HEAD)"
+          echo "claude_version=$claude_version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOT"
+            echo "$IMAGE:latest"
+            echo "$IMAGE:claude-$claude_version"
+            echo "$IMAGE:sha-$sha"
+            echo "EOT"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # No login on a pull_request: a fork PR has no package write, and a PR
+      # must not be able to publish anyway. The build still runs, so the CLI
+      # contract is enforced before merge — which is the check that matters.
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build${{ github.event_name == 'pull_request' && '' || ' and push' }}
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: k3s/cycle-runner/Dockerfile
+          platforms: linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          # Also load into the local daemon, so the version-recording step below
+          # can read the artefact that was just built instead of rebuilding it.
+          # Single-platform, so this is one build, not two.
+          load: true
+          tags: ${{ steps.tags.outputs.tags }}
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The versions the image was built with, in the build log, so a behaviour
+      # change can be correlated with an exact build after the fact (SB-978).
+      # Read out of the image rather than restated here — a summary that can
+      # disagree with the artefact is worse than none.
+      - name: Record the toolchain versions
+        env:
+          REF: ${{ env.IMAGE }}:sha-${{ steps.tags.outputs.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo '### cycle-runner image'
+            echo
+            echo '```'
+            docker run --rm "$REF" cat /etc/cycle-runner-versions
+            docker run --rm "$REF" claude-cli-contract
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

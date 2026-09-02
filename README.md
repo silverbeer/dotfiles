@@ -59,6 +59,12 @@ rtk init --show && rtk gain
 | `~/.claude/commands/` | Global slash commands (available in every project) |
 | `~/.claude/skills/` | Global skills — **allowlisted one-by-one in `.chezmoiignore`** (see below) |
 
+Not everything here is deployed. `k3s/` holds cluster manifests and the
+cycle-runner's `Dockerfile` — repo-only, like `README.md` and `.github/`.
+It is not dot-prefixed, so the `k3s` line in `.chezmoiignore` is the *only*
+thing keeping a `~/k3s` off every machine; `check-no-ci-config-in-home.sh`
+fails the build if it ever becomes a target.
+
 ### Adding a new skill (the `.chezmoiignore` gotcha)
 
 `~/.claude/skills/` is full of runtime junk and third-party installs, so `.chezmoiignore`

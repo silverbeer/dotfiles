@@ -129,6 +129,15 @@ jobs:
       - name: cycle-runner scripts
         run: .github/scripts/check-cycle-runner-policy.sh
 
+      # The runner's `claude` invocations and the image's build-time flag
+      # contract must not drift. The contract itself is asserted against a real
+      # `claude --help` inside the Docker build (k3s/cycle-runner/Dockerfile);
+      # this is the direction that build cannot see — a flag added to run.sh
+      # and never added to the contract, which stays green and unguarded until
+      # a `claude` release renames it at 2am.
+      - name: claude CLI contract covers what the runner passes
+        run: .github/scripts/check-claude-cli-contract.sh
+
       # Offline tests for doctor.sh's cycle-runner + chezmoi-sync checks
       # (SB-930): OAuth-token, gh auth, Telegram getMe and stale-lock logic,
       # run for real against a scratch $HOME with `op`/`gh`/`chezmoi`/`claude`
