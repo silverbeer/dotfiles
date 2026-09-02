@@ -1,0 +1,215 @@
+# Weekly: is there a newer `claude`, and does the runner still work on it?
+#
+# The Dockerfile pins CLAUDE_VERSION so a tick that worked yesterday works
+# today. Pinning alone only defers the problem to whenever someone bumps it —
+# this is what makes the bump happen on a schedule, prove itself, and arrive as
+# a reviewable PR instead of a surprise.
+#
+# THREE RULES, all from SB-966/SB-978:
+#
+#   1. never adopt a version that has not passed the suite
+#   2. open a PR, never push to main — the bump must be visible and revertible
+#   3. the suite runs INSIDE the candidate image, against the real `claude`
+#
+# Rule 3 is the one worth defending. Running the checks on the runner's own
+# filesystem would prove the repo is fine, which nobody doubted; the question
+# is whether the SCRIPTS still work against the NEW CLI. Only the image can
+# answer that.
+#
+# SB-966 described this as a k8s CronJob. It is a GitHub Actions schedule
+# instead: the job has to build an image, push to ghcr and open a PR, and all
+# three already exist here with credentials. In-cluster it would need
+# docker-in-docker, registry credentials and a git identity, to arrive at the
+# same place.
+name: cycle-runner image refresh
+
+on:
+  schedule:
+    # 07:00 UTC Monday — a bump lands at the start of a week, so a bad one has
+    # five working days to be noticed rather than being merged on a Friday.
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+    inputs:
+      claude_version:
+        description: 'Pin a specific claude version instead of the newest'
+        required: false
+        type: string
+
+concurrency:
+  group: cycle-runner-image-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/silverbeer/cycle-runner
+
+jobs:
+  refresh:
+    name: refresh claude
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+      pull-requests: write
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: What is pinned, and what is available
+        id: versions
+        run: |
+          set -euo pipefail
+          current="$(sed -n 's/^ARG CLAUDE_VERSION=\(.*\)$/\1/p' k3s/cycle-runner/Dockerfile)"
+          [ -n "$current" ] || { echo "no CLAUDE_VERSION in the Dockerfile" >&2; exit 1; }
+
+          if [ -n "${{ inputs.claude_version }}" ]; then
+            latest='${{ inputs.claude_version }}'
+          else
+            latest="$(npm view @anthropic-ai/claude-code version)"
+          fi
+          [ -n "$latest" ] || { echo "could not resolve a claude version" >&2; exit 1; }
+
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest"   >> "$GITHUB_OUTPUT"
+          if [ "$current" = "$latest" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "claude is already pinned at $current — nothing to do" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "claude $current -> $latest" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        if: steps.versions.outputs.changed == 'true'
+
+      # Built, not pushed. A candidate that fails the suite must never exist in
+      # the registry — the tag is what the CronJob would pull.
+      #
+      # The Dockerfile runs claude-cli-contract as a build step, so a release
+      # that renamed a flag run.sh passes fails HERE, before any test runs.
+      - name: Build the candidate
+        if: steps.versions.outputs.changed == 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: k3s/cycle-runner/Dockerfile
+          platforms: linux/arm64
+          build-args: CLAUDE_VERSION=${{ steps.versions.outputs.latest }}
+          push: false
+          load: true
+          tags: ${{ env.IMAGE }}:candidate
+          provenance: false
+
+      # The offline suite, INSIDE the image. These are the checks that exercise
+      # the code a tick actually runs — run.sh's merge-gate and CI-state logic,
+      # pick.py's autonomy policy, gate.py, and linear-crud — against the new
+      # CLI and the image's own python, jq, git and bash.
+      #
+      # Deliberately NOT the whole .github/tests suite: chezmoi, shellcheck and
+      # ruff are not in the image and have nothing to say about a claude bump.
+      - name: Run the offline suite inside the candidate
+        if: steps.versions.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/src" -w /src "$IMAGE:candidate" bash -euo pipefail -c '
+            # The checkout is owned by the runner user; the container is root.
+            # Several checks enumerate their inputs with `git ls-files`, and
+            # without this they exit non-zero for a reason that has nothing to
+            # do with the claude bump under test.
+            git config --global --add safe.directory "*"
+            claude-cli-contract
+            .github/scripts/check-cycle-runner-policy.sh
+            .github/scripts/check-gatekeeper.sh
+            .github/scripts/check-linear-crud.sh
+          '
+
+      - name: Record the candidate toolchain
+        if: steps.versions.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo '### candidate image'
+            echo
+            echo '```'
+            docker run --rm "$IMAGE:candidate" cat /etc/cycle-runner-versions
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Only now. Everything above had to pass.
+      - name: Log in to ghcr.io
+        if: steps.versions.outputs.changed == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the version tag
+        if: steps.versions.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          ver='${{ steps.versions.outputs.latest }}'
+          docker tag "$IMAGE:candidate" "$IMAGE:claude-$ver"
+          docker push "$IMAGE:claude-$ver"
+
+      # A PR, not a push to main. The CronJob is pinned to the OLD tag until a
+      # human merges this, so the cluster does not move until someone looks.
+      # The new tag already exists, so reverting is repointing one line.
+      - name: Open the bump PR
+        if: steps.versions.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          CURRENT: ${{ steps.versions.outputs.current }}
+          LATEST: ${{ steps.versions.outputs.latest }}
+        run: |
+          set -euo pipefail
+          branch="chore/claude-$LATEST"
+
+          # Already open from a previous week? Leave it — a second PR for the
+          # same bump is noise, and an unmerged one means nobody has looked yet.
+          if gh pr list --head "$branch" --state open --json number --jq 'length' | grep -qv '^0$'; then
+            echo "a PR for $branch is already open" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+
+          # Both places, together. check-k3s-manifests.sh fails the PR if the
+          # Dockerfile ARG and the CronJob's image tag ever disagree.
+          sed -i "s|^ARG CLAUDE_VERSION=.*|ARG CLAUDE_VERSION=$LATEST|" k3s/cycle-runner/Dockerfile
+          sed -i "s|cycle-runner:claude-$CURRENT|cycle-runner:claude-$LATEST|g" k3s/cycle-runner/cronjob.yaml
+          git diff --quiet && { echo "nothing changed — the sed did not match" >&2; exit 1; }
+
+          git commit -am "chore(cycle-runner): claude $CURRENT -> $LATEST
+
+          The candidate image built (which runs claude-cli-contract, so every
+          flag run.sh passes still exists) and the offline suite passed inside
+          it against the new CLI.
+
+          ghcr.io/silverbeer/cycle-runner:claude-$LATEST is already pushed. The
+          CronJob does not move until this merges; reverting is repointing the
+          tag back to claude-$CURRENT, which still exists.
+
+          [skip ci]"
+          git push -u origin "$branch"
+
+          gh pr create \
+            --title "chore(cycle-runner): claude $CURRENT -> $LATEST" \
+            --body "Weekly image refresh.
+
+          \`claude\` **$CURRENT → $LATEST**.
+
+          | | |
+          |--|--|
+          | image built | yes — \`claude-cli-contract\` runs as a build step, so every flag \`run.sh\` passes still exists in \`claude --help\` |
+          | offline suite inside the image | green — \`check-cycle-runner-policy\`, \`check-gatekeeper\`, \`check-linear-crud\`, against the new CLI |
+          | \`$IMAGE:claude-$LATEST\` | pushed |
+
+          The CronJob is still pinned to \`claude-$CURRENT\` and does not move until this merges. Reverting is repointing that line — the old tag is not deleted.
+
+          Read the build summary before merging: it carries the candidate's full toolchain.
+
+          🤖 Weekly refresh (SB-978)"

@@ -32,6 +32,9 @@ test_the_check_passes_on_the_current_tree() {
   assert_out 'ok   suspended CronJob -> fail, with the unsuspend command'
   assert_out 'ok   never-scheduled CronJob -> warn, not fail'
   assert_out 'ok   missing CronJob -> warn, with the apply command'
+  assert_out 'ok   same claude in image and machine -> ok, no drift'
+  assert_out 'ok   different claude in image and machine -> warn, names both versions'
+  assert_out 'ok   :latest image -> warn, no version to compare'
   assert_out 'ok   on-mini + plist absent -> fail'
   assert_out 'ok   on-mini + plist present, not loaded -> ok (present) + warn'
   assert_out 'ok   on-mini + plist present, loaded -> ok, ok'
@@ -154,6 +157,21 @@ test_missing_kubectl_reported_as_a_failure_is_rejected() {
   export REPO="$src"
   assert_fail check-doctor.sh
   assert_out "kubectl-absent case did not report as expected"
+}
+
+# NEGATIVE: drift stops being reported. Two claude runtimes exist now — the
+# image's, pinned in the CronJob tag and bumped by a weekly PR, and the
+# machine's, updated by whoever last ran an installer. When a headless tick
+# and an interactive /work behave differently, this line is the only thing
+# that says why.
+test_claude_drift_that_stops_warning_is_rejected() {
+  need_bin bash python3
+  src="$(copy_source)"
+  edit 's|elif \[ "\$image_claude" = "\$mini_claude" \]; then|elif true; then|' "$src/$DOCTOR"
+  grep -q 'elif true; then' "$src/$DOCTOR" || fail "fixture did not defeat the drift comparison"
+  export REPO="$src"
+  assert_fail check-doctor.sh
+  assert_out 'drift case did not report as expected'
 }
 
 run_tests

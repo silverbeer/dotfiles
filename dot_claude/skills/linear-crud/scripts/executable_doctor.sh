@@ -307,6 +307,37 @@ if command -v "$KUBECTL" >/dev/null 2>&1 \
   else
     ok "cycle-runner CronJob last scheduled $cj_last (last success ${cj_ok:-none yet})"
   fi
+
+  # Two claude runtimes exist now, and they drift independently (SB-978): the
+  # image's, pinned in the CronJob's tag and bumped by a weekly PR, and this
+  # machine's, updated whenever someone runs an installer. A behaviour
+  # difference between an interactive /work and a headless tick is otherwise a
+  # mystery; this makes it a reported fact.
+  #
+  # Read from the TAG rather than by inspecting a pod: the tag is the
+  # declaration, a running pod is a consequence, and there may be no pod at all
+  # between ticks.
+  cj_image="$("$KUBECTL" get cronjob cycle-runner -n cycle-runner \
+              -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+  case "$cj_image" in
+    *:claude-*)
+      image_claude="${cj_image##*:claude-}"
+      mini_claude="$(claude --version 2>/dev/null | awk '{print $1}')"
+      if [ -z "$mini_claude" ]; then
+        warnf "cannot read this machine's claude version" "the image runs $image_claude; drift cannot be checked"
+      elif [ "$image_claude" = "$mini_claude" ]; then
+        ok "claude $image_claude in the image and on this machine — no drift"
+      else
+        warnf "claude drift: the image runs $image_claude, this machine runs $mini_claude" \
+          "not necessarily wrong — the image is bumped by a weekly PR behind a green suite — but a headless tick and an interactive /work are running different CLIs"
+      fi
+      ;;
+    *:latest)
+      warnf "the CronJob runs :latest" "there is no version to compare, and a rebuild lands unreviewed — pin :claude-<version> (SB-978)" ;;
+    "") ;;
+    *)
+      infof "CronJob image $cj_image carries no claude version in its tag" ;;
+  esac
 elif command -v "$KUBECTL" >/dev/null 2>&1; then
   warnf "no cycle-runner CronJob in the cluster" "run: kubectl apply -f k3s/cycle-runner/"
 else

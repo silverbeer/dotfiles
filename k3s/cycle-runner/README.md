@@ -65,6 +65,34 @@ Availability. The cluster is rancher-desktop on Lima — a VM on the same Mac.
 Mac down, k3s down. Same blast radius as launchd; this buys scheduling
 semantics and isolation.
 
+## Keeping `claude` current
+
+The CronJob is pinned to `ghcr.io/silverbeer/cycle-runner:claude-<version>`,
+never `:latest`. `:latest` with `imagePullPolicy: Always` means a rebuild lands
+in the next tick with nobody having looked at it, and leaves nothing to revert
+*to*. `check-k3s-manifests.sh` fails the build if the tag and the Dockerfile's
+`ARG CLAUDE_VERSION` disagree.
+
+`.github/workflows/cycle-runner-image-refresh.yml` runs weekly (Mon 07:00 UTC,
+or on demand):
+
+1. compare `npm view @anthropic-ai/claude-code version` against the pin — equal, stop
+2. build the candidate; `claude-cli-contract` runs as a build step, so a
+   renamed flag fails here
+3. run the offline suite **inside the candidate** — `check-cycle-runner-policy`,
+   `check-gatekeeper`, `check-linear-crud` — against the new CLI. Running them
+   on the runner's own filesystem would prove the repo is fine, which nobody
+   doubted; the question is whether the scripts still work against the new CLI
+4. only then push `:claude-<new>` and open a **PR**
+
+The cluster does not move until that PR merges. Reverting is repointing one
+line; the old tag is never deleted.
+
+`doctor.sh` reads the tag and compares it with the machine's own `claude`,
+because after this migration there are two runtimes: the image's, and the one
+`/work` and `/ticket` use interactively. A behaviour difference between a
+headless tick and an interactive run is otherwise unattributable.
+
 ## The image
 
 ```bash

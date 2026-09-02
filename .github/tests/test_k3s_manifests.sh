@@ -129,4 +129,41 @@ test_a_missing_manifest_fails_loudly() {
   assert_out 'missing'
 }
 
+# NEGATIVE: :latest. It is not revertible — SB-966 asked that a version bump
+# "open a PR rather than push to main, so it is visible and revertible", and
+# with :latest there is nothing to revert TO. It also leaves doctor.sh no
+# version to compare against the mini's own claude.
+test_a_latest_image_tag_is_rejected() {
+  src="$(copy_source)"
+  edit 's|cycle-runner:claude-[0-9.]*|cycle-runner:latest|g' "$src/$CJ"
+  grep -q 'cycle-runner:latest' "$src/$CJ" || fail "fixture did not set :latest"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'not revertible'
+}
+
+# NEGATIVE: the image tag and the Dockerfile ARG drift. The cluster would then
+# run a different claude from the one the build-time CLI contract was checked
+# against, which is the entire reason the version is pinned.
+test_an_image_tag_that_disagrees_with_the_dockerfile_is_rejected() {
+  src="$(copy_source)"
+  edit 's|cycle-runner:claude-[0-9.]*|cycle-runner:claude-9.9.9|g' "$src/$CJ"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'different claude'
+}
+
+# REGRESSION: the loop above went green while iterating ZERO times — the
+# extractor used \S, which BSD sed does not know, so on macOS it matched
+# nothing and a :latest manifest passed. A loop over an empty list looks
+# exactly like a loop that found nothing wrong, so the COUNT is what catches
+# it.
+test_a_manifest_with_no_image_lines_fails_rather_than_passing_vacuously() {
+  src="$(copy_source)"
+  grep -v '^[[:space:]]*image:' "$src/$CJ" >"$src/.cj" && mv "$src/.cj" "$src/$CJ"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'image: lines'
+}
+
 run_tests
