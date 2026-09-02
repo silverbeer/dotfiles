@@ -1,36 +1,33 @@
 #!/usr/bin/env bash
-# Source this before run.sh: exports CLAUDE_CODE_OAUTH_TOKEN from 1Password if
-# it is not already set.
+# Source this before run.sh: exports CLAUDE_CODE_OAUTH_TOKEN from a local file.
 #
 #   source ~/.claude/skills/cycle-runner/scripts/env.sh
 #
-# Never echoes a value. If `op` is missing or locked, this is a silent no-op —
-# run.sh's own claude_token() gives the actionable error ("source
-# scripts/env.sh") when the token really is needed and still unset. Same shape
-# as gatekeeper/scripts/env.sh, one vault item, one var.
+# Never echoes a value. A missing file is a silent no-op — run.sh's own check
+# gives the actionable error when the token really is needed and still unset.
 #
-# Vault item: op://agents/cycle-runner-claude/token — a `claude setup-token`
-# 1-year token for the dedicated cycle-runner identity, not a personal one
-# (SB-929 design decision: naming mirrors cycle-runner-telegram).
-# The service-account token, for processes launchd starts (SB-953).
+# ---------------------------------------------------------------- SB-974
+# `op` is NOT called here, and must not be. Two earlier fixes (SB-953, SB-972)
+# assumed that exporting OP_SERVICE_ACCOUNT_TOKEN makes `op` headless. It does
+# not: once a desktop account exists in ~/.config/op/config — which happened
+# the moment a human ran `op signin` to create these very items — `op read`
+# prefers the desktop app and raises a Touch ID prompt, with a valid service
+# account token set. Proven with a logging shim: `token_set=yes` on every call,
+# and one `op read` stayed wedged for twelve minutes.
 #
-# ~/.zshenv exports OP_SERVICE_ACCOUNT_TOKEN for agent shells, but launchd does
-# not source it — the cycle-runner plist passes only HOME and PATH. Without the
-# token `op` falls back to the 1Password DESKTOP APP, which raised "op would
-# like to access data from other apps" and a Touch ID prompt on every tick, and
-# fails outright when nobody is at the machine. Reading the file here is what
-# makes an unattended tick actually headless.
+# Worse, a wedged `op` blocks every later call, so an unanswered prompt on an
+# unattended machine stops the runner entirely (SB-868).
 #
-# Deliberately NOT in the plist: that file is chezmoi-managed and world
-# readable, and a bearer token must not live in it.
-if [ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] && [ -r "$HOME/.config/op/agent-token" ]; then
-    OP_SERVICE_ACCOUNT_TOKEN="$(cat "$HOME/.config/op/agent-token")"
-    export OP_SERVICE_ACCOUNT_TOKEN
-fi
+# The Linear key has never had this problem because it is provisioned once to a
+# file and read as a file. This does the same. Provision with:
+#
+#   bash ~/.claude/skills/cycle-runner/scripts/provision-secrets.sh
+#
+# which is the ONLY thing here that talks to 1Password, is run by a human in a
+# real terminal, and is never on a tick's path.
+CR_SECRETS_DIR="${CYCLE_RUNNER_SECRETS_DIR:-$HOME/.config/cycle-runner}"
 
-if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && command -v op >/dev/null 2>&1; then
-  if token="$(op read 'op://agents/cycle-runner-claude/token' 2>/dev/null)" && [ -n "$token" ]; then
-    export CLAUDE_CODE_OAUTH_TOKEN="$token"
-  fi
-  unset token
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -r "$CR_SECRETS_DIR/claude-token" ]; then
+  CLAUDE_CODE_OAUTH_TOKEN="$(cat "$CR_SECRETS_DIR/claude-token")"
+  export CLAUDE_CODE_OAUTH_TOKEN
 fi

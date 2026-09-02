@@ -193,45 +193,33 @@ else
   bad "token-set-success case did not report as expected: $out"
 fi
 
-# SB-972: with a service-account token set, doctor must NOT call
-# `op account list`. That subcommand enumerates DESKTOP APP accounts, ignores
-# the token, and raises a Touch ID prompt on an unattended machine — the same
-# class of bug SB-953 fixed for launchd, surviving at doctor's own call site.
-# The marker is a FILE, not a stream: doctor redirects both stdout and stderr
-# of its `op` calls, so a printed marker would be invisible to the assertion.
-OP_ACCOUNT_MARKER="$WORK/op-account-list-called"; export OP_ACCOUNT_MARKER
+# SB-974 supersedes SB-972: doctor must not call `op` AT ALL, with or without a
+# token. SB-972 kept `op whoami` for the service-account case; that still
+# reaches 1Password, and once a desktop account exists `op` prefers it and can
+# wedge on an unanswered prompt — blocking every later call and hanging the
+# machine doctor is supposed to be diagnosing.
+OP_CALLED_MARKER="$WORK/op-was-called"; export OP_CALLED_MARKER
 stub op <<'STUB'
 #!/usr/bin/env bash
-case "${1:-}" in
-  account) : >"$OP_ACCOUNT_MARKER"; echo "desktop-account" ;;
-  whoami)  echo "User Type: SERVICE_ACCOUNT" ;;
-esac
+: >"$OP_CALLED_MARKER"
+echo "op should not have been called"
 exit 0
 STUB
-rm -f "$OP_ACCOUNT_MARKER"
-out="$(run_doctor env OP_SERVICE_ACCOUNT_TOKEN=fake-service-token CLAUDE_CODE_OAUTH_TOKEN=fake-token-for-testing)"
-if [ -e "$OP_ACCOUNT_MARKER" ]; then
-  bad "doctor called 'op account list' with a service-account token set — that takes the desktop path and prompts (SB-972)"
-else
-  ok "op: service-account token present -> no 'op account list', no desktop prompt"
-fi
-if [[ "$out" == *"SERVICE_ACCOUNT"* ]]; then
-  ok "op: the auth line names the identity it authenticated as"
-else
-  bad "op: auth line does not name the identity: $out"
-fi
 
-# Without a token, the desktop check is still the right one for a human
-# terminal. `env -u` is load-bearing: the operator's own shell exports the
-# service-account token, so an inherited one would make this scenario
-# unreachable — the same environment-fidelity trap SB-953 turned on.
-rm -f "$OP_ACCOUNT_MARKER"
-out="$(run_doctor env -u OP_SERVICE_ACCOUNT_TOKEN CLAUDE_CODE_OAUTH_TOKEN=fake-token-for-testing)"
-if [ -e "$OP_ACCOUNT_MARKER" ]; then
-  ok "op: no service-account token -> falls back to the desktop account check"
-else
-  bad "op: without a token it must still check the desktop app"
-fi
+for scenario in "with a token:OP_SERVICE_ACCOUNT_TOKEN=fake-service-token" "without a token:"; do
+  label="${scenario%%:*}"; extra="${scenario#*:}"
+  rm -f "$OP_CALLED_MARKER"
+  if [ -n "$extra" ]; then
+    out="$(run_doctor env "$extra" CLAUDE_CODE_OAUTH_TOKEN=fake-token-for-testing)"
+  else
+    out="$(run_doctor env -u OP_SERVICE_ACCOUNT_TOKEN CLAUDE_CODE_OAUTH_TOKEN=fake-token-for-testing)"
+  fi
+  if [ -e "$OP_CALLED_MARKER" ]; then
+    bad "doctor invoked op $label — it must never reach 1Password (SB-974)"
+  else
+    ok "op: doctor makes no 1Password call $label"
+  fi
+done
 
 # Budget-exceeded is NOT an auth failure (SB-942): reaching the cap means the
 # call authenticated and started billing. The old $0.02 cap made this the

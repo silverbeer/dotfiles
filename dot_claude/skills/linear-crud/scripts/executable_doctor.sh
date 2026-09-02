@@ -61,23 +61,15 @@ echo "── auth ────────────────────�
 gh_auth_out="$(gh auth status 2>&1)"
 gh_auth_rc=$?
 if [ "$gh_auth_rc" -eq 0 ]; then ok "gh authenticated"; else warnf "gh not authenticated" "run: gh auth login"; fi
-# `op account list` enumerates DESKTOP APP accounts. A service account has none,
-# so the command ignores OP_SERVICE_ACCOUNT_TOKEN and falls through to the
-# desktop integration — raising "op would like to access data from other apps"
-# and a Touch ID prompt on EVERY doctor run, twice (it was called twice here).
-# SB-953 fixed the same class of bug for launchd; this call site survived it.
-# `op whoami` is service-account aware and stays headless.
-if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]; then
-  if op_kind_out="$(op whoami 2>/dev/null)" && [ -n "$op_kind_out" ]; then
-    ok "op authenticated ($(printf '%s' "$op_kind_out" | awk -F': *' '/User Type/ {print $2}'))"
-  else
-    failf "op service-account token present but 'op whoami' failed" "the token may have expired — see CLAUDE.md's expiry note"
-  fi
-elif op_accounts="$(op account list 2>/dev/null)" && [ -n "$op_accounts" ]; then
-  ok "op account configured (desktop app)"
-else
-  warnf "op not configured/signed in" "run: op signin (needed to bootstrap the Linear key)"
-fi
+# doctor does NOT call `op` (SB-974). Two earlier fixes assumed that exporting
+# OP_SERVICE_ACCOUNT_TOKEN makes `op` headless; it does not, once a desktop
+# account exists in ~/.config/op/config. A logging shim caught `op read` going
+# to the desktop app with a valid token set, and one call stayed wedged for
+# twelve minutes — and a wedged `op` blocks every later call. A health check
+# that can hang the machine it is checking is worse than no check.
+#
+# Secrets are provisioned to files instead; what doctor verifies is the files.
+CR_SECRETS_DIR="${CYCLE_RUNNER_SECRETS_DIR:-$HOME/.config/cycle-runner}"
 if [ -f "$HOME/.config/linear/credentials.toml" ] && grep -q '^default' "$HOME/.config/linear/credentials.toml" 2>/dev/null; then
   ok "linear CLI has a default workspace"
 else
@@ -154,25 +146,40 @@ if [ "$on_mini" -eq 1 ]; then
   # so it cannot see that launchd — which passes only HOME and PATH — had no
   # token at all and sent `op` to the desktop app, raising a Touch ID prompt
   # every 30 minutes and failing outright with nobody at the machine.
-  OP_AGENT_TOKEN_FILE="$HOME/.config/op/agent-token"
-  if [ ! -r "$OP_AGENT_TOKEN_FILE" ]; then
-    failf "no readable $OP_AGENT_TOKEN_FILE" "a launchd tick cannot reach the vault without it — see SETUP.md Step 2b"
-  elif [ -z "$CR_SCRIPTS" ]; then
-    warnf "cycle-runner scripts not found — skipping the launchd-environment vault check" "install the cycle-runner skill"
-  else
-    # Deliberately `env -i` with only what the plist provides: this must prove
-    # a tick is headless, not that this shell is.
-    # shellcheck disable=SC2016  # $CR and $2 must expand in the INNER shell
-    op_kind="$(env -i HOME="$HOME" PATH="$PATH" CR="$CR_SCRIPTS" bash -c '
-      . "$CR/env.sh" 2>/dev/null
-      op whoami 2>/dev/null | awk -F": *" "/User Type/ {print \$2}"
-    ' 2>/dev/null || true)"
-    if [ "$op_kind" = "SERVICE_ACCOUNT" ]; then
-      ok "launchd-shaped env reaches the vault as a service account (no desktop prompt)"
+  # What a tick actually needs is three files. Checked in a launchd-shaped
+  # `env -i` — only HOME and PATH, exactly what the plist provides — so this
+  # proves a TICK can start, not that the operator's richer shell can.
+  for secret in claude-token telegram-token telegram-chat-id; do
+    f="$CR_SECRETS_DIR/$secret"
+    if [ ! -r "$f" ]; then
+      failf "missing $f" "run: bash ~/.claude/skills/cycle-runner/scripts/provision-secrets.sh (from a real terminal)"
+    elif [ "$(stat -f '%Lp' "$f" 2>/dev/null || stat -c '%a' "$f" 2>/dev/null)" != "600" ]; then
+      warnf "$f is not 0600" "chmod 600 $f"
     else
-      failf "a launchd-shaped env does not get the service account (got '${op_kind:-nothing}')" \
-        "every tick will raise the 1Password desktop prompt — env.sh must export OP_SERVICE_ACCOUNT_TOKEN"
+      ok "secret present: $secret ($(wc -c <"$f" | tr -d ' ') bytes, 0600)"
     fi
+  done
+
+  if [ -n "$CR_SCRIPTS" ]; then
+    # shellcheck disable=SC2016  # $CR expands in the INNER shell
+    tick_token="$(env -i HOME="$HOME" PATH="$PATH" CR="$CR_SCRIPTS" bash -c '
+      . "$CR/env.sh" 2>/dev/null
+      [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo present
+    ' 2>/dev/null || true)"
+    if [ "$tick_token" = "present" ]; then
+      ok "launchd-shaped env gets the claude token from disk (no op, no prompt)"
+    else
+      failf "a launchd-shaped env does not get CLAUDE_CODE_OAUTH_TOKEN" \
+        "run provision-secrets.sh — a tick cannot authenticate without it"
+    fi
+  fi
+
+  # A regression here is silent and expensive: `op` on a tick path can wedge on
+  # an unanswered desktop prompt and stop the runner (SB-868, SB-974).
+  if [ -n "$CR_SCRIPTS" ] && grep -qE '^[^#]*\bop (read|item|whoami|account)\b' "$CR_SCRIPTS/env.sh" 2>/dev/null; then
+    failf "cycle-runner/env.sh calls op on the tick path" "secrets must come from files — see SB-974"
+  else
+    ok "no op invocation on the tick path"
   fi
 
   if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
