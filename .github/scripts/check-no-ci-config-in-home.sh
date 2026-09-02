@@ -17,7 +17,11 @@ managed="$WORK/managed.txt"
 cm managed >"$managed"
 
 # Anything on this list appearing as a chezmoi target is a bug.
-leaks='^(\.?ruff\.toml|\.?gitleaks\.toml|\.?github(/|$)|README\.md|SETUP\.md|tests(/|$))'
+# k3s/ holds cluster manifests and the cycle-runner Dockerfile (SB-975). Like
+# README.md it is not dot-prefixed, so ONLY its .chezmoiignore entry keeps it
+# out of $HOME — delete that line and every machine grows a ~/k3s at the next
+# apply, which is precisely how ~/README.md happened.
+leaks='^(\.?ruff\.toml|\.?gitleaks\.toml|\.?github(/|$)|README\.md|SETUP\.md|tests(/|$)|k3s(/|$))'
 
 if grep -nE "$leaks" "$managed"; then
   die "repo-only files are being deployed into \$HOME — keep them dot-prefixed and listed in .chezmoiignore"

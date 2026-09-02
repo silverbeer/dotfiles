@@ -106,4 +106,20 @@ test_a_root_level_tests_dir_would_be_rejected_by_the_check() {
   assert_out 'tests'
 }
 
+# NEGATIVE: k3s/ is not dot-prefixed, so its .chezmoiignore entry is the ONLY
+# thing between the cluster manifests and a ~/k3s on every machine. Same shape
+# as README.md, and the entry was added to .chezmoiignore before the directory
+# existed for exactly this reason (SB-975).
+test_k3s_dropped_from_chezmoiignore_is_rejected() {
+  need_bin chezmoi
+  src="$(copy_source)"
+  grep -vx 'k3s' "$src/.chezmoiignore" >"$src/.ci.new"
+  mv "$src/.ci.new" "$src/.chezmoiignore"
+  grep -qx 'k3s' "$src/.chezmoiignore" && fail "fixture did not drop the k3s entry"
+
+  export REPO="$src"
+  assert_fail check-no-ci-config-in-home.sh
+  assert_out 'k3s'
+}
+
 run_tests
