@@ -461,12 +461,16 @@ if [[ "$acted" -eq 0 ]]; then
     # An idle tick normally posts nothing (SB-945) — silence means idle. But
     # silence must not also mean "everything is parked waiting on you", which
     # is indistinguishable and was (SB-949). Say so once a day, not every tick.
-    parked="$(jq -r '[.parked[]? | select(.hours >= 12)] | length' <<<"$RESOLVED_JSON" 2>/dev/null || echo 0)"
-    if [[ "${parked:-0}" -gt 0 ]]; then
-      say "$parked ticket(s) waiting on you" \
-          "$(jq -r '[.parked[] | select(.hours >= 12) | "\(.ticket) (\(.kind), \(.hours)h)"] | join(", ")' <<<"$RESOLVED_JSON")" \
-          "https://linear.app/silverbeer/team/SB/active"
-    fi
+    # gate.py decides WHO is due a reminder and rate-limits it (SB-973); this
+    # only renders. One entry per ticket, each carrying its OWN link — a
+    # team-board URL makes the reader go hunting, which is the friction this
+    # channel exists to remove.
+    while IFS=$'\t' read -r p_ticket p_kind p_hours p_url; do
+      [[ -z "$p_ticket" ]] && continue
+      say "$p_ticket is waiting on you — $(ticket_title "$p_ticket")" \
+          "Its $p_kind gate has been open $p_hours hours. Reply \`approve\` on the ticket, or tap the buttons." \
+          "$p_url"
+    done < <(jq -r '.parked[]? | select(.notify) | [.ticket, .kind, (.hours|floor), .url] | @tsv' <<<"$RESOLVED_JSON" 2>/dev/null || true)
   else
     session_id="$(gen_uuid)"
     run_id="$INVOCATION_ID"
