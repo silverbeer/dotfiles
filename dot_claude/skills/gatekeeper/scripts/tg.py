@@ -19,6 +19,7 @@ Two things this module refuses to do:
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from typing import Any, Protocol
@@ -46,7 +47,9 @@ class TelegramConflict(TelegramError):
 class Transport(Protocol):
     """The four Bot API calls the gatekeeper needs. Tests hand in a fake."""
 
-    def send_message(self, chat_id: str, text: str, reply_markup: dict | None = None) -> dict: ...
+    def send_message(
+        self, chat_id: str, text: str, reply_markup: dict | None = None, entities: list[dict] | None = None
+    ) -> dict: ...
 
     def get_updates(self, offset: int, timeout: int, allowed_updates: list[str]) -> list[dict[str, Any]]: ...
 
@@ -83,10 +86,23 @@ class TelegramTransport:
             raise TelegramError(f"Telegram refused {method}: {body.get('description', 'unknown')}")
         return body.get("result")
 
-    def send_message(self, chat_id: str, text: str, reply_markup: dict | None = None) -> dict:
-        # No parse_mode: plan bodies carry `_`, `*` and `[` freely, and legacy
-        # Markdown rejects the whole message on one unmatched character.
+    def send_message(
+        self, chat_id: str, text: str, reply_markup: dict | None = None, entities: list[dict] | None = None
+    ) -> dict:
+        # Still no parse_mode: plan bodies carry `_`, `*` and `[` freely, and
+        # legacy Markdown rejects the whole message on one unmatched character.
+        # A gate DM that fails to send is worse than one that reads plainly.
+        #
+        # `entities` gives the same result with none of that risk (SB-982).
+        # An entity is an offset and a length over the text as sent — nothing
+        # to escape, nothing a stray backtick can break. Without them the
+        # message carries no link information at all and each client guesses:
+        # iOS, Android and the App Store macOS build auto-detect URLs,
+        # Telegram Desktop on macOS does not, so the one action a gate DM
+        # exists to prompt could not be taken from the desktop it was read on.
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+        if entities:
+            payload["entities"] = entities
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         return self._call("sendMessage", payload, timeout=15) or {}
@@ -111,31 +127,119 @@ class TelegramTransport:
 # ------------------------------------------------------------------ helpers
 
 
+# A bare `https://…` run, up to whitespace. Trailing `.,;:!?` and a closing
+# bracket are excluded so "see https://x/y." does not linkify the full stop.
+_URL_RE = re.compile(r"https?://[^\s<>\"]+[^\s<>\".,;:!?)\]]")
+
+
+def _utf16_len(s: str) -> int:
+    """Length in UTF-16 code units — the unit Telegram entity offsets use.
+
+    NOT len(). A non-BMP character (any emoji outside the basic set) is one
+    Python character but TWO UTF-16 units, so a plan body containing one
+    shifts every later offset by one and the links land on the wrong text.
+    """
+    return len(s.encode("utf-16-le")) // 2
+
+
+def url_entities(text: str) -> list[dict]:
+    """`url` entities for every bare URL in `text` (SB-982).
+
+    Computed from the text as it will be SENT, so callers never do offset
+    arithmetic and a caller that forgets cannot silently produce a message
+    with no links.
+    """
+    return [
+        {"type": "url", "offset": _utf16_len(text[: m.start()]), "length": _utf16_len(m.group())}
+        for m in _URL_RE.finditer(text)
+    ]
+
+
 def chunks(text: str) -> list[str]:
-    return [text[i : i + MAX_MESSAGE] for i in range(0, len(text), MAX_MESSAGE)] or [""]
+    """Split into sendable messages, preferring a line boundary.
+
+    A fixed-width slice can cut a URL in half, which leaves each half marked as
+    a `url` entity over text that is not a URL. These messages are
+    line-oriented, so breaking at the last newline inside the window costs
+    nothing and makes the entity offsets computed per chunk trustworthy.
+
+    A single line longer than MAX_MESSAGE still gets a hard cut — there is no
+    boundary to prefer — which is the pre-existing behaviour.
+    """
+    if len(text) <= MAX_MESSAGE:
+        return [text]
+    parts: list[str] = []
+    rest = text
+    while len(rest) > MAX_MESSAGE:
+        window = rest[:MAX_MESSAGE]
+        cut = window.rfind("\n")
+        if cut <= 0:
+            cut = MAX_MESSAGE
+        parts.append(rest[:cut])
+        rest = rest[cut:].lstrip("\n") if cut < MAX_MESSAGE else rest[cut:]
+    if rest:
+        parts.append(rest)
+    return parts or [""]
 
 
 def send_text(transport: Transport, chat_id: str, text: str, reply_markup: dict | None = None) -> dict:
     """Send `text` in as many messages as it takes; the keyboard rides on the
     last one so the buttons sit under the end of the proposal. Returns the last
-    sendMessage result (its message_id is what the gate state records)."""
+    sendMessage result (its message_id is what the gate state records).
+
+    Entities are derived per chunk, not once over the whole text: offsets are
+    relative to the message they are sent with, and chunk N's link is at a
+    different offset in chunk N than it was in the original.
+    """
     parts = chunks(text)
     result: dict = {}
     for i, part in enumerate(parts):
         markup = reply_markup if i == len(parts) - 1 else None
-        result = transport.send_message(chat_id, part, markup)
+        result = transport.send_message(chat_id, part, markup, url_entities(part))
     return result
 
 
-def approve_keyboard(gate_id: str) -> dict:
-    """One row: ✅ Approve · ❌ Reject · 💬 Note, callback_data `gate_id:verb`."""
+def link_row(ticket_url: str = "", pr_url: str = "") -> list[dict]:
+    """A row of URL buttons (SB-982).
+
+    Entities make the inline URLs clickable; this makes them tappable, which
+    is a different guarantee. A URL button carries its target in the markup —
+    no offsets, no client-side detection, no way for a chunk boundary or a
+    stray character to break it. It is also the better interaction: the reader
+    taps a labelled button instead of hunting for a line of text.
+    """
+    row = []
+    if ticket_url:
+        row.append({"text": "🎫 Ticket", "url": ticket_url})
+    if pr_url and pr_url != ticket_url:
+        row.append({"text": "🔗 PR", "url": pr_url})
+    return row
+
+
+def approve_keyboard(gate_id: str, ticket_url: str = "", pr_url: str = "") -> dict:
+    """✅ Approve · ❌ Reject · 💬 Note, plus a row of link buttons."""
     row = []
     for label, verb in (("✅ Approve", "approve"), ("❌ Reject", "reject"), ("💬 Note", "note")):
         data = f"{gate_id}:{verb}"
         if len(data.encode()) > MAX_CALLBACK_DATA:
             raise ValueError(f"callback_data {data!r} exceeds {MAX_CALLBACK_DATA} bytes — gate ids must be short")
         row.append({"text": label, "callback_data": data})
-    return {"inline_keyboard": [row]}
+    rows = [row]
+    links = link_row(ticket_url, pr_url)
+    if links:
+        rows.append(links)
+    return {"inline_keyboard": rows}
+
+
+def links_keyboard(ticket_url: str = "", pr_url: str = "") -> dict | None:
+    """Link buttons with NO verbs — for `blocked` gates.
+
+    A blocked gate deliberately has no Approve/Reject: telling its reader to
+    tap one would be a lie, since nothing is being asked of them. Giving them
+    a way to open the ticket is not a lie, and it is exactly what they need.
+    """
+    links = link_row(ticket_url, pr_url)
+    return {"inline_keyboard": [links]} if links else None
 
 
 def parse_callback(data: str) -> tuple[str, str] | None:

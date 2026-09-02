@@ -74,10 +74,20 @@ class OpenGateTests(GateTestCase):
         self.assertTrue(text.startswith("[plan] SB-1 — Do the thing"))
         self.assertIsNotNone(markup)
 
-    def test_blocked_kind_gets_no_keyboard(self):
+    def test_blocked_kind_gets_no_verbs_but_still_a_link(self):
+        """A blocked gate asks nothing of the reader, so offering Approve or
+        Reject would be a lie — that is the invariant, and it still holds.
+
+        It is NOT "no keyboard": the reader's whole job on a blocked gate is to
+        go and look at the ticket, and a link button is the most direct way to
+        let them (SB-982). Asserting "markup is None" conflated the rule with
+        one implementation of it.
+        """
         self.open_gate(kind="blocked")
         _, _, markup = self.transport.sent[-1]
-        self.assertIsNone(markup)
+        buttons = [b for row in markup["inline_keyboard"] for b in row]
+        self.assertEqual([b for b in buttons if "callback_data" in b], [])
+        self.assertEqual([b["text"] for b in buttons], ["🎫 Ticket"])
 
 
 class CallbackTests(GateTestCase):

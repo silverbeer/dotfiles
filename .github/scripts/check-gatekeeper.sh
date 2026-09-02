@@ -29,6 +29,11 @@ else
 fi
 
 ran="$(printf '%s\n' "$out" | sed -nE 's/^Ran ([0-9]+) tests?.*/\1/p')"
-[ "${ran:-0}" -ge 25 ] || die "expected at least 25 tests to run, unittest reported '${ran:-none}' — discovery broken?"
+# The floor tracks the suite. 25 was set when there were ~30 tests; at 70 it
+# had stopped meaning anything — deleting the whole of test_gate.py (42 tests)
+# still left 28 and passed, so the guard's own negative test broke before the
+# guard did. Keep it just under the smaller file's count, so losing EITHER
+# file is caught.
+[ "${ran:-0}" -ge 60 ] || die "expected at least 60 tests to run, unittest reported '${ran:-none}' — discovery broken?"
 
 note "check-gatekeeper: all offline tests passed"

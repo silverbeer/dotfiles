@@ -51,6 +51,7 @@ from tg import (  # noqa: E402
     TelegramTransport,
     Transport,
     approve_keyboard,
+    links_keyboard,
     parse_callback,
     send_text,
 )
@@ -379,7 +380,14 @@ class Gatekeeper:
         # stays resolvable via the Linear channel, and `poll` can find it.
         save_gate(gate)
         text = telegram_text(kind, ticket, issue["title"], body, link or issue["url"], issue["url"])
-        keyboard = approve_keyboard(gate_id) if kind != "blocked" else None
+        # A `blocked` gate asks nothing, so it gets no verbs — but it still
+        # gets the link buttons, because "go and look" IS the ask (SB-982).
+        pr_link = link if link and link != issue["url"] else ""
+        keyboard = (
+            links_keyboard(issue["url"], pr_link)
+            if kind == "blocked"
+            else approve_keyboard(gate_id, issue["url"], pr_link)
+        )
         try:
             sent = send_text(self.transport, self.chat_id, text, keyboard)
             gate["tg_message_id"] = sent.get("message_id")
