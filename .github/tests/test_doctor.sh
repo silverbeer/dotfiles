@@ -27,9 +27,11 @@ test_the_check_passes_on_the_current_tree() {
   assert_out 'ok   gh auth status fails -> warn'
   assert_out "ok   gatekeeper skill absent -> warns 'skill not found'"
   assert_out 'ok   GATEKEEPER_TG_TOKEN unset (skill present) -> skips cleanly'
-  assert_out 'ok   no lock dir at all -> ok'
-  assert_out "ok   lock held by a running pid"
-  assert_out "ok   lock names a dead pid -> warn"
+  assert_out 'ok   no kubectl -> info, not a failure'
+  assert_out 'ok   healthy CronJob -> ok, names the last schedule and last success'
+  assert_out 'ok   suspended CronJob -> fail, with the unsuspend command'
+  assert_out 'ok   never-scheduled CronJob -> warn, not fail'
+  assert_out 'ok   missing CronJob -> warn, with the apply command'
   assert_out 'ok   on-mini + plist absent -> fail'
   assert_out 'ok   on-mini + plist present, not loaded -> ok (present) + warn'
   assert_out 'ok   on-mini + plist present, loaded -> ok, ok'
@@ -126,20 +128,32 @@ test_dropped_pr37_pr35_reference_fails() {
   assert_out "chezmoi-dirty case did not report as expected"
 }
 
-# NEGATIVE: the stale-lock staleness test (kill -0) is defeated so an
-# abandoned lock reads as "still running" forever — the same class of bug
-# check-cycle-runner-policy.sh already guards in run.sh's own lock code, but
-# doctor.sh's INFORMATIONAL read of the same lock file is separate code and
-# needs its own coverage.
-test_broken_lock_staleness_check_fails() {
+# NEGATIVE: a suspended CronJob stops reading as a failure. This is the single
+# most important line in the new check (SB-976): a suspended CronJob is silent
+# in exactly the way a wedged lock used to be — every other check green, and no
+# tick for days. Downgrading it to a warning, or dropping the branch, must not
+# be quiet.
+test_a_suspended_cronjob_that_stops_failing_is_rejected() {
   need_bin bash python3
   src="$(copy_source)"
-  edit 's|kill -0 "\$lock_pid" 2>/dev/null|true|' "$src/$DOCTOR"
-  grep -q 'if \[ -n "\$lock_pid" \] && true; then' "$src/$DOCTOR" \
-    || fail "fixture did not defeat the staleness check"
+  edit 's|if \[ "\$cj_suspend" = "true" \]; then|if false; then|' "$src/$DOCTOR"
+  grep -q 'if false; then' "$src/$DOCTOR" || fail "fixture did not defeat the suspend branch"
   export REPO="$src"
   assert_fail check-doctor.sh
-  assert_out "stale-lock case did not report as expected"
+  assert_out "suspended-CronJob case did not report as expected"
+}
+
+# NEGATIVE: the kubectl-absent path stops being an INFO. doctor.sh runs on the
+# Air too, where there is no cluster; turning that into a warning or a failure
+# would make a healthy machine look broken and train the reader to ignore it.
+test_missing_kubectl_reported_as_a_failure_is_rejected() {
+  need_bin bash python3
+  src="$(copy_source)"
+  edit 's|infof "kubectl not installed, skipping the cycle-runner CronJob check"|failf "kubectl not installed" "install it"|' "$src/$DOCTOR"
+  grep -q 'failf "kubectl not installed"' "$src/$DOCTOR" || fail "fixture did not change the kubectl-absent branch"
+  export REPO="$src"
+  assert_fail check-doctor.sh
+  assert_out "kubectl-absent case did not report as expected"
 }
 
 run_tests

@@ -23,8 +23,26 @@ set -euo pipefail
 KEY_FILE="${LINEAR_KEY_FILE:-$HOME/.config/linear/gql-key}"
 KEY="${LINEAR_API_KEY:-}"
 if [ -z "$KEY" ] && [ -f "$KEY_FILE" ]; then
-  KEY=$(tr -d ' \t\r\n' < "$KEY_FILE")
+  KEY=$(cat "$KEY_FILE")
 fi
+# Strip whitespace from BOTH sources, not just the file.
+#
+# The file path always did; the environment path did not, and on the mini that
+# never mattered because ~/.zshenv reads the key as `$(<file)`, which strips
+# the trailing newline `op read > file` leaves. A k8s `secretKeyRef` does not
+# strip anything, so the pod got a key ending in \n and sent
+#
+#     Authorization: lin_api_…\n
+#
+# The embedded newline terminated the header block early: curl's Content-Type
+# never reached Linear, which saw the default x-www-form-urlencoded and
+# rejected the request as possible CSRF. The symptom named neither the
+# credential nor the newline — over HTTP/2 it was only "PROTOCOL_ERROR", and
+# over HTTP/1.1 a 400 about content-type.
+#
+# A newline in a header value is a header-injection shape regardless of where
+# the key came from, so this is defence, not a workaround for one provisioner.
+KEY="$(printf '%s' "$KEY" | tr -d ' \t\r\n')"
 [ -z "$KEY" ] && { echo "linear-gql: no API key — set LINEAR_API_KEY or create $KEY_FILE (run doctor.sh)" >&2; exit 1; }
 
 QUERY="${1:-$(cat)}"
@@ -52,7 +70,23 @@ esac
 delay=1
 curl_err=""
 for attempt in $(seq 1 "$max_attempts"); do
-  status="$(curl -sS https://api.linear.app/graphql \
+  # --http1.1 is NOT a preference. curl 7.88 (debian bookworm, which is what
+  # the cycle-runner image is built on) cannot complete an authenticated POST
+  # to api.linear.app over HTTP/2: every attempt dies with
+  #
+  #   curl: (92) HTTP/2 stream 1 was not closed cleanly: PROTOCOL_ERROR (err 1)
+  #
+  # Reproduced in-cluster, 3/3 retries, twice; the same request with --http1.1
+  # gets a real response. Retrying does not help because it is not transient.
+  #
+  # An unauthenticated one-line query DOES succeed over h2, which is why this
+  # was invisible until a pod ran a real query — worth knowing before anyone
+  # "verifies" it with a trivial curl and concludes the flag is unnecessary.
+  #
+  # HTTP/2 buys nothing here: one small request, no multiplexing, no server
+  # push. So this is forced everywhere rather than gated on the environment —
+  # a flag that only applies in the pod is a difference nobody would remember.
+  status="$(curl -sS --http1.1 https://api.linear.app/graphql \
     --connect-timeout 10 --max-time 60 \
     -H "Authorization: $KEY" \
     -H "Content-Type: application/json" \

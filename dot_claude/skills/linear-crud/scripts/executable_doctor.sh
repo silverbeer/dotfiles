@@ -275,16 +275,42 @@ PY
   fi
 fi
 
-LOCK_PID_FILE="$HOME/.local/state/cycle-runner/lock/pid"
-if [ -f "$LOCK_PID_FILE" ]; then
-  lock_pid="$(cat "$LOCK_PID_FILE" 2>/dev/null || true)"
-  if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
-    ok "cycle-runner lock held by running pid $lock_pid (a run is in progress)"
+# The stale-lock read that used to be here is gone with the lock itself
+# (SB-976). Nothing writes $HOME/.local/state/cycle-runner/lock any more, so
+# the check could only ever report "no lock present" — a passing check that
+# tests nothing, which is worse than no check.
+#
+# Concurrency is `concurrencyPolicy: Forbid` on the CronJob now, so the health
+# question changed with it: not "is a lock wedged" but "is the scheduler
+# actually scheduling". A CronJob that is suspended, or whose last job failed,
+# is the modern shape of the same silence launchd used to fail in.
+#
+# kubectl absent is INFO, not a failure: this same doctor runs on the Air,
+# where there is no cluster and nothing to report.
+# Which binary to ask, overridable so the offline suite can test the
+# "not installed" branch deterministically. Trimming $PATH instead does not
+# work: GitHub's ubuntu runner ships a kubectl in /usr/bin, so the case that
+# was meant to prove the absent path silently proved nothing there.
+KUBECTL="${KUBECTL:-kubectl}"
+if command -v "$KUBECTL" >/dev/null 2>&1 \
+   && "$KUBECTL" get cronjob cycle-runner -n cycle-runner >/dev/null 2>&1; then
+  cj="$("$KUBECTL" get cronjob cycle-runner -n cycle-runner \
+        -o jsonpath='{.spec.suspend}{"\t"}{.status.lastScheduleTime}{"\t"}{.status.lastSuccessfulTime}' 2>/dev/null || true)"
+  cj_suspend="$(printf '%s' "$cj" | cut -f1)"
+  cj_last="$(printf '%s' "$cj" | cut -f2)"
+  cj_ok="$(printf '%s' "$cj" | cut -f3)"
+  if [ "$cj_suspend" = "true" ]; then
+    failf "cycle-runner CronJob is SUSPENDED — no ticks are running at all" \
+      "run: kubectl -n cycle-runner patch cronjob cycle-runner -p '{\"spec\":{\"suspend\":false}}'"
+  elif [ -z "$cj_last" ]; then
+    warnf "cycle-runner CronJob has never been scheduled" "it was applied but no tick has fired yet — check again after the next :00 or :30"
   else
-    warnf "cycle-runner lock present but pid '${lock_pid:-<empty>}' is not running" "looks abandoned — informational only; run.sh clears stale locks itself on its next tick, doctor does not touch it"
+    ok "cycle-runner CronJob last scheduled $cj_last (last success ${cj_ok:-none yet})"
   fi
+elif command -v "$KUBECTL" >/dev/null 2>&1; then
+  warnf "no cycle-runner CronJob in the cluster" "run: kubectl apply -f k3s/cycle-runner/"
 else
-  ok "no cycle-runner lock present"
+  infof "kubectl not installed, skipping the cycle-runner CronJob check"
 fi
 
 echo "── chezmoi sync ──────────────────────────"

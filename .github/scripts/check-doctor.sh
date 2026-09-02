@@ -123,9 +123,24 @@ exit 97
 STUB
 }
 
+# kubectl: sane default is "the CronJob is not there" (exit 1), the state of
+# every machine that has not applied k3s/cycle-runner/ yet.
+#
+# This stub is NOT optional. Without it doctor.sh finds the developer's REAL
+# kubectl and queries their live cluster on every one of the ~15 doctor
+# invocations this suite makes — measured at 2m53s, and a suite that talks to a
+# real cluster is not an offline suite at all.
+default_kubectl() {
+  stub kubectl <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+}
+
 default_gh
 default_chezmoi
 default_launchctl
+default_kubectl
 
 export PATH="$bin:$PATH"
 
@@ -145,8 +160,7 @@ GK_ABSENT_DOCTOR="$GK_ABSENT_ROOT/dot_claude/skills/linear-crud/scripts/executab
 # Fresh scratch $HOME per call: doctor.sh reads $HOME/.config/linear/gql-key
 # (left absent -> the Linear API section fails closed without ever shelling
 # out to linear-gql.sh, so no curl to the real API), $HOME/.claude/skills/*,
-# $HOME/Library/LaunchAgents/io.silverbeer.cycle-runner.plist and
-# $HOME/.local/state/cycle-runner/lock/pid.
+# and $HOME/Library/LaunchAgents/io.silverbeer.cycle-runner.plist.
 run_doctor_at() {  # DOCTOR_PATH [env assignments...]
   local doctor="$1"; shift
   local h
@@ -340,37 +354,97 @@ if [[ "$out" == *"gatekeeper skill not found"* ]]; then
   bad "skill-present-token-unset case ALSO reported 'skill not found'"
 fi
 
-# ------------------------------------------------------- 4. stale-lock check
+# ------------------------------------------- 4. CronJob health (SB-976)
+#
+# Replaces the stale-lock scenarios. The lock is gone, so doctor's read of it
+# is too; what it reads instead is whether the scheduler is scheduling.
+#
+# Every case runs with a STUBBED kubectl. A real one would talk to whatever
+# cluster the runner of this suite happens to have — including none, on CI.
 
-out="$(run_doctor)"
-if [[ "$out" == *"no cycle-runner lock present"* ]]; then
-  ok "no lock dir at all -> ok, informational"
-else
-  bad "no-lock case did not report as expected: $out"
-fi
-
-run_doctor_with_lock() {  # PID
-  local h
-  h="$(mktemp -d "$WORK/home.XXXXXX")"
-  mkdir -p "$h/.local/state/cycle-runner/lock"
-  echo "$1" >"$h/.local/state/cycle-runner/lock/pid"
-  HOME="$h" LINEAR_KEY_FILE="$h/no-such-key" bash "$DOCTOR" 2>&1 || true
+kubectl_stub() {  # SCRIPT-BODY
+  cat >"$bin/kubectl" <<STUB
+#!/usr/bin/env bash
+$1
+STUB
+  chmod +x "$bin/kubectl"
 }
 
-out="$(run_doctor_with_lock "$$")"
-if [[ "$out" == *"cycle-runner lock held by running pid $$"* ]]; then
-  ok "lock held by a running pid (this test's own \$\$) -> ok"
+# 4a. kubectl absent -> INFO. This doctor also runs on the Air, where there is
+# no cluster and nothing to say about one.
+#
+# Removing the stub is NOT enough: the machine running this suite very likely
+# has a real kubectl further down $PATH, and doctor would then query its actual
+# cluster — measured, it reported on a live k3s from a laptop.
+#
+# Trimming $PATH does not work either: GitHub's ubuntu runner ships a kubectl
+# in /usr/bin, so on CI — the one place this must hold — the case proved
+# nothing and the guard for it failed the build instead.
+#
+# So doctor takes the binary name from $KUBECTL, and this points it at one that
+# cannot exist. The seam is real, not test-only: a machine with kubectl outside
+# $PATH can use it too.
+out="$(run_doctor env KUBECTL=kubectl-definitely-not-installed)"
+if [[ "$out" == *"kubectl not installed, skipping the cycle-runner CronJob check"* ]]; then
+  ok "no kubectl -> info, not a failure"
 else
-  bad "running-lock case did not report as expected: $out"
+  bad "kubectl-absent case did not report as expected: $out"
 fi
 
-( : ) & dead_pid=$!; wait "$dead_pid" 2>/dev/null || true
-out="$(run_doctor_with_lock "$dead_pid")"
-if [[ "$out" == *"pid '$dead_pid' is not running"*"looks abandoned"* ]]; then
-  ok "lock names a dead pid -> warn, 'looks abandoned', not auto-cleared"
+# 4b. healthy: scheduled, not suspended.
+kubectl_stub 'case "$*" in
+  *"get cronjob cycle-runner -n cycle-runner -o jsonpath"*)
+    printf "false\t2026-09-02T11:30:00Z\t2026-09-02T11:31:12Z" ;;
+  *"get cronjob"*) exit 0 ;;
+  *) exit 1 ;;
+esac'
+out="$(run_doctor)"
+if [[ "$out" == *"CronJob last scheduled 2026-09-02T11:30:00Z"* && "$out" == *"last success 2026-09-02T11:31:12Z"* ]]; then
+  ok "healthy CronJob -> ok, names the last schedule and last success"
 else
-  bad "stale-lock case did not report as expected: $out"
+  bad "healthy-CronJob case did not report as expected: $out"
 fi
+
+# 4c. SUSPENDED. This is the modern shape of the silence launchd used to fail
+# in: everything else green, and no tick has run for days.
+kubectl_stub 'case "$*" in
+  *"get cronjob cycle-runner -n cycle-runner -o jsonpath"*)
+    printf "true\t2026-09-01T11:30:00Z\t2026-09-01T11:31:00Z" ;;
+  *"get cronjob"*) exit 0 ;;
+  *) exit 1 ;;
+esac'
+out="$(run_doctor)"
+if [[ "$out" == *"CronJob is SUSPENDED"* && "$out" == *"suspend\":false"* ]]; then
+  ok "suspended CronJob -> fail, with the unsuspend command"
+else
+  bad "suspended-CronJob case did not report as expected: $out"
+fi
+
+# 4d. applied but never scheduled -> warn, not fail. Right after an apply this
+# is the normal state for up to half an hour.
+kubectl_stub 'case "$*" in
+  *"get cronjob cycle-runner -n cycle-runner -o jsonpath"*) printf "false\t\t" ;;
+  *"get cronjob"*) exit 0 ;;
+  *) exit 1 ;;
+esac'
+out="$(run_doctor)"
+if [[ "$out" == *"has never been scheduled"* ]]; then
+  ok "never-scheduled CronJob -> warn, not fail"
+else
+  bad "never-scheduled case did not report as expected: $out"
+fi
+
+# 4e. kubectl present, CronJob absent -> warn with the apply command.
+kubectl_stub 'exit 1'
+out="$(run_doctor)"
+if [[ "$out" == *"no cycle-runner CronJob in the cluster"* && "$out" == *"kubectl apply -f k3s/cycle-runner/"* ]]; then
+  ok "missing CronJob -> warn, with the apply command"
+else
+  bad "missing-CronJob case did not report as expected: $out"
+fi
+# Back to the default stub: every doctor run after this section would
+# otherwise find the machine's real kubectl again.
+default_kubectl
 
 # ---------------------------------------------- 5. cycle-runner plist check
 #

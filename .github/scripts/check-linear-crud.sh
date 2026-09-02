@@ -420,6 +420,69 @@ fi
 
 # ----------------------------------------------- 4-6. python unit tests
 
+note "3d. linear-gql.sh forces HTTP/1.1"
+
+# Not a style preference. curl 7.88 — debian bookworm, which the cycle-runner
+# image is built on — cannot complete an authenticated POST to
+# api.linear.app over HTTP/2:
+#
+#   curl: (92) HTTP/2 stream 1 was not closed cleanly: PROTOCOL_ERROR (err 1)
+#
+# Reproduced in-cluster, 3/3 retries, twice. It is not transient, so the retry
+# loop does not save it, and every Linear call the runner makes goes through
+# here — a tick cannot pick a ticket at all without it.
+#
+# It looks removable: an unauthenticated one-line query succeeds over h2, so
+# anyone "checking whether the flag is still needed" with a trivial curl
+# concludes it is not.
+GQL_REAL="$REPO/dot_claude/skills/linear-crud/scripts/executable_linear-gql.sh"
+if grep -qE 'curl .*--http1\.1' "$GQL_REAL"; then
+  ok "linear-gql.sh: curl forces --http1.1 (h2 PROTOCOL_ERROR on bookworm curl)"
+else
+  bad "linear-gql.sh no longer passes --http1.1 — every Linear call from the cycle-runner image fails with HTTP/2 PROTOCOL_ERROR"
+fi
+
+note "3e. linear-gql.sh strips whitespace from an env-supplied key"
+
+# A key ending in a newline terminates curl's header block early: the
+# Content-Type header never reaches Linear, which sees the default
+# x-www-form-urlencoded and rejects the call as possible CSRF. The mini never
+# hit it because ~/.zshenv reads the key as `$(<file)`, which strips; a k8s
+# `secretKeyRef` strips nothing, so the pod sent one and every tick failed.
+#
+# The symptom names neither the credential nor the newline — HTTP/2 reported
+# only PROTOCOL_ERROR, HTTP/1.1 a 400 about content-type — so this is checked
+# behaviourally, with a curl stub, rather than by grepping for a `tr`.
+GQL_BIN="$WORK/gqlbin"; mkdir -p "$GQL_BIN"
+cat >"$GQL_BIN/curl" <<'CURLSTUB'
+#!/usr/bin/env bash
+# Each argument is DELIMITED, not just newline-separated. One-per-line hides
+# the very thing under test: a value ending in \n simply becomes an extra
+# blank line, and `grep -x 'Authorization: KEY'` still matches. Wrapping in
+# <> means a dirty value breaks the closing delimiter onto the next line and
+# the exact-match fails, which is the whole point.
+for a in "$@"; do printf '<%s>\n' "$a"; done >"$CURL_ARGS"
+# -o FILE and -w '%{http_code}': behave like a 200 with an empty body.
+while [ $# -gt 0 ]; do
+  case "$1" in -o) printf '{"data":{}}' >"$2"; shift 2 ;; *) shift ;; esac
+done
+printf '200'
+CURLSTUB
+chmod +x "$GQL_BIN/curl"
+
+CURL_ARGS="$WORK/curl.args"; export CURL_ARGS
+dirty_key="lin_api_notarealkey"
+if PATH="$GQL_BIN:$PATH" LINEAR_API_KEY="$dirty_key
+" bash "$GQL_REAL" '{ viewer { id } }' >/dev/null 2>&1; then
+  if grep -qxF "<Authorization: $dirty_key>" "$CURL_ARGS"; then
+    ok "linear-gql.sh: a newline-terminated \$LINEAR_API_KEY reaches curl as a clean header"
+  else
+    bad "linear-gql.sh passed a whitespace-dirty key straight to curl — the newline terminates the header block and Content-Type is lost"
+  fi
+else
+  bad "linear-gql.sh did not complete against the curl stub"
+fi
+
 note "4-6. python unittest in $tests_dir"
 if (cd "$tests_dir" && SKILLS_DIR="$SKILLS" PYTHONDONTWRITEBYTECODE=1 \
       python3 -m unittest discover -s . -p 'test_*.py' -v >"$WORK/py.out" 2>&1); then

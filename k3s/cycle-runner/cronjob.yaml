@@ -1,0 +1,173 @@
+# The cycle-runner tick, every 30 minutes (SB-976).
+#
+# This replaces launchd on the mini, and with it four hand-rolled mechanisms:
+#
+#   concurrencyPolicy: Forbid   the mkdir/pid/staleness lock, removed in run.sh
+#   activeDeadlineSeconds       SB-965 — an unbounded `claude -p` held the lock
+#                               10.5h and killed the loop overnight
+#   startingDeadlineSeconds     launchd catch-up, which fired a 21:40 run that
+#                               was still holding the lock at 08:05
+#   secretKeyRef / a Secret     files a human provisioned on one machine
+#
+# What it does NOT buy is availability. The cluster is rancher-desktop on Lima
+# — a VM on the same Mac. Mac down, k3s down. Same blast radius as launchd.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cycle-runner
+  namespace: cycle-runner
+spec:
+  schedule: "*/30 * * * *"
+  timeZone: America/New_York
+
+  # THE reason this migration is worth doing. run.sh's lock is deleted in the
+  # same change; two mechanisms that can disagree is the shape behind SB-949
+  # and SB-952, and reproducing it here would be the whole point missed.
+  concurrencyPolicy: Forbid
+
+  # A tick that could not start within 5 minutes of its slot is skipped, not
+  # queued. Under launchd a missed window came back hours later and collided
+  # with a live run; here the next `*/30` is only half an hour away.
+  startingDeadlineSeconds: 300
+
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+  jobTemplate:
+    spec:
+      # No retry. A tick is not idempotent — it may already have opened a gate,
+      # posted to Telegram or pushed a branch — so re-running a failed one
+      # duplicates side effects. The next `*/30` is the retry.
+      backoffLimit: 0
+
+      # 25 minutes, inside the 30-minute schedule so a killed run cannot still
+      # be holding the slot when the next one is due. SB-965's 10.5h stall is
+      # the failure this number exists for: the pod is killed and the Job is
+      # marked failed, which is visible, rather than silently wedged.
+      activeDeadlineSeconds: 1500
+
+      template:
+        spec:
+          restartPolicy: Never
+
+          initContainers:
+            # The skills are NOT baked into the image: the image is the
+            # toolchain and moves weekly (SB-978), the skills move several
+            # times a day and are what the runner delivers. Cloning at tick
+            # time means a tick runs the merged code.
+            - name: bootstrap
+              image: ghcr.io/silverbeer/cycle-runner:latest
+              imagePullPolicy: Always
+              command:
+                - bash
+                - -eu
+                - -o
+                - pipefail
+                - -c
+                - |
+                  git clone --quiet --depth 1 --branch "${DOTFILES_REF}" \
+                    "${DOTFILES_REPO}" /tmp/dotfiles
+                  DOTFILES_SRC=/tmp/dotfiles exec bash /tmp/dotfiles/k3s/cycle-runner/bootstrap.sh
+              env:
+                - name: HOME
+                  value: /data/home
+                - name: DOTFILES_REPO
+                  value: https://github.com/silverbeer/dotfiles
+                - name: DOTFILES_REF
+                  value: main
+                - name: GH_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: cycle-runner
+                      key: gh-token
+              volumeMounts:
+                - name: home
+                  mountPath: /data
+
+          containers:
+            - name: tick
+              image: ghcr.io/silverbeer/cycle-runner:latest
+              imagePullPolicy: Always
+              command:
+                - bash
+                - /data/home/.claude/skills/cycle-runner/scripts/run.sh
+              env:
+                # $HOME is the volume. run.sh derives three paths from it and
+                # linear-crud derives a fourth, and all four have to persist:
+                #   .local/state/cycle-runner/  gates, run logs, worktrees
+                #   gitrepos/<repo>/            primary clones
+                #   .claude/                    skills, refreshed each tick
+                #   .gitconfig                  identity + gh credential helper
+                - name: HOME
+                  value: /data/home
+
+                # env.sh in BOTH cycle-runner and gatekeeper reads
+                # $CYCLE_RUNNER_SECRETS_DIR, defaulting to $HOME/.config/
+                # cycle-runner. Pointing it at the Secret mount is the entire
+                # code change needed for credentials — SB-974 had already moved
+                # them from `op` to files, for reasons that had nothing to do
+                # with k8s and turned out to make this free.
+                - name: CYCLE_RUNNER_SECRETS_DIR
+                  value: /secrets
+
+                # These two are read from the environment, not from files:
+                # ~/.zshenv exported them on the mini, and there is no zsh here.
+                - name: LINEAR_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: cycle-runner
+                      key: linear-api-key
+                - name: GH_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: cycle-runner
+                      key: gh-token
+              volumeMounts:
+                - name: home
+                  mountPath: /data
+                - name: secrets
+                  mountPath: /secrets
+                  readOnly: true
+              resources:
+                requests:
+                  # 50m, not a realistic figure — a scheduling formality.
+                  #
+                  # The node is 2 vCPU (rancher-desktop on Lima) with 1900m
+                  # already requested by missing-table, match-scraper, trd and
+                  # kube-system. A 200m request simply does not fit: measured,
+                  # `0/1 nodes are available: 1 Insufficient cpu`, and the pod
+                  # sat Pending forever.
+                  #
+                  # Requests are a scheduling floor, not a cap, and there is no
+                  # CPU limit below — so the tick still bursts to whatever is
+                  # actually free. What this does mean is that the runner
+                  # genuinely contends with everything else on a 2-vCPU box.
+                  # Giving the VM more cores is the real fix; that is a
+                  # Rancher Desktop setting and a VM restart, not a manifest.
+                  cpu: 50m
+                  memory: 1Gi
+                limits:
+                  # No CPU limit: a throttled `claude -p` burns the
+                  # activeDeadlineSeconds budget doing nothing. Memory is
+                  # capped because a leak should kill the pod, not the node.
+                  memory: 4Gi
+
+          volumes:
+            - name: home
+              persistentVolumeClaim:
+                claimName: cycle-runner-home
+            - name: secrets
+              secret:
+                secretName: cycle-runner
+                defaultMode: 0400
+                # Only the three env.sh reads as FILES. gh-token and
+                # linear-api-key are injected as environment variables above;
+                # exposing them here as well would widen the surface for no
+                # reason.
+                items:
+                  - key: claude-token
+                    path: claude-token
+                  - key: telegram-token
+                    path: telegram-token
+                  - key: telegram-chat-id
+                    path: telegram-chat-id
