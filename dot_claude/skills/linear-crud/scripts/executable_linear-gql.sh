@@ -52,7 +52,23 @@ esac
 delay=1
 curl_err=""
 for attempt in $(seq 1 "$max_attempts"); do
-  status="$(curl -sS https://api.linear.app/graphql \
+  # --http1.1 is NOT a preference. curl 7.88 (debian bookworm, which is what
+  # the cycle-runner image is built on) cannot complete an authenticated POST
+  # to api.linear.app over HTTP/2: every attempt dies with
+  #
+  #   curl: (92) HTTP/2 stream 1 was not closed cleanly: PROTOCOL_ERROR (err 1)
+  #
+  # Reproduced in-cluster, 3/3 retries, twice; the same request with --http1.1
+  # gets a real response. Retrying does not help because it is not transient.
+  #
+  # An unauthenticated one-line query DOES succeed over h2, which is why this
+  # was invisible until a pod ran a real query — worth knowing before anyone
+  # "verifies" it with a trivial curl and concludes the flag is unnecessary.
+  #
+  # HTTP/2 buys nothing here: one small request, no multiplexing, no server
+  # push. So this is forced everywhere rather than gated on the environment —
+  # a flag that only applies in the pod is a difference nobody would remember.
+  status="$(curl -sS --http1.1 https://api.linear.app/graphql \
     --connect-timeout 10 --max-time 60 \
     -H "Authorization: $KEY" \
     -H "Content-Type: application/json" \

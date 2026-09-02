@@ -420,6 +420,28 @@ fi
 
 # ----------------------------------------------- 4-6. python unit tests
 
+note "3d. linear-gql.sh forces HTTP/1.1"
+
+# Not a style preference. curl 7.88 — debian bookworm, which the cycle-runner
+# image is built on — cannot complete an authenticated POST to
+# api.linear.app over HTTP/2:
+#
+#   curl: (92) HTTP/2 stream 1 was not closed cleanly: PROTOCOL_ERROR (err 1)
+#
+# Reproduced in-cluster, 3/3 retries, twice. It is not transient, so the retry
+# loop does not save it, and every Linear call the runner makes goes through
+# here — a tick cannot pick a ticket at all without it.
+#
+# It looks removable: an unauthenticated one-line query succeeds over h2, so
+# anyone "checking whether the flag is still needed" with a trivial curl
+# concludes it is not.
+GQL_REAL="$REPO/dot_claude/skills/linear-crud/scripts/executable_linear-gql.sh"
+if grep -qE 'curl .*--http1\.1' "$GQL_REAL"; then
+  ok "linear-gql.sh: curl forces --http1.1 (h2 PROTOCOL_ERROR on bookworm curl)"
+else
+  bad "linear-gql.sh no longer passes --http1.1 — every Linear call from the cycle-runner image fails with HTTP/2 PROTOCOL_ERROR"
+fi
+
 note "4-6. python unittest in $tests_dir"
 if (cd "$tests_dir" && SKILLS_DIR="$SKILLS" PYTHONDONTWRITEBYTECODE=1 \
       python3 -m unittest discover -s . -p 'test_*.py' -v >"$WORK/py.out" 2>&1); then

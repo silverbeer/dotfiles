@@ -130,7 +130,21 @@ spec:
                   readOnly: true
               resources:
                 requests:
-                  cpu: 200m
+                  # 50m, not a realistic figure — a scheduling formality.
+                  #
+                  # The node is 2 vCPU (rancher-desktop on Lima) with 1900m
+                  # already requested by missing-table, match-scraper, trd and
+                  # kube-system. A 200m request simply does not fit: measured,
+                  # `0/1 nodes are available: 1 Insufficient cpu`, and the pod
+                  # sat Pending forever.
+                  #
+                  # Requests are a scheduling floor, not a cap, and there is no
+                  # CPU limit below — so the tick still bursts to whatever is
+                  # actually free. What this does mean is that the runner
+                  # genuinely contends with everything else on a 2-vCPU box.
+                  # Giving the VM more cores is the real fix; that is a
+                  # Rancher Desktop setting and a VM restart, not a manifest.
+                  cpu: 50m
                   memory: 1Gi
                 limits:
                   # No CPU limit: a throttled `claude -p` burns the
