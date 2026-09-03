@@ -25,6 +25,9 @@ class FakeTransport:
         self.entities: list[list[dict] | None] = []
         # Same, for disable_notification (SB-985).
         self.silent: list[bool] = []
+        # editMessageText calls, and a way to make them fail (SB-988).
+        self.edited: list[tuple[str, int, str, dict | None]] = []
+        self.fail_edit: Exception | None = None
         # Same, for answerCallbackQuery: a callback id expires ~1 min after the
         # tap and this poller runs on a 30-min tick, so in production the answer
         # nearly always fails. SB-950 — that failure used to destroy the
@@ -47,6 +50,13 @@ class FakeTransport:
         self.entities.append(entities)
         self.silent.append(silent)
         return {"message_id": len(self.sent)}
+
+    def edit_message_text(
+        self, chat_id: str, message_id: int, text: str, reply_markup: dict | None = None
+    ) -> None:
+        if self.fail_edit is not None:
+            raise self.fail_edit
+        self.edited.append((chat_id, message_id, text, reply_markup))
 
     def get_updates(self, offset: int, timeout: int, allowed_updates: list[str]) -> list[dict[str, Any]]:
         self.offsets.append(offset)

@@ -56,6 +56,10 @@ class Transport(Protocol):
         silent: bool = False,
     ) -> dict: ...
 
+    def edit_message_text(
+        self, chat_id: str, message_id: int, text: str, reply_markup: dict | None = None
+    ) -> None: ...
+
     def get_updates(self, offset: int, timeout: int, allowed_updates: list[str]) -> list[dict[str, Any]]: ...
 
     def answer_callback_query(self, callback_query_id: str, text: str = "") -> None: ...
@@ -121,6 +125,33 @@ class TelegramTransport:
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         return self._call("sendMessage", payload, timeout=15) or {}
+
+    def edit_message_text(
+        self, chat_id: str, message_id: int, text: str, reply_markup: dict | None = None
+    ) -> None:
+        """Rewrite a message already sent — used to close a resolved gate's DM.
+
+        `tg_message_id` was recorded on every gate from the start and read by
+        nothing, so a decided gate kept its Approve / Reject / Note buttons
+        for ever and a reader could not tell a live gate from a dead one
+        (SB-988). Passing `reply_markup={"inline_keyboard": []}` is how the Bot
+        API removes a keyboard; omitting the field leaves the old one in place,
+        which is the opposite of the intent here.
+
+        Entities are recomputed over the new text, so the ticket link in a
+        closed message stays clickable (SB-982).
+        """
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        entities = url_entities(text)
+        if entities:
+            payload["entities"] = entities
+        payload["reply_markup"] = reply_markup if reply_markup is not None else {"inline_keyboard": []}
+        self._call("editMessageText", payload, timeout=15)
 
     def get_updates(self, offset: int, timeout: int, allowed_updates: list[str]) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {"timeout": timeout, "allowed_updates": allowed_updates}
