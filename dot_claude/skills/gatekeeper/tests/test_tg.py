@@ -43,6 +43,38 @@ class ChunksTests(unittest.TestCase):
         self.assertEqual("".join(parts), text)
 
 
+class SilentPayloadTests(unittest.TestCase):
+    """SB-985. `disable_notification` delivers the message without a sound —
+    it does not suppress it. Asserting its ABSENCE by default matters as much
+    as its presence: a stray default would silence real gates."""
+
+    def test_silent_sets_disable_notification(self):
+        transport = FakeTransport()
+        tg.send_text(transport, "42", "body", None, silent=True)
+        self.assertEqual(transport.silent, [True])
+
+    def test_not_silent_leaves_it_off(self):
+        transport = FakeTransport()
+        tg.send_text(transport, "42", "body")
+        self.assertEqual(transport.silent, [False])
+
+    def test_the_payload_carries_the_flag_only_when_silent(self):
+        """Against the real transport's payload builder, not the fake."""
+        captured = {}
+
+        def fake_call(method, payload, timeout=15):
+            captured.update(payload)
+            return {"message_id": 1}
+
+        t = tg.TelegramTransport(FAKE_TOKEN)
+        with mock.patch.object(t, "_call", fake_call):
+            t.send_message("42", "body", None, None, True)
+            self.assertTrue(captured["disable_notification"])
+            captured.clear()
+            t.send_message("42", "body")
+            self.assertNotIn("disable_notification", captured)
+
+
 class LinkKeyboardTests(unittest.TestCase):
     """Entities make a URL clickable; a URL button makes it tappable. Different
     guarantee: the button carries its target in the markup, so no offset, no

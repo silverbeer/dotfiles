@@ -26,6 +26,7 @@ import json
 import os
 import secrets
 import sys
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -311,6 +312,43 @@ def superseded_gates() -> list[dict]:
 REMINDER_AFTER_HOURS = 12.0
 REMINDER_EVERY_HOURS = 24.0
 
+# Quiet hours (SB-985).
+#
+# REMINDER_AFTER_HOURS is a debounce, not a curfew: it fires 12 hours after a
+# gate opens, whenever that lands. SB-870's gate opened at 16:03 and reminded
+# at 04:30. And because REMINDER_EVERY_HOURS is exactly 24, a reminder that
+# first fires at 04:30 fires at 04:30 every day for the life of the gate — the
+# design does not occasionally wake the user, it settles on the hour that woke
+# them. Raising REMINDER_AFTER_HOURS only changes which gates land badly.
+#
+# start == end disables the window. The offline suite sets that, so no test
+# depends on when it happens to run.
+QUIET_START_HOUR = int(os.environ.get("GATEKEEPER_QUIET_START", "21"))
+QUIET_END_HOUR = int(os.environ.get("GATEKEEPER_QUIET_END", "8"))
+QUIET_TZ = os.environ.get("GATEKEEPER_QUIET_TZ", "America/New_York")
+
+
+def in_quiet_hours(when: datetime | None = None) -> bool:
+    """True inside the local overnight window.
+
+    The window wraps midnight, so the comparison cannot be a single `start <=
+    h < end` — at 21:00–08:00 that is empty and would silently disable the
+    feature rather than fail.
+    """
+    if QUIET_START_HOUR == QUIET_END_HOUR:
+        return False
+    try:
+        local = (when or now_utc()).astimezone(ZoneInfo(QUIET_TZ))
+    except (ZoneInfoNotFoundError, ValueError):
+        # No tzdata is not a reason to start waking someone at 04:30, but it is
+        # also not a reason to go permanently silent. Say so, treat as awake.
+        print(f"gate: unknown timezone {QUIET_TZ!r} — quiet hours disabled", file=sys.stderr)
+        return False
+    h = local.hour
+    if QUIET_START_HOUR < QUIET_END_HOUR:
+        return QUIET_START_HOUR <= h < QUIET_END_HOUR
+    return h >= QUIET_START_HOUR or h < QUIET_END_HOUR
+
 
 def issue_url(ticket: str) -> str:
     """The ticket's own URL. A reminder that names a ticket must link to THAT
@@ -323,6 +361,13 @@ def _due_for_reminder(gate: dict) -> bool:
     """True at most once every REMINDER_EVERY_HOURS, and never before the gate
     has been parked REMINDER_AFTER_HOURS. Stamps the gate when it returns True,
     so a caller cannot accidentally re-notify."""
+    # Inside quiet hours: not due, and NOT stamped (SB-985). Returning False
+    # after stamping would drop the reminder for a full 24 hours — worse than
+    # the 04:30 ping it is meant to prevent. Leaving the stamp alone means the
+    # first tick after the window opens sends it, which is the "flush in the
+    # morning" behaviour with no queue and nothing durable to lose.
+    if in_quiet_hours():
+        return False
     opened = datetime.fromisoformat(gate["opened_at"])
     if (now_utc() - opened).total_seconds() / 3600 < REMINDER_AFTER_HOURS:
         return False
@@ -389,7 +434,13 @@ class Gatekeeper:
             else approve_keyboard(gate_id, issue["url"], pr_link)
         )
         try:
-            sent = send_text(self.transport, self.chat_id, text, keyboard)
+            # Silent inside quiet hours, not held. `open_gate` records
+            # `tg_message_id` from this send and edits that message when the
+            # gate resolves; a held DM has no id, so queueing would degrade
+            # into the existing "DM failed" path — no buttons overnight and
+            # gate state disagreeing with the chat. Silent delivery keeps the
+            # buttons, the id and the edit intact (SB-985).
+            sent = send_text(self.transport, self.chat_id, text, keyboard, silent=in_quiet_hours())
             gate["tg_message_id"] = sent.get("message_id")
             save_gate(gate)
         except Exception as e:
@@ -699,6 +750,9 @@ def cmd_poll(args: argparse.Namespace) -> int:
                     for g in resolved
                 ],
                 "awaiting": len(awaiting_gates()),
+                # So run.sh can send its own summary silently in the window
+                # without reimplementing the clock (SB-985).
+                "quiet": in_quiet_hours(),
                 # Named, not just counted (SB-949): an idle tick sends no
                 # Telegram summary, so a parked ticket is invisible — "you are
                 # the bottleneck" looks exactly like "nothing to do".

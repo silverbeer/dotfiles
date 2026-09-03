@@ -11,12 +11,22 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import timedelta
+from unittest import mock
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# The quiet-hours window defaults to 21:00-08:00 local (SB-985), so an
+# unpinned suite would behave differently depending on when it runs — gates
+# opened during the evening would send silently and reminders would not fire
+# at all. start == end disables the window; the tests that exercise quiet
+# hours set the constants explicitly instead.
+os.environ.setdefault("GATEKEEPER_QUIET_START", "0")
+os.environ.setdefault("GATEKEEPER_QUIET_END", "0")
 
 import gate  # noqa: E402
 from fakes import FakeLinear, FakeTransport  # noqa: E402
@@ -530,6 +540,92 @@ class ResolveTests(GateTestCase):
         self.assertEqual(g["status"], "approved")
         self.assertTrue(any("approved via cli" in t for t in self.transport.texts))
         self.assertTrue(any("approved via cli" in c["body"] for c in self.linear.comments))
+
+
+class QuietHoursTests(unittest.TestCase):
+    """SB-985. REMINDER_AFTER_HOURS is a debounce, not a curfew: it fires 12h
+    after a gate opens, whenever that lands. SB-870's gate opened 16:03 and
+    reminded at 04:30 — and because REMINDER_EVERY_HOURS is exactly 24, it
+    would have gone on reminding at 04:30 every day."""
+
+    def setUp(self):
+        self._saved = (gate.QUIET_START_HOUR, gate.QUIET_END_HOUR, gate.QUIET_TZ)
+        gate.QUIET_START_HOUR, gate.QUIET_END_HOUR = 21, 8
+        gate.QUIET_TZ = "America/New_York"
+
+    def tearDown(self):
+        gate.QUIET_START_HOUR, gate.QUIET_END_HOUR, gate.QUIET_TZ = self._saved
+
+    def at(self, hour):
+        return datetime(2026, 9, 3, hour, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    def test_window_wraps_midnight(self):
+        """The trap. A single `start <= h < end` is EMPTY for 21..8, so the
+        feature would silently do nothing rather than fail."""
+        for hour in (21, 23, 0, 2, 7):
+            self.assertTrue(gate.in_quiet_hours(self.at(hour)), f"{hour}:00 should be quiet")
+        for hour in (8, 9, 12, 20):
+            self.assertFalse(gate.in_quiet_hours(self.at(hour)), f"{hour}:00 should not be quiet")
+
+    def test_start_equal_to_end_disables_the_window(self):
+        gate.QUIET_START_HOUR = gate.QUIET_END_HOUR = 0
+        self.assertFalse(gate.in_quiet_hours(self.at(3)))
+
+    def test_an_unknown_timezone_does_not_silence_everything(self):
+        """No tzdata is not a reason to start waking someone at 04:30, but it
+        is also not a reason to go permanently silent."""
+        gate.QUIET_TZ = "Mars/Olympus_Mons"
+        self.assertFalse(gate.in_quiet_hours(self.at(3)))
+
+
+class QuietReminderTests(GateTestCase):
+    def setUp(self):
+        super().setUp()
+        self._saved = (gate.QUIET_START_HOUR, gate.QUIET_END_HOUR)
+        gate.QUIET_START_HOUR, gate.QUIET_END_HOUR = 21, 8
+
+    def tearDown(self):
+        gate.QUIET_START_HOUR, gate.QUIET_END_HOUR = self._saved
+
+    def _old_gate(self):
+        g = self.open_gate()
+        g = gate.load_gate(g["gate_id"]) if hasattr(gate, "load_gate") else g
+        g["opened_at"] = (gate.now_utc() - timedelta(hours=30)).isoformat()
+        gate.save_gate(g)
+        return g
+
+    def test_a_reminder_due_in_the_window_does_not_fire_and_does_not_stamp(self):
+        """Suppressing while still stamping would drop the reminder for a full
+        24 hours — worse than the 04:30 ping it is meant to prevent."""
+        g = self._old_gate()
+        with mock.patch.object(gate, "in_quiet_hours", return_value=True):
+            self.assertFalse(gate._due_for_reminder(g))
+        self.assertIsNone(g.get("reminded_at"), "the gate was stamped despite not notifying")
+
+    def test_the_same_reminder_fires_once_the_window_closes(self):
+        g = self._old_gate()
+        with mock.patch.object(gate, "in_quiet_hours", return_value=True):
+            gate._due_for_reminder(g)
+        with mock.patch.object(gate, "in_quiet_hours", return_value=False):
+            self.assertTrue(gate._due_for_reminder(g), "the held reminder never fired in the morning")
+        self.assertIsNotNone(g.get("reminded_at"))
+
+
+class SilentDeliveryTests(GateTestCase):
+    def test_a_gate_opened_in_the_window_is_delivered_silently(self):
+        """Silent, NOT held. open_gate records tg_message_id from this send and
+        edits that message when the gate resolves; a held DM has no id and
+        would degrade into the 'DM failed' path — no buttons overnight, and
+        gate state disagreeing with the chat."""
+        with mock.patch.object(gate, "in_quiet_hours", return_value=True):
+            g = self.open_gate()
+        self.assertTrue(self.transport.silent[-1])
+        self.assertIsNotNone(g.get("tg_message_id"), "a silent send still has to record its message id")
+
+    def test_a_gate_opened_outside_the_window_makes_a_sound(self):
+        with mock.patch.object(gate, "in_quiet_hours", return_value=False):
+            self.open_gate()
+        self.assertFalse(self.transport.silent[-1])
 
 
 if __name__ == "__main__":

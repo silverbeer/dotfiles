@@ -23,6 +23,8 @@ class FakeTransport:
         self.fail_send: Exception | None = None
         # One entry per send_message call, aligned with self.sent (SB-982).
         self.entities: list[list[dict] | None] = []
+        # Same, for disable_notification (SB-985).
+        self.silent: list[bool] = []
         # Same, for answerCallbackQuery: a callback id expires ~1 min after the
         # tap and this poller runs on a 30-min tick, so in production the answer
         # nearly always fails. SB-950 — that failure used to destroy the
@@ -30,14 +32,20 @@ class FakeTransport:
         self.fail_answer: Exception | None = None
 
     def send_message(
-        self, chat_id: str, text: str, reply_markup: dict | None = None, entities: list[dict] | None = None
+        self,
+        chat_id: str,
+        text: str,
+        reply_markup: dict | None = None,
+        entities: list[dict] | None = None,
+        silent: bool = False,
     ) -> dict:
         if self.fail_send is not None:
             raise self.fail_send
         self.sent.append((chat_id, text, reply_markup))
         # Recorded separately so the existing 3-tuple assertions keep working;
-        # SB-982's tests read this.
+        # SB-982 reads entities, SB-985 reads silent.
         self.entities.append(entities)
+        self.silent.append(silent)
         return {"message_id": len(self.sent)}
 
     def get_updates(self, offset: int, timeout: int, allowed_updates: list[str]) -> list[dict[str, Any]]:

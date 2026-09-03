@@ -120,7 +120,21 @@ resume_next_line() {  # STATUS DECISION
   esac
 }
 
+# Set by say(), never by remind(): "is there anything in this summary the
+# reader has not already been told?" A summary of nothing but reminders is
+# delivered silently at any hour (SB-985) — a reminder is by definition the
+# second, third or fourth time of telling.
+SUMMARY_HAS_NEWS=0
+
 say() {  # HEADLINE NEXT LINK
+  SUMMARY_HAS_NEWS=1
+  SUMMARY_LINES+=("$1
+$2
+$3
+")
+}
+
+remind() {  # HEADLINE NEXT LINK — same shape as say(), but not news
   SUMMARY_LINES+=("$1
 $2
 $3
@@ -327,7 +341,7 @@ scan_log_clean() {
 }
 
 post_telegram_summary() {
-  local gatekeeper_scripts="$1" text="$2"
+  local gatekeeper_scripts="$1" text="$2" silent="${3:-0}"
   # An idle tick has nothing to say, so it says nothing (SB-945).
   if [[ -z "${text//[[:space:]]/}" ]]; then
     note "nothing happened this tick — no Telegram summary sent"
@@ -339,8 +353,9 @@ post_telegram_summary() {
   fi
   # tg.py's TelegramTransport + send_text, imported and called directly — no
   # second implementation of the Bot API call.
+  [[ "$silent" == "1" ]] && note "summary sent silently (quiet hours, or nothing but reminders)"
   GATEKEEPER_TG_TOKEN="$GATEKEEPER_TG_TOKEN" GATEKEEPER_TG_CHAT_ID="$GATEKEEPER_TG_CHAT_ID" \
-    python3 - "$gatekeeper_scripts" "$text" <<'PY'
+    python3 - "$gatekeeper_scripts" "$text" "$silent" <<'PY'
 import os
 import sys
 
@@ -352,6 +367,7 @@ try:
         TelegramTransport(os.environ["GATEKEEPER_TG_TOKEN"]),
         os.environ["GATEKEEPER_TG_CHAT_ID"],
         sys.argv[2],
+        silent=sys.argv[3] == "1",
     )
 except TelegramError as e:
     print(f"cycle-runner: telegram summary post failed: {e}", file=sys.stderr)
@@ -437,7 +453,7 @@ if [[ "$acted" -eq 0 ]]; then
     # channel exists to remove.
     while IFS=$'\t' read -r p_ticket p_kind p_hours p_url; do
       [[ -z "$p_ticket" ]] && continue
-      say "$p_ticket is waiting on you — $(ticket_title "$p_ticket")" \
+      remind "$p_ticket is waiting on you — $(ticket_title "$p_ticket")" \
           "Its $p_kind gate has been open $p_hours hours. Reply \`approve\` on the ticket, or tap the buttons." \
           "$p_url"
     done < <(jq -r '.parked[]? | select(.notify) | [.ticket, .kind, (.hours|floor), .url] | @tsv' <<<"$RESOLVED_JSON" 2>/dev/null || true)
@@ -474,7 +490,16 @@ scan_rc=0
 scan_log_clean "$LOG_FILE" "$RUN_LOG_DIR/$INVOCATION_ID.gitleaks.out" || scan_rc=$?
 case "$scan_rc" in
   0)
-    post_telegram_summary "$GATEKEEPER_SCRIPTS" "$summary"
+    # Silent when the window is closed, or when the only thing to report is a
+    # reminder (SB-985). `quiet` comes from gate.py so the clock lives in one
+    # place; a missing field reads as false, which errs towards making a sound
+    # rather than towards silence.
+    quiet="$(jq -r '.quiet // false' <<<"$RESOLVED_JSON" 2>/dev/null || echo false)"
+    silent=0
+    if [[ "$quiet" == "true" || "$SUMMARY_HAS_NEWS" -eq 0 ]]; then
+      silent=1
+    fi
+    post_telegram_summary "$GATEKEEPER_SCRIPTS" "$summary" "$silent"
     ;;
   2)
     note "run-log scan could not run — NOT posting to Telegram; log kept at $LOG_FILE for a human to review"
