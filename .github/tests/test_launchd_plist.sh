@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# check-launchd-plist.sh — offline tests for the cycle-runner launchd agent
-# template (SB-930). The positive case proves the check passes on the
-# current tree; each negative breaks ONE thing in a copy of the tree and
-# asserts the check fails naming it.
+# check-launchd-plist.sh — offline tests for the triage launchd agent template
+# (SB-930, repointed by SB-979 when the cycle-runner plist was deleted). The
+# positive case proves the check passes on the current tree; each negative
+# breaks ONE thing in a copy of the tree and asserts the check fails naming it.
+#
+# Triage is the only launchd agent left. SB-987 decides whether it stays one.
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=harness.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/harness.sh"
 
-TMPL=Library/LaunchAgents/io.silverbeer.cycle-runner.plist.tmpl
+TMPL=Library/LaunchAgents/io.silverbeer.triage.plist.tmpl
 
 # sed -i differs between BSD and GNU; write to a sibling and move.
 edit() { sed "$1" "$2" >"$2.new" && mv "$2.new" "$2"; }

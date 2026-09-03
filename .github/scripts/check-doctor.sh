@@ -506,66 +506,51 @@ default_kubectl
 # test bug, not a silent no-op.
 loud_default claude
 
-# ---------------------------------------------- 5. cycle-runner plist check
+# ------------------------------- 5. the cutover check, inverted (SB-979)
 #
-# ON THE MINI ONLY. Guards the hostname-drift scenario: an OS reinstall or
-# rename that stops chezmoi from ever deploying the plist again, while every
-# other check stays green.
+# The cycle-runner is a k3s CronJob and its plist is deleted. A LOADED agent is
+# now a failure: run.sh's own lock was removed in SB-976 on the strength of
+# `concurrencyPolicy: Forbid`, which governs only the CronJob's own jobs — so
+# two schedulers would race for the same tickets, gates and merge queue with
+# nothing at all stopping them.
+#
+# That is exactly what a stale `chezmoi update` on a second Mac used to
+# produce, which is why this is checked on every host rather than the mini.
 
-run_doctor_with_plist() {  # PRESENT(0/1) [env assignments...]
-  local present="$1"; shift
-  local h
-  h="$(mktemp -d "$WORK/home.XXXXXX")"
-  if [ "$present" -eq 1 ]; then
-    mkdir -p "$h/Library/LaunchAgents"
-    : >"$h/Library/LaunchAgents/io.silverbeer.cycle-runner.plist"
-  fi
-  HOME="$h" LINEAR_KEY_FILE="$h/no-such-key" "$@" bash "$DOCTOR" 2>&1 || true
-}
-
-out="$(run_doctor_with_plist 0)"
-if [[ "$out" == *"cycle-runner plist missing at"* ]]; then
-  ok "on-mini + plist absent -> fail, names the missing path"
-else
-  bad "plist-missing case did not report as expected: $out"
-fi
-
-default_launchctl  # not loaded, by default
-out="$(run_doctor_with_plist 1)"
-if [[ "$out" == *"cycle-runner plist present at"* && "$out" == *"cycle-runner plist not loaded in launchctl"* ]]; then
-  ok "on-mini + plist present, not loaded -> ok (present) + warn (not loaded), not fail"
-else
-  bad "plist-present-not-loaded case did not report as expected: $out"
-fi
-
+# 5a. loaded -> FAIL, and say what to run.
 stub launchctl <<'STUB'
 #!/usr/bin/env bash
-if [[ "$1 $2" == "list io.silverbeer.cycle-runner" ]]; then
-  exit 0
-fi
+[[ "$1 $2" == "list io.silverbeer.cycle-runner" ]] && exit 0
 echo "check-doctor: unexpected launchctl call: $*" >&2
 exit 97
 STUB
-out="$(run_doctor_with_plist 1)"
-if [[ "$out" == *"cycle-runner plist present at"* && "$out" == *"cycle-runner plist loaded in launchctl"* ]]; then
-  ok "on-mini + plist present, loaded -> ok, ok"
+out="$(run_doctor)"
+if [[ "$out" == *"launchd agent is LOADED"* && "$out" == *"launchctl unload -w"* ]]; then
+  ok "a loaded cycle-runner agent -> fail, with the unload command"
 else
-  bad "plist-present-loaded case did not report as expected: $out"
+  bad "loaded-agent case did not report as expected: $out"
 fi
-default_launchctl
 
-loud_default launchctl  # off-mini must never even query launchd
-out="$(run_doctor_with_plist 1 env DOCTOR_TEST_HOSTNAME="$OTHER_HOST")"
-if [[ "$out" == *"not the cycle-runner host, skipping cycle-runner plist deployment check"* ]]; then
-  ok "off-mini -> skips the plist check with an info line, not warn/fail"
-else
-  bad "off-mini plist case did not skip as expected: $out"
-fi
-if [[ "$out" == *"unexpected launchctl call"* ]]; then
-  bad "off-mini plist case queried launchctl anyway"
-fi
+# 5b. not loaded, no file -> the healthy post-cutover state.
 default_launchctl
-default_chezmoi
+out="$(run_doctor)"
+if [[ "$out" == *"no cycle-runner launchd agent"* ]]; then
+  ok "no agent and no plist -> ok, the CronJob is the only scheduler"
+else
+  bad "clean-cutover case did not report as expected: $out"
+fi
+
+# 5c. not loaded but the file is still on disk -> warn, not fail. Harmless
+# today; a loaded gun for whoever runs `launchctl load` without reading.
+plist_home="$(mktemp -d "$WORK/home.XXXXXX")"
+mkdir -p "$plist_home/Library/LaunchAgents"
+: >"$plist_home/Library/LaunchAgents/io.silverbeer.cycle-runner.plist"
+out="$(HOME="$plist_home" LINEAR_KEY_FILE="$plist_home/no-such-key" bash "$DOCTOR" 2>&1 || true)"
+if [[ "$out" == *"leftover cycle-runner plist"* ]]; then
+  ok "an unloaded leftover plist -> warn, with the rm"
+else
+  bad "leftover-plist case did not report as expected: $out"
+fi
 
 # ------------------------------------------------------- 6. chezmoi status
 

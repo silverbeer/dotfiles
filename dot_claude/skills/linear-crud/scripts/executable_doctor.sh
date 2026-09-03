@@ -221,23 +221,23 @@ else
   warnf "gh auth status failed" "$(printf '%s' "$gh_auth_out" | head -1) — run: gh auth login"
 fi
 
-# The self-check for the plist itself, ON THE MINI ONLY: guards the exact
-# hostname-drift scenario (OS reinstall/rename) that would otherwise leave
-# every other check green while cycle-runner silently never fires again.
-if [ "$on_mini" -eq 1 ]; then
-  PLIST_FILE="$HOME/Library/LaunchAgents/io.silverbeer.cycle-runner.plist"
-  if [ ! -f "$PLIST_FILE" ]; then
-    failf "cycle-runner plist missing at $PLIST_FILE" "run: chezmoi apply — this host reports as $CYCLE_RUNNER_HOST but never got the plist"
-  else
-    ok "cycle-runner plist present at $PLIST_FILE"
-    if launchctl list io.silverbeer.cycle-runner >/dev/null 2>&1; then
-      ok "cycle-runner plist loaded in launchctl"
-    else
-      warnf "cycle-runner plist not loaded in launchctl" "run: launchctl load -w $PLIST_FILE (one-time manual step)"
-    fi
-  fi
+# The cutover check, inverted (SB-979). The cycle-runner is a k3s CronJob; its
+# plist is deleted. A plist that is still PRESENT is now the fault, and a
+# LOADED one is worse — two schedulers with no shared lock, racing for the same
+# tickets, gates and merge queue, because run.sh's own lock was removed in
+# SB-976 on the strength of `concurrencyPolicy: Forbid`.
+#
+# This is the state a stale `chezmoi update` on another Mac produces, so it is
+# checked on every host, not just the mini.
+PLIST_FILE="$HOME/Library/LaunchAgents/io.silverbeer.cycle-runner.plist"
+if launchctl list io.silverbeer.cycle-runner >/dev/null 2>&1; then
+  failf "the cycle-runner launchd agent is LOADED — it and the k3s CronJob would both tick" \
+    "run: launchctl unload -w $PLIST_FILE  (the hand-rolled lock is gone; nothing else stops them colliding)"
+elif [ -f "$PLIST_FILE" ]; then
+  warnf "a leftover cycle-runner plist is on disk at $PLIST_FILE" \
+    "unloaded, so harmless today — remove it: rm $PLIST_FILE"
 else
-  infof "not the cycle-runner host, skipping cycle-runner plist deployment check"
+  ok "no cycle-runner launchd agent — the k3s CronJob is the only scheduler"
 fi
 
 # GK_SCRIPTS (skill presence) is checked BEFORE the token: with the skill
