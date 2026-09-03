@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Offline tests for Library/LaunchAgents/io.silverbeer.cycle-runner.plist.tmpl
-# (SB-930): it must render a valid plist ONLY when `.chezmoi.hostname` is the
-# mac mini's short hostname, and render to nothing at all — no file, not an
-# empty one — everywhere else.
+# Offline tests for Library/LaunchAgents/io.silverbeer.triage.plist.tmpl
+# (SB-930, repointed by SB-979): it must render a valid plist ONLY when
+# `.chezmoi.hostname` is the mac mini's short hostname, and render to nothing
+# at all — no file, not an empty one — everywhere else.
+#
+# This checked the cycle-runner plist until SB-979 deleted it — the runner is a
+# k3s CronJob now. The check was repointed rather than removed: triage is still
+# a launchd agent (SB-987 decides where it belongs), and the hostname gate is
+# the only thing keeping a mini-only plist off every other machine. Deleting
+# the check with the plist it happened to name would have left the remaining
+# one unguarded.
 #
 # `.chezmoi.hostname` cannot be faked with the HOSTNAME environment variable
 # (measured: chezmoi calls the OS hostname syscall directly, HOSTNAME=x in the
@@ -19,7 +26,7 @@ set -euo pipefail
 
 command -v jq >/dev/null 2>&1 || die "jq is not installed"
 
-TMPL="$REPO/Library/LaunchAgents/io.silverbeer.cycle-runner.plist.tmpl"
+TMPL="$REPO/Library/LaunchAgents/io.silverbeer.triage.plist.tmpl"
 [ -f "$TMPL" ] || die "missing $TMPL — wrong REPO?"
 
 MINI_HOST="Toms-Mac-mini"
@@ -76,9 +83,14 @@ fi
 # deferred this job for 11h and 16h on two consecutive nights while the machine
 # was awake. Reverting to StartInterval silently restores that, so guard both
 # the presence of the calendar entries and the absence of the interval key.
-for want in 'io.silverbeer.cycle-runner' '<key>StartCalendarInterval</key>' \
-            '<integer>0</integer>' '<integer>30</integer>' '<false/>' \
-            '.local/state/cycle-runner'; do
+# Weekday 1 / Hour 9 / Minute 0 — Monday 09:00. launchd treats Weekday 0 and 7
+# as Sunday, so 1 is Monday; asserting the integer keeps a "fix" to 0 from
+# quietly moving the run to Sunday.
+for want in 'io.silverbeer.triage' '<key>StartCalendarInterval</key>' \
+            '<key>Weekday</key>' '<integer>1</integer>' \
+            '<key>Hour</key>' '<integer>9</integer>' \
+            '<key>Minute</key>' '<integer>0</integer>' '<false/>' \
+            'triage-run.sh' '.local/state/cycle-runner'; do
   grep -qF -- "$want" "$mini_out" || { err "mini-hostname render is missing '$want'"; rc=1; }
 done
 
@@ -115,7 +127,7 @@ if ! cm_host "$OTHER_HOST" apply --dry-run -v >"$WORK/apply-other.log" 2>&1; the
   sed -n '1,40p' "$WORK/apply-other.log" >&2
   rc=1
 fi
-if [ -e "$WORK/dest-$OTHER_HOST/Library/LaunchAgents/io.silverbeer.cycle-runner.plist" ]; then
+if [ -e "$WORK/dest-$OTHER_HOST/Library/LaunchAgents/io.silverbeer.triage.plist" ]; then
   err "hostname=$OTHER_HOST: the plist exists on disk after apply --dry-run — it must not"
   rc=1
 else
@@ -128,7 +140,7 @@ if ! cm_host "$MINI_HOST" apply --dry-run -v >"$WORK/apply-mini.log" 2>&1; then
   sed -n '1,40p' "$WORK/apply-mini.log" >&2
   rc=1
 fi
-if ! grep -q 'Library/LaunchAgents/io.silverbeer.cycle-runner.plist' "$WORK/apply-mini.log"; then
+if ! grep -q 'Library/LaunchAgents/io.silverbeer.triage.plist' "$WORK/apply-mini.log"; then
   err "hostname=$MINI_HOST: apply --dry-run's diff never mentions the plist"
   sed -n '1,40p' "$WORK/apply-mini.log" >&2
   rc=1

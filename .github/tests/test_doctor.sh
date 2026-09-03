@@ -35,10 +35,9 @@ test_the_check_passes_on_the_current_tree() {
   assert_out 'ok   same claude in image and machine -> ok, no drift'
   assert_out 'ok   different claude in image and machine -> warn, names both versions'
   assert_out 'ok   :latest image -> warn, no version to compare'
-  assert_out 'ok   on-mini + plist absent -> fail'
-  assert_out 'ok   on-mini + plist present, not loaded -> ok (present) + warn'
-  assert_out 'ok   on-mini + plist present, loaded -> ok, ok'
-  assert_out 'ok   off-mini -> skips the plist check'
+  assert_out 'ok   a loaded cycle-runner agent -> fail, with the unload command'
+  assert_out 'ok   no agent and no plist -> ok, the CronJob is the only scheduler'
+  assert_out 'ok   an unloaded leftover plist -> warn, with the rm'
   assert_out 'ok   chezmoi status clean'
   assert_out "ok   chezmoi status dirty -> fail, names the PR #37/#35 incident"
   assert_out 'ok   chezmoi status itself errors'
@@ -172,6 +171,22 @@ test_claude_drift_that_stops_warning_is_rejected() {
   export REPO="$src"
   assert_fail check-doctor.sh
   assert_out 'drift case did not report as expected'
+}
+
+# NEGATIVE: the inverted cutover check stops failing on a loaded agent
+# (SB-979). This is the one that matters. run.sh's hand-rolled lock was removed
+# in SB-976 on the strength of `concurrencyPolicy: Forbid`, which governs only
+# the CronJob's own jobs — so a launchd agent ticking alongside it races for the
+# same tickets, gates and merge queue with nothing stopping them. Downgrading
+# this to a warning, or dropping the branch, must not be quiet.
+test_a_loaded_launchd_agent_that_stops_failing_is_rejected() {
+  need_bin bash python3
+  src="$(copy_source)"
+  edit 's|if launchctl list io.silverbeer.cycle-runner >/dev/null 2>&1; then|if false; then|' "$src/$DOCTOR"
+  grep -q 'if false; then' "$src/$DOCTOR" || fail "fixture did not defeat the loaded-agent branch"
+  export REPO="$src"
+  assert_fail check-doctor.sh
+  assert_out 'loaded-agent case did not report as expected'
 }
 
 run_tests

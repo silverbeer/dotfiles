@@ -39,7 +39,7 @@ All code is already written by Claude, but the *process* is human-driven: every 
 |---|---|
 | Target | Full cycle orchestrator |
 | HITL channel | **Dual**: Telegram = notification + quick tap (own bot token); Linear comment (phone app) = equally valid decision + richer discussion. Poller watches both; first decision wins, echoed to the other channel. Which one gets used more is itself a signal — measure it |
-| Runtime | Mac mini, launchd, `claude -p` |
+| Runtime | k3s CronJob on the mini (rancher-desktop/Lima), `claude -p` — launchd until SB-976 |
 | Auto scope | `driven:agent-auto` only if estimate ≤2 **and** `adhoc`/`chore`; else agent-supervised with plan gate |
 | Merge | CI green required; human taps "merge" in Telegram initially |
 | Quality gate | `silverbeer/ci-workflows` reusable workflows: lint+typecheck, tests+coverage floor, gitleaks, AI review (blocking on confirmed correctness bugs) |
@@ -130,3 +130,4 @@ Modify: `linear.sh`, `executable_linear-gql.sh`, `executable_board.py`, `set-dri
 - 2026-08-30 — Phase 1 (gatekeeper) complete: SB-508 merged (dual-channel Telegram+Linear gates, 35 tests). SB-927 closed as superseded — fully covered by SB-508's suite.
 - 2026-08-30 — Phase 2 (headless loop) complete: SB-928 (`/work-headless`), SB-929 (`cycle-runner` pick+run+merge), SB-930 (launchd + doctor, mini = `Toms-Mac-mini`) all merged. SB-941 (doctor.sh `stat` portability, same bug class SB-929 hit in CI) filed.
 - **Next: first real run on the mini.** Human steps outstanding: confirm pilot repos (SB-508 checklist); on the mini, `chezmoi update` → `bash ~/.claude/skills/linear-crud/scripts/doctor.sh` → `launchctl load` the plist.
+- 2026-09-02/03 — Phase 3: the runner moved to k3s. SB-975 (image, pinned toolchain + a build-time `claude` CLI contract), SB-976 (CronJob, Secret, PVC; the hand-rolled lock deleted in favour of `concurrencyPolicy: Forbid`), SB-978 (weekly refresh behind a green suite and a PR; the CronJob pins `:claude-<version>`), SB-979 (launchd deleted). **SB-870 was the first ticket taken from pick to merged PR entirely in-cluster.** Deploying found four defects nothing else would have: SB-980 (the runner died silently for 3 ticks because SB-974's provisioning step was never run, and the reporting credentials were in the same missing set), a curl HTTP/2 `PROTOCOL_ERROR` caused by a trailing newline in the Linear API key that `$(<file)` had always stripped, SB-982 (Telegram links unclickable on macOS — no `entities` were sent at all), and SB-985 (`REMINDER_AFTER_HOURS` is a debounce, not a curfew, and `REMINDER_EVERY_HOURS = 24` locks a reminder onto whatever hour it first fired).
