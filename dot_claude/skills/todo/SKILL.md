@@ -24,7 +24,7 @@ text goes to stderr).
 install from the repo:
 
 ```bash
-uv tool install --editable /Users/tomdrake/gitrepos/todo
+uv tool install --editable ~/gitrepos/todo
 ```
 
 (Per-machine: data does NOT sync across machines — each Mac has its own DB.)
