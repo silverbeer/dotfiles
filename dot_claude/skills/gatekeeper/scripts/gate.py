@@ -434,12 +434,17 @@ class Gatekeeper:
             else approve_keyboard(gate_id, issue["url"], pr_link)
         )
         try:
-            # Silent inside quiet hours, not held. `open_gate` records
-            # `tg_message_id` from this send and edits that message when the
-            # gate resolves; a held DM has no id, so queueing would degrade
-            # into the existing "DM failed" path — no buttons overnight and
-            # gate state disagreeing with the chat. Silent delivery keeps the
-            # buttons, the id and the edit intact (SB-985).
+            # Silent inside quiet hours, not held (SB-985). A held DM has no
+            # message_id and no buttons until it is flushed, so queueing would
+            # degrade into the existing "DM failed" path for the whole night.
+            # Silent delivery keeps the buttons and the id.
+            #
+            # An earlier version of this comment said the id is used to edit
+            # the message when the gate resolves. It is not: `tg_message_id` is
+            # recorded here and read nowhere, and the transport has no
+            # editMessageText at all — which is why a resolved gate keeps its
+            # Approve buttons forever (SB-988). The conclusion above still
+            # holds; the reason given for it did not.
             sent = send_text(self.transport, self.chat_id, text, keyboard, silent=in_quiet_hours())
             gate["tg_message_id"] = sent.get("message_id")
             save_gate(gate)
@@ -484,6 +489,45 @@ class Gatekeeper:
         if note:
             gate["note"] = f"{gate['note']}\n{note}" if gate.get("note") else note
         save_gate(gate)
+        self.close_gate_dm(gate, f"{icon} {status} via {source}")
+
+    def close_gate_dm(self, gate: dict, outcome: str) -> None:
+        """Strike the gate's Telegram message and take its buttons away.
+
+        Every path out of `awaiting` calls this — button, Linear comment,
+        timeout, supersede. The button path was the only one that gave any
+        feedback at all, and even that was a toast from
+        `answerCallbackQuery`, which SB-950 records as nearly always expired
+        by the time a 30-minute poller answers it. So a decided gate looked
+        exactly like a live one, and the reader's only reliable answer to "is
+        anything waiting on me" was to go and read Linear — the friction this
+        channel exists to remove (SB-988).
+
+        Failure here is swallowed on purpose. The gate is already decided and
+        saved by the time we arrive; losing the cosmetic edit must never undo
+        a real decision or send `poll` round again. A missing
+        `tg_message_id` is normal — `open_gate` warns and carries on when the
+        DM fails while the Linear comment and label succeed.
+        """
+        message_id = gate.get("tg_message_id")
+        if not message_id:
+            return
+        ticket_url = issue_url(gate["ticket"])
+        note = f" — {gate['note']}" if gate.get("note") else ""
+        text = (
+            f"[{gate['kind']}] {gate['ticket']} — {outcome}{note}\n\n"
+            f"Closed, nothing to do. Ticket: {ticket_url}"
+        )
+        try:
+            self.transport.edit_message_text(
+                self.chat_id, int(message_id), text, links_keyboard(ticket_url)
+            )
+        except Exception as e:  # noqa: BLE001 — cosmetic; never fails a decision
+            print(
+                f"warn: gate.py: could not close the Telegram message for {gate['gate_id']} "
+                f"({gate['ticket']}): {e} — the gate is resolved regardless",
+                file=sys.stderr,
+            )
 
     def mark_needs_human(self, gate: dict, hours: float) -> None:
         gate["status"] = "needs-human"
@@ -497,6 +541,9 @@ class Gatekeeper:
             f"🛑 stuck: [{gate['kind']}] {gate['ticket']} gate {gate['gate_id']} unanswered for {hours:.0f}h — "
             f"resolve with `gate.py resolve {gate['gate_id']} approve|reject --source cli`",
         )
+        # The buttons go even though nobody answered: they no longer work, and
+        # leaving them invites a tap that silently does nothing.
+        self.close_gate_dm(gate, f"🛑 needs a human — unanswered for {hours:.0f}h")
 
     # ----------------------------------------------------------- telegram
 
@@ -644,6 +691,12 @@ class Gatekeeper:
                 f"gate: {gate['gate_id']} ({gate['ticket']}, {gate['kind']}) superseded — {gate['note']}",
                 file=sys.stderr,
             )
+            # `superseded_gates()` is module-level and has no transport, so the
+            # DM is closed here. This is the path that leaves the worst mess:
+            # the ticket finished without anyone answering the gate — a manual
+            # merge, typically — so Telegram was never told anything at all and
+            # the buttons sat there looking live (SB-988).
+            self.close_gate_dm(gate, "superseded — the ticket finished without this gate")
         timeout_hours = float(os.environ.get("GATE_TIMEOUT_HOURS", DEFAULT_TIMEOUT_HOURS))
         cutoff = now_utc() - timedelta(hours=timeout_hours)
         timed_out = set()

@@ -542,6 +542,71 @@ class ResolveTests(GateTestCase):
         self.assertTrue(any("approved via cli" in c["body"] for c in self.linear.comments))
 
 
+class CloseGateDmTests(GateTestCase):
+    """SB-988. `tg_message_id` was recorded on every gate from the start and
+    read by nothing, so a decided gate kept its Approve / Reject / Note
+    buttons for ever. A reader scrolling the chat could not tell a live gate
+    from a dead one — which is how "is anything waiting on me?" became
+    unanswerable from Telegram."""
+
+    def _buttons(self, markup):
+        return [b for row in (markup or {}).get("inline_keyboard", []) for b in row]
+
+    def test_a_decided_gate_loses_its_verb_buttons(self):
+        g = self.open_gate()
+        self.callback(g, "approve", cq_id="cb1")
+        self.assertTrue(self.transport.edited, "the gate DM was never edited")
+        _, msg_id, text, markup = self.transport.edited[-1]
+        self.assertEqual(msg_id, g["tg_message_id"])
+        self.assertIn("approved", text)
+        self.assertEqual([b for b in self._buttons(markup) if "callback_data" in b], [])
+
+    def test_the_closed_message_keeps_a_link_to_the_ticket(self):
+        """Closed is not the same as useless — the message stays the record of
+        what happened, so it keeps a way back to the ticket."""
+        g = self.open_gate()
+        self.callback(g, "approve", cq_id="cb1")
+        _, _, text, markup = self.transport.edited[-1]
+        self.assertIn(g["ticket"], text)
+        self.assertEqual([b["text"] for b in self._buttons(markup)], ["🎫 Ticket"])
+
+    def test_a_gate_resolved_in_linear_also_closes_the_dm(self):
+        """The path with no Telegram feedback at all before this. A button tap
+        at least produced a toast; answering in Linear produced nothing."""
+        g = self.open_gate()
+        self.linear.add_comment("approve")
+        self.gk.check_linear(gate.load_gate(g["gate_id"]))
+        self.assertTrue(self.transport.edited, "a Linear-resolved gate left its DM untouched")
+
+    def test_a_superseded_gate_closes_its_dm(self):
+        """The worst case, and the one actually hit on SB-870: the ticket was
+        merged by hand, so the gate was never answered and Telegram was never
+        told anything. Its buttons sat there looking live."""
+        self.open_gate()
+        self.linear.state_type = "completed"
+        self.gk.poll_once(0)
+        self.assertTrue(self.transport.edited, "a superseded gate left its DM untouched")
+        _, _, text, markup = self.transport.edited[-1]
+        self.assertIn("superseded", text)
+        self.assertEqual([b for b in self._buttons(markup) if "callback_data" in b], [])
+
+    def test_a_gate_whose_dm_never_sent_resolves_without_an_edit(self):
+        """`open_gate` warns and carries on when Telegram is unreachable but
+        the Linear comment and label land, so a gate with no message id is a
+        normal state, not an error."""
+        g = self.open_gate()
+        g["tg_message_id"] = None
+        gate.save_gate(g)
+        self.gk.close_gate_dm(g, "approved")
+        self.assertEqual(self.transport.edited, [])
+
+    def test_a_failed_edit_never_undoes_the_decision(self):
+        """The gate is already decided and saved by the time the edit runs.
+        Losing a cosmetic rewrite must not send `poll` round again."""
+        g = self.open_gate()
+        self.transport.fail_edit = RuntimeError("telegram is down")
+        self.gk.close_gate_dm(g, "approved")  # must not raise
+
 class QuietHoursTests(unittest.TestCase):
     """SB-985. REMINDER_AFTER_HOURS is a debounce, not a curfew: it fires 12h
     after a gate opens, whenever that lands. SB-870's gate opened 16:03 and
@@ -589,7 +654,7 @@ class QuietReminderTests(GateTestCase):
 
     def _old_gate(self):
         g = self.open_gate()
-        g = gate.load_gate(g["gate_id"]) if hasattr(gate, "load_gate") else g
+        g = gate.load_gate(g["gate_id"])
         g["opened_at"] = (gate.now_utc() - timedelta(hours=30)).isoformat()
         gate.save_gate(g)
         return g
