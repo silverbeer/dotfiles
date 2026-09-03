@@ -51,7 +51,8 @@ All code is already written by Claude, but the *process* is human-driven: every 
 
 1. **Linear layer** (hardened `linear-crud`) — GraphQL-only, JSON-first, one `repos.json`, `pack` command, tests.
 2. **Gate layer** — `dot_claude/skills/gatekeeper/`: `tg.py` (send with inline keyboard, poll callback, stdlib urllib, patterned on trd `TelegramTransport`), `gate.py` (post Linear audit comment + label, send Telegram, wait or park). State: `~/.local/state/cycle-runner/gates/<gate_id>.json`.
-3. **Runner** — `dot_claude/skills/cycle-runner/scripts/run.sh`: lock, token, pick, `claude -p "/work-headless SB-N" --output-format json --json-schema … --max-turns N --permission-mode acceptEdits --allowedTools …`, resume on approval.
+3. **Runner** — `dot_claude/skills/cycle-runner/scripts/run.sh`: token, pick, `claude -p "/work-headless SB-N" --output-format json --json-schema … --permission-mode acceptEdits --allowedTools …`, resume on approval.
+   *(Corrected 2026-09-03: `--max-turns` was written into this plan and does not exist in any `claude` release. It was assumed once and failed a run; `k3s/cycle-runner/claude-cli-contract.sh` now asserts every flag this line does pass, at image build time. The lock is also gone — see Guard rails.)*
 4. **Headless commands** — `work-headless.md`, `cycle-plan.md`, `triage.md`.
 5. **Quality gate** — `silverbeer/ci-workflows`.
 
@@ -66,7 +67,7 @@ All code is already written by Claude, but the *process* is human-driven: every 
 - Bot token + allowlisted user id from `op://agents/cycle-runner-telegram/*`. Separate bot from trd.
 
 ### Guard rails
-- Lock `~/.local/state/cycle-runner/lock` (mkdir-atomic, pid check). One ticket per run, ≤1 per 30 min.
+- ~~Lock `~/.local/state/cycle-runner/lock` (mkdir-atomic, pid check).~~ **Deleted in SB-976.** Concurrency is `concurrencyPolicy: Forbid` on the k3s CronJob — the same guarantee enforced by the thing that decides when a tick starts, so it cannot be defeated by a crashed holder, a reused pid or a clock change. Keeping both would have been two mechanisms that can disagree about whether a run is in progress, which is the shape behind SB-949 and SB-952. `activeDeadlineSeconds: 1500` covers the other half the lock did badly (SB-965: an unbounded `claude -p` held it 10.5h). One ticket per run, ≤1 per 30 min, both unchanged.
 - Session id in gate state **and** Linear comment (survives both Macs).
 - Wrapper asserts branch contains `sb-<n>` before push; `--allowedTools` excludes `git push --force*`, `git merge*`, `gh pr merge*` (merge happens in runner, not in Claude).
 - Logs gitleaks-scanned before any comment/message. Telegram body never contains diff hunks with env values.
@@ -113,7 +114,7 @@ All code is already written by Claude, but the *process* is human-driven: every 
 - **T11 · SB-935 (3)** Repo `adk-spike`, no GCP. `LiteLlm("ollama_chat/<coder>")`, Gemini free tier behind flag. Build `triage_agent` (FunctionTool over `linear-gql.sh`, write tool `require_confirmation=True`), expose via `to_a2a()`, consume via `RemoteA2aAgent`, `adk eval` on 5 fixtures. Deliverable: comparison doc vs Claude Code path — HITL ergonomics (confirmation tool vs Telegram gate), testability, cost, auth, A2A interop (0.3 pin), fit for work targets (alert triage, deploy-to-lower-envs on Vertex Agent Engine), which home piece ports first.
 
 ## Files
-Create: `dot_claude/skills/gatekeeper/{SKILL.md,scripts/tg.py,gate.py,tests/}`, `dot_claude/skills/cycle-runner/{SKILL.md,scripts/run.sh,pick.py,plan.py,report.py}`, `dot_claude/skills/linear-crud/{REFERENCE.md,repos.json}`, `dot_claude/commands/{work-headless.md,cycle-plan.md,triage.md}`, `Library/LaunchAgents/io.silverbeer.cycle-runner.plist.tmpl`, `.github/scripts/{check-linear-crud.sh,check-cycle-runner-policy.sh}`, `.github/tests/{test_linear_crud.sh,test_cycle_runner.sh}`, repos `silverbeer/ci-workflows`, `adk-spike`.
+Create: `dot_claude/skills/gatekeeper/{SKILL.md,scripts/tg.py,gate.py,tests/}`, `dot_claude/skills/cycle-runner/{SKILL.md,scripts/run.sh,pick.py,plan.py,report.py}` — **`SKILL.md` (SB-990), `plan.py` (SB-933) and `report.py` (SB-934) were never written**; `triage-run.sh` and `triage.py` were added and are not in this list, `dot_claude/skills/linear-crud/{REFERENCE.md,repos.json}`, `dot_claude/commands/{work-headless.md,cycle-plan.md,triage.md}`, `Library/LaunchAgents/io.silverbeer.cycle-runner.plist.tmpl`, `.github/scripts/{check-linear-crud.sh,check-cycle-runner-policy.sh}`, `.github/tests/{test_linear_crud.sh,test_cycle_runner.sh}`, repos `silverbeer/ci-workflows`, `adk-spike`.
 Modify: `linear.sh`, `executable_linear-gql.sh`, `executable_board.py`, `set-driven.py`, `executable_metrics.sh`, `executable_doctor.sh`, `SKILL.md`, `.chezmoiignore`, `ci.yml`, `CLAUDE.md`, `work.md`, `ticket.md`, pilot repos' workflows.
 
 ## Risks
@@ -124,6 +125,66 @@ Modify: `linear.sh`, `executable_linear-gql.sh`, `executable_board.py`, `set-dri
 - AI-review false positives → required on Python pilots one cycle before dotfiles.
 - Label-group exclusivity → full-label rewrite (as `set-driven.py`).
 
+## Plan vs built — review 2026-09-03
+
+The goal at the top of this doc is an orchestrator that runs the whole weekly
+cycle: **triage → plan → build → PR → report**. Measured against that, not
+against the ticket list:
+
+| stage | ticket | state | reality |
+|---|---|---|---|
+| triage | SB-624 | Done | code exists and **has never executed once** — its plist was deployed but never loaded (SB-987) |
+| plan | SB-933 | Backlog | `plan.py` and `commands/cycle-plan.md` do not exist |
+| build | SB-929 | Done | runs in-cluster |
+| PR | SB-928 | Done | merge gate re-checks CI before merging |
+| report | SB-934 | Backlog | `report.py` does not exist |
+
+**Two of five stages run.** The *deliver* half is built and hardened; the
+*manage the cycle* half is not built at all.
+
+**And the deliver half is cycle-blind (SB-989).** `pick.py` queries every open
+`driven:*` issue and sorts by priority across the whole backlog — there is no
+cycle filter anywhere in it. It delivers *a* ticket, not *the cycle*. That is
+invisible today only because almost every ticket is `driven:human`, so the
+queue is one item long. `cycle-report.py` and `board.py` are cycle-aware; the
+script that decides what actually gets worked is not.
+
+### Phase status
+
+| phase | tickets | state |
+|---|---|---|
+| 0 · Linear hardening | SB-922–926 | complete |
+| 1 · Gatekeeper | SB-508 | complete (SB-927 superseded by its suite) |
+| 2 · Headless + runner | SB-928/929/930 | complete |
+| — · k3s migration *(not in the original plan)* | SB-966 tree: SB-975/976/978/979 | complete |
+| 3 · Quality gate repo | SB-931, SB-932 | **not started** |
+| 4 · Cycle planning, triage, reporting | SB-933, SB-934 | **not started**; SB-624 done but dead |
+| 5 · ADK + A2A spike | SB-935 | not started |
+
+### Risks from this doc that materialised
+
+- *"Headless picks up interactive hooks (RTK, caveman, statusline)"* — it did.
+  `doctor.sh`'s live `claude -p` on the mini answers as the caveman plugin
+  (SB-991). The pod is unaffected, but only because `bootstrap.sh` happens not
+  to copy `.claude/plugins` — a coincidence, not a decision.
+- *"Subscription rate limits / token expiry → doctor check, needs-human on auth
+  failure"* — the adjacent case bit instead: the runner died on a missing token
+  and could not report it, because the credentials needed to report were in the
+  same missing set (SB-980).
+- *"Phone approval of a plan you didn't read"* — worse than anticipated: the DM
+  was not actionable at all on Telegram Desktop for macOS, because no message
+  entities were ever sent (SB-982).
+
+### Also unbuilt or unconfirmed
+
+- **Pilot repos** are still marked "(assumed — confirm)". Never confirmed. Only
+  `dotfiles` has ever been exercised end to end.
+- **`cycle-runner/SKILL.md`** does not exist — the only skill in the tree
+  without one (SB-990).
+- **`/code-review` returns an empty body headless**, so every run currently
+  blocks at phase 6 waiting for a human (SB-983). Until that is fixed, more
+  cycle machinery only queues more runs that all stop in the same place.
+
 ## Status log
 - 2026-08-29 — plan approved; SB-921–935 filed, SB-508/624 repurposed; this doc committed (SB-921).
 - 2026-08-30 — Phase 0 (Linear hardening) complete: SB-922–926 merged. SB-937 (pagination) and SB-939 (chezmoi __pycache__) filed and merged along the way; SB-938 (branch-prefix experiment) closed.
@@ -131,3 +192,4 @@ Modify: `linear.sh`, `executable_linear-gql.sh`, `executable_board.py`, `set-dri
 - 2026-08-30 — Phase 2 (headless loop) complete: SB-928 (`/work-headless`), SB-929 (`cycle-runner` pick+run+merge), SB-930 (launchd + doctor, mini = `Toms-Mac-mini`) all merged. SB-941 (doctor.sh `stat` portability, same bug class SB-929 hit in CI) filed.
 - **Next: first real run on the mini.** Human steps outstanding: confirm pilot repos (SB-508 checklist); on the mini, `chezmoi update` → `bash ~/.claude/skills/linear-crud/scripts/doctor.sh` → `launchctl load` the plist.
 - 2026-09-02/03 — Phase 3: the runner moved to k3s. SB-975 (image, pinned toolchain + a build-time `claude` CLI contract), SB-976 (CronJob, Secret, PVC; the hand-rolled lock deleted in favour of `concurrencyPolicy: Forbid`), SB-978 (weekly refresh behind a green suite and a PR; the CronJob pins `:claude-<version>`), SB-979 (launchd deleted). **SB-870 was the first ticket taken from pick to merged PR entirely in-cluster.** Deploying found four defects nothing else would have: SB-980 (the runner died silently for 3 ticks because SB-974's provisioning step was never run, and the reporting credentials were in the same missing set), a curl HTTP/2 `PROTOCOL_ERROR` caused by a trailing newline in the Linear API key that `$(<file)` had always stripped, SB-982 (Telegram links unclickable on macOS — no `entities` were sent at all), and SB-985 (`REMINDER_AFTER_HOURS` is a debounce, not a curfew, and `REMINDER_EVERY_HOURS = 24` locks a reminder onto whatever hour it first fired).
+- 2026-09-03 — **Plan-vs-built review** (section above). Corrected three things this doc asserted that were never true or no longer are: `--max-turns` (never existed), the mkdir lock (deleted in SB-976), and the Files list (`SKILL.md`, `plan.py`, `report.py` never written). Filed SB-989 (pick.py is cycle-blind), SB-990 (no cycle-runner SKILL.md), SB-991 (interactive plugins leak into headless `claude -p` — a risk this doc predicted).
