@@ -334,6 +334,53 @@ else
   bad "summary: an idle tick still tried to post: $idle_out"
 fi
 
+# SB-985: a summary of nothing but reminders is delivered silently at any
+# hour. A reminder is by definition the second or third time of telling, so it
+# never earns a sound — and the reminder that woke the user on SB-870 arrived
+# at 04:30 because REMINDER_EVERY_HOURS=24 locks a reminder onto whatever hour
+# it first fired.
+#
+# say() sets SUMMARY_HAS_NEWS, remind() deliberately does not. Getting that
+# backwards would either silence real events or start pinging for reminders,
+# and neither shows up as an error.
+news_out="$(run_sourced '
+  say "Started SB-1" "next" "link"
+  echo "HAS_NEWS=$SUMMARY_HAS_NEWS"
+')"
+if grep -q 'HAS_NEWS=1' <<<"$news_out"; then
+  ok "summary: say() marks the tick as news, so a real event still pings"
+else
+  bad "summary: say() did not set SUMMARY_HAS_NEWS: $news_out"
+fi
+
+remind_out="$(run_sourced '
+  remind "SB-1 is waiting on you" "next" "link"
+  echo "HAS_NEWS=$SUMMARY_HAS_NEWS"
+  echo "LINES=${#SUMMARY_LINES[@]}"
+')"
+if grep -q 'HAS_NEWS=0' <<<"$remind_out" && grep -q 'LINES=1' <<<"$remind_out"; then
+  ok "summary: remind() is reported but never counts as news (delivered silently)"
+else
+  bad "summary: remind() did not behave as expected: $remind_out"
+fi
+
+# post_telegram_summary's third argument is what carries that decision through
+# to disable_notification.
+#
+# `|| true` is load-bearing: the send itself fails here (the scripts dir is
+# deliberately bogus, so tg.py cannot be imported), and under `set -e` a
+# failing command substitution in an assignment aborts the whole check —
+# silently, part-way through, with every later test simply not running.
+silent_out="$(run_sourced '
+  GATEKEEPER_TG_TOKEN="t"; GATEKEEPER_TG_CHAT_ID="1"
+  post_telegram_summary "/nonexistent" "something" 1
+' 2>&1 || true)"
+if grep -q 'sent silently' <<<"$silent_out"; then
+  ok "summary: silent=1 is honoured and said out loud in the run log"
+else
+  bad "summary: silent=1 was not honoured: $silent_out"
+fi
+
 # The plist runs this with /bin/bash, which is 3.2 on macOS. `declare -A` and
 # other bash-4 constructs parse fine under the CI runner'"'"'s bash 5 and then
 # fail on every tick on the only machine this is deployed to.

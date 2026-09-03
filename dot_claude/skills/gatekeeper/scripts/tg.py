@@ -48,7 +48,12 @@ class Transport(Protocol):
     """The four Bot API calls the gatekeeper needs. Tests hand in a fake."""
 
     def send_message(
-        self, chat_id: str, text: str, reply_markup: dict | None = None, entities: list[dict] | None = None
+        self,
+        chat_id: str,
+        text: str,
+        reply_markup: dict | None = None,
+        entities: list[dict] | None = None,
+        silent: bool = False,
     ) -> dict: ...
 
     def get_updates(self, offset: int, timeout: int, allowed_updates: list[str]) -> list[dict[str, Any]]: ...
@@ -87,7 +92,12 @@ class TelegramTransport:
         return body.get("result")
 
     def send_message(
-        self, chat_id: str, text: str, reply_markup: dict | None = None, entities: list[dict] | None = None
+        self,
+        chat_id: str,
+        text: str,
+        reply_markup: dict | None = None,
+        entities: list[dict] | None = None,
+        silent: bool = False,
     ) -> dict:
         # Still no parse_mode: plan bodies carry `_`, `*` and `[` freely, and
         # legacy Markdown rejects the whole message on one unmatched character.
@@ -101,6 +111,11 @@ class TelegramTransport:
         # Telegram Desktop on macOS does not, so the one action a gate DM
         # exists to prompt could not be taken from the desktop it was read on.
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+        # Delivered, but with no sound or vibration (SB-985). Used inside quiet
+        # hours, and for every reminder at any hour — a reminder is by
+        # definition not new information, so it never earns a notification.
+        if silent:
+            payload["disable_notification"] = True
         if entities:
             payload["entities"] = entities
         if reply_markup is not None:
@@ -182,7 +197,9 @@ def chunks(text: str) -> list[str]:
     return parts or [""]
 
 
-def send_text(transport: Transport, chat_id: str, text: str, reply_markup: dict | None = None) -> dict:
+def send_text(
+    transport: Transport, chat_id: str, text: str, reply_markup: dict | None = None, silent: bool = False
+) -> dict:
     """Send `text` in as many messages as it takes; the keyboard rides on the
     last one so the buttons sit under the end of the proposal. Returns the last
     sendMessage result (its message_id is what the gate state records).
@@ -195,7 +212,7 @@ def send_text(transport: Transport, chat_id: str, text: str, reply_markup: dict 
     result: dict = {}
     for i, part in enumerate(parts):
         markup = reply_markup if i == len(parts) - 1 else None
-        result = transport.send_message(chat_id, part, markup, url_entities(part))
+        result = transport.send_message(chat_id, part, markup, url_entities(part), silent)
     return result
 
 

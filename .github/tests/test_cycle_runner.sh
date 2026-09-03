@@ -22,6 +22,9 @@ test_the_check_passes_on_the_current_tree() {
   assert_ok check-cycle-runner-policy.sh
   assert_out 'ok   python: Ran '
   assert_out 'ok   no hand-rolled lock in run.sh'
+  assert_out 'ok   summary: say() marks the tick as news'
+  assert_out 'ok   summary: remind() is reported but never counts as news'
+  assert_out 'ok   summary: silent=1 is honoured'
   assert_out 'ok   ci_state: gh reports success -> success'
   assert_out 'ok   ci_state: gh reports pending -> pending'
   assert_out 'ok   ci_state: gh reports failure -> failure'
@@ -109,6 +112,22 @@ test_broken_ci_recheck_guard_fails_the_stale_approval_scenario() {
   export REPO="$src"
   assert_fail check-cycle-runner-policy.sh
   assert_out 'a stale approval with red CI was merged anyway'
+}
+
+# NEGATIVE: remind() starts counting as news (SB-985). The split between say()
+# and remind() is what decides whether a tick makes a sound, and getting it
+# backwards fails in the quietest possible way — either real events go silent,
+# or the reader is pinged for the third telling of something they already know.
+# Neither raises an error; both just erode trust in the channel, which is what
+# SB-945 was about.
+test_remind_that_counts_as_news_is_rejected() {
+  need_bin python3 bash
+  src="$(copy_source)"
+  edit 's/^remind() {  # HEADLINE NEXT LINK.*/remind() {\n  SUMMARY_HAS_NEWS=1/' "$src/$RUN_SH"
+  grep -q 'remind() {' "$src/$RUN_SH" || fail "fixture did not rewrite remind()"
+  export REPO="$src"
+  assert_fail check-cycle-runner-policy.sh
+  assert_out 'remind() did not behave as expected'
 }
 
 run_tests
