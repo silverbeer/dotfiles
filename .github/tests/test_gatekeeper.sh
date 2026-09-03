@@ -70,7 +70,7 @@ test_test_count_below_the_floor_fails() {
   rm -f "$src"/dot_claude/skills/gatekeeper/tests/test_gate.py
   export REPO="$src"
   assert_fail check-gatekeeper.sh
-  assert_out 'expected at least 25 tests to run'
+  assert_out 'expected at least 60 tests to run'
 }
 
 # NEGATIVE: the marker helper in fakes.py stops matching FakeLinear's

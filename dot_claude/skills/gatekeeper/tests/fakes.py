@@ -21,16 +21,23 @@ class FakeTransport:
         # Set to an Exception instance to make every send_message raise it —
         # simulates a Telegram-side failure (SB-508).
         self.fail_send: Exception | None = None
+        # One entry per send_message call, aligned with self.sent (SB-982).
+        self.entities: list[list[dict] | None] = []
         # Same, for answerCallbackQuery: a callback id expires ~1 min after the
         # tap and this poller runs on a 30-min tick, so in production the answer
         # nearly always fails. SB-950 — that failure used to destroy the
         # decision, so it needs to be reachable from a test.
         self.fail_answer: Exception | None = None
 
-    def send_message(self, chat_id: str, text: str, reply_markup: dict | None = None) -> dict:
+    def send_message(
+        self, chat_id: str, text: str, reply_markup: dict | None = None, entities: list[dict] | None = None
+    ) -> dict:
         if self.fail_send is not None:
             raise self.fail_send
         self.sent.append((chat_id, text, reply_markup))
+        # Recorded separately so the existing 3-tuple assertions keep working;
+        # SB-982's tests read this.
+        self.entities.append(entities)
         return {"message_id": len(self.sent)}
 
     def get_updates(self, offset: int, timeout: int, allowed_updates: list[str]) -> list[dict[str, Any]]:

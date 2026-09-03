@@ -43,6 +43,46 @@ class ChunksTests(unittest.TestCase):
         self.assertEqual("".join(parts), text)
 
 
+class LinkKeyboardTests(unittest.TestCase):
+    """Entities make a URL clickable; a URL button makes it tappable. Different
+    guarantee: the button carries its target in the markup, so no offset, no
+    chunk boundary and no client-side detection can break it (SB-982)."""
+
+    TICKET = "https://linear.app/silverbeer/issue/SB-870"
+    PR = "https://github.com/silverbeer/dotfiles/pull/1"
+
+    def test_approve_keyboard_keeps_the_verbs_and_adds_links(self):
+        kb = tg.approve_keyboard("abcd1234", self.TICKET, self.PR)
+        verbs, links = kb["inline_keyboard"]
+        self.assertEqual([b["callback_data"] for b in verbs],
+                         ["abcd1234:approve", "abcd1234:reject", "abcd1234:note"])
+        self.assertEqual([b["url"] for b in links], [self.TICKET, self.PR])
+
+    def test_no_pr_no_pr_button(self):
+        kb = tg.approve_keyboard("abcd1234", self.TICKET)
+        _, links = kb["inline_keyboard"]
+        self.assertEqual([b["text"] for b in links], ["🎫 Ticket"])
+
+    def test_a_pr_equal_to_the_ticket_is_not_repeated(self):
+        kb = tg.approve_keyboard("abcd1234", self.TICKET, self.TICKET)
+        _, links = kb["inline_keyboard"]
+        self.assertEqual(len(links), 1)
+
+    def test_no_urls_leaves_the_verb_keyboard_unchanged(self):
+        kb = tg.approve_keyboard("abcd1234")
+        self.assertEqual(len(kb["inline_keyboard"]), 1)
+
+    def test_links_keyboard_has_no_callback_buttons(self):
+        """`blocked` gates use this. Offering Approve there would be a lie —
+        nothing is being asked — but pointing at the ticket is the whole ask."""
+        kb = tg.links_keyboard(self.TICKET)
+        buttons = [b for row in kb["inline_keyboard"] for b in row]
+        self.assertEqual([b for b in buttons if "callback_data" in b], [])
+
+    def test_links_keyboard_with_nothing_to_link_is_none(self):
+        self.assertIsNone(tg.links_keyboard("", ""))
+
+
 class SendTextTests(unittest.TestCase):
     def test_short_message_is_one_send_with_the_keyboard(self):
         transport = FakeTransport()
@@ -65,6 +105,80 @@ class SendTextTests(unittest.TestCase):
         self.assertIsNone(first_markup)
         self.assertEqual(last_markup, kb)
         self.assertEqual("".join(t for _, t, _ in transport.sent), body)
+
+
+class UrlEntitiesTests(unittest.TestCase):
+    """SB-982. Without entities a message carries no link information and each
+    client guesses: the phones and the App Store macOS build auto-detect URLs,
+    Telegram Desktop on macOS does not — so a gate DM read there could not be
+    acted on, which is the only thing a gate DM is for."""
+
+    TICKET = "https://linear.app/silverbeer/issue/SB-870"
+
+    def test_finds_a_bare_url(self):
+        text = f"Ticket: {self.TICKET}"
+        self.assertEqual(
+            tg.url_entities(text),
+            [{"type": "url", "offset": 8, "length": len(self.TICKET)}],
+        )
+
+    def test_offsets_are_utf16_not_python_characters(self):
+        """The trap. An emoji is ONE Python character but TWO UTF-16 units, and
+        Telegram counts the latter. Computed with len() the entity starts one
+        unit early and the link covers 'https://example.com/' plus a stray
+        character short of the end — a silently wrong link, not an error.
+
+        Gate bodies routinely contain emoji, so this is the normal case."""
+        url = "https://example.com/x"
+        text = f"\U0001f3ab see {url}"
+        (ent,) = tg.url_entities(text)
+        self.assertEqual(ent["offset"], 7)
+        self.assertNotEqual(ent["offset"], text.index(url))  # len() would say 6
+        self.assertEqual(ent["length"], len(url))
+
+    def test_trailing_punctuation_is_not_part_of_the_link(self):
+        (ent,) = tg.url_entities("see https://example.com/x, then stop")
+        self.assertEqual(ent["length"], len("https://example.com/x"))
+
+    def test_several_urls_each_get_an_entity(self):
+        text = f"Ticket: {self.TICKET}\nPR:     https://github.com/o/r/pull/1"
+        self.assertEqual(len(tg.url_entities(text)), 2)
+
+    def test_no_url_no_entities(self):
+        self.assertEqual(tg.url_entities("nothing to see"), [])
+
+
+class EntitiesOnSendTests(unittest.TestCase):
+    def test_send_text_attaches_entities_per_chunk(self):
+        """Offsets are relative to the message they ride on, so they must be
+        computed per chunk — the same link sits at a different offset in chunk
+        2 than it did in the full text."""
+        transport = FakeTransport()
+        url = "https://example.com/x"
+        body = ("filler line\n" * 400) + f"Ticket: {url}"
+        tg.send_text(transport, "42", body)
+        self.assertGreater(len(transport.sent), 1)
+        last_text = transport.sent[-1][1]
+        (ent,) = transport.entities[-1]
+        self.assertEqual(
+            last_text[ent["offset"] : ent["offset"] + ent["length"]],
+            url,
+            "the entity does not cover the URL in the chunk it was sent with",
+        )
+
+    def test_a_url_is_never_split_across_chunks(self):
+        """A hard slice at MAX_MESSAGE can cut a URL in half, leaving each half
+        marked as a `url` entity over text that is not a URL. These messages
+        are line-oriented, so chunks() breaks at a newline instead."""
+        url = "https://example.com/" + ("z" * 60)
+        filler = "a" * 100
+        body = "\n".join([filler] * 60) + f"\n{url}\n" + "\n".join([filler] * 10)
+        parts = tg.chunks(body)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(
+            any(url in p for p in parts),
+            "the URL was split across a chunk boundary",
+        )
 
 
 class ApproveKeyboardTests(unittest.TestCase):
