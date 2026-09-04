@@ -35,6 +35,13 @@ test_the_check_passes_on_the_current_tree() {
   assert_out 'ok   same claude in image and machine -> ok, no drift'
   assert_out 'ok   different claude in image and machine -> warn, names both versions'
   assert_out 'ok   :latest image -> warn, no version to compare'
+  assert_out 'ok   an unhealthy pod -> warn, named with its namespace and reason'
+  assert_out 'ok   a deployment scaled to 0 on purpose -> silent, not a warning'
+  assert_out 'ok   a deployment below desired replicas -> warn, named'
+  assert_out 'ok   a CronJob that has never scheduled -> warn'
+  assert_out 'ok   a newly created CronJob -> silent until it has had a fair chance'
+  assert_out 'ok   CPU requests over the threshold -> warn'
+  assert_out 'ok   a healthy cluster -> says so'
   assert_out 'ok   a loaded cycle-runner agent -> fail, with the unload command'
   assert_out 'ok   no agent and no plist -> ok, the CronJob is the only scheduler'
   assert_out 'ok   an unloaded leftover plist -> warn, with the rm'
@@ -187,6 +194,33 @@ test_a_loaded_launchd_agent_that_stops_failing_is_rejected() {
   export REPO="$src"
   assert_fail check-doctor.sh
   assert_out 'loaded-agent case did not report as expected'
+}
+
+# NEGATIVE: a deliberately scaled-to-zero deployment starts warning. SB-1000
+# parks a dead stack exactly that way to reclaim its CPU requests, so this
+# would fire on a healthy, intentional state — every doctor run, for ever.
+# A check that nags about something correct is a check someone turns off, and
+# then it is not there for the case it was written for.
+test_a_scaled_to_zero_deployment_that_warns_is_rejected() {
+  need_bin bash python3
+  src="$(copy_source)"
+  edit 's|if (r\[2\] > 0 \&\& r\[1\] < r\[2\])|if (r[1] < r[2] \|\| r[2] == 0)|' "$src/$DOCTOR"
+  grep -q 'r\[2\] == 0' "$src/$DOCTOR" || fail "fixture did not break the scaled-to-zero guard"
+  export REPO="$src"
+  assert_fail check-doctor.sh
+  assert_out 'scaled-to-zero deployment was reported as unhealthy'
+}
+
+# NEGATIVE: the age guard on "never scheduled" is removed. Without it the
+# check fires on any CronJob whose first slot has not arrived — it flagged
+# trd-engine-report 11 hours after creation, before its first 16:16 run.
+test_a_never_scheduled_check_without_an_age_guard_is_rejected() {
+  need_bin bash python3
+  src="$(copy_source)"
+  edit 's|\$4 != "" \&\& \$4 < cutoff|$4 != ""|' "$src/$DOCTOR"
+  export REPO="$src"
+  assert_fail check-doctor.sh
+  assert_out 'created today was reported as never having run'
 }
 
 run_tests

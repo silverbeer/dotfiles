@@ -506,6 +506,116 @@ default_kubectl
 # test bug, not a silent no-op.
 loud_default claude
 
+# ------------------------------------- 4g. cluster health (SB-1001)
+#
+# The generic version of a check written four times for four specific things:
+# SB-953, SB-980, SB-987, SB-1000. Each was "something is not running and
+# nothing says so", found by a human looking for something else.
+
+# A kubectl that answers the four cluster queries from fixtures. Anything not
+# stubbed here is an unexpected call and fails loudly.
+cluster_stub() {  # PODS DEPLOYS CRONJOBS CPU_PCT
+  cat >"$bin/kubectl" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"get pods -A"*)     printf '%s' "$1" ;;
+  *"get deploy -A"*)   printf '%s' "$2" ;;
+  *"get cronjob -A -o jsonpath"*) printf '%s' "$3" ;;
+  *"describe node"*)   printf 'Allocated resources:\\n  cpu  1900m ($4%%)  5400m (270%%)\\nEvents:\\n' ;;
+  *"get cronjob cycle-runner -n cycle-runner -o jsonpath"*)
+    printf "false\\t2026-09-04T11:00:00Z\\t2026-09-04T11:00:12Z" ;;
+  *"jsonpath={.spec.jobTemplate"*) printf 'ghcr.io/silverbeer/cycle-runner:claude-2.1.258' ;;
+  *"get cronjob"*) exit 0 ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$bin/kubectl"
+}
+
+HEALTHY_PODS=""
+HEALTHY_DEPLOYS="cycle-runner  runner  1/1  1  1  1d"
+HEALTHY_CRONS=$'cycle-runner/cycle-runner\tfalse\t2026-09-04T11:00:00Z\t2026-01-01T00:00:00Z'
+
+# 4g1. an ImagePullBackOff is named, with its namespace and reason. 232 days
+# of this went unreported (SB-1000).
+cluster_stub "missing-table  missing-table-backend  0/1  ImagePullBackOff  0  232d" \
+             "$HEALTHY_DEPLOYS" "$HEALTHY_CRONS" 67
+out="$(run_doctor)"
+if [[ "$out" == *"neither Running nor Succeeded"* && "$out" == *"missing-table/missing-table-backend"* \
+      && "$out" == *"ImagePullBackOff"* ]]; then
+  ok "an unhealthy pod -> warn, named with its namespace and reason"
+else
+  bad "unhealthy-pod case did not report as expected: $out"
+fi
+
+# 4g2. THE ONE THAT MATTERS MOST. A deployment scaled to 0 on purpose is
+# healthy. SB-1000 parks a dead stack exactly that way, and a check that nags
+# about a deliberate state is a check that gets turned off.
+cluster_stub "$HEALTHY_PODS" \
+             "missing-table  missing-table-backend  0/0  0  0  232d" "$HEALTHY_CRONS" 67
+out="$(run_doctor)"
+if [[ "$out" == *"below desired replicas"* ]]; then
+  bad "a deliberately scaled-to-zero deployment was reported as unhealthy: $out"
+else
+  ok "a deployment scaled to 0 on purpose -> silent, not a warning"
+fi
+
+# 4g3. ...and the complement: ready < desired IS a finding.
+cluster_stub "$HEALTHY_PODS" "iron-claw  freeradius  0/1  1  0  192d" "$HEALTHY_CRONS" 67
+out="$(run_doctor)"
+if [[ "$out" == *"below desired replicas"* && "$out" == *"iron-claw/freeradius"* ]]; then
+  ok "a deployment below desired replicas -> warn, named"
+else
+  bad "below-desired case did not report as expected: $out"
+fi
+
+# 4g4. A CronJob that has NEVER scheduled — SB-987 exactly. A "last run
+# failed" check cannot see this: there is no run to fail.
+cluster_stub "$HEALTHY_PODS" "$HEALTHY_DEPLOYS" \
+             $'cycle-runner/triage\tfalse\t\t2026-01-01T00:00:00Z' 67
+out="$(run_doctor)"
+if [[ "$out" == *"never been scheduled"* && "$out" == *"cycle-runner/triage"* ]]; then
+  ok "a CronJob that has never scheduled -> warn (the SB-987 shape)"
+else
+  bad "never-scheduled case did not report as expected: $out"
+fi
+
+# 4g4b. ...but a CronJob created an hour ago has not scheduled YET, and is not
+# broken. trd-engine-report was flagged 11 hours after creation, before its
+# first slot — a check that fires on a healthy new job is one someone turns
+# off.
+cluster_stub "$HEALTHY_PODS" "$HEALTHY_DEPLOYS" \
+             $'trd/trd-engine-report\tfalse\t\t'"$(date -u '+%Y-%m-%dT%H:%M:%SZ')" 67
+out="$(run_doctor)"
+if [[ "$out" == *"never been scheduled"* ]]; then
+  bad "a CronJob created today was reported as never having run: $out"
+else
+  ok "a newly created CronJob -> silent until it has had a fair chance"
+fi
+
+# 4g5. CPU pressure, reported BEFORE the next pod fails to schedule. This is
+# what forced SB-981's fictional 50m request.
+cluster_stub "$HEALTHY_PODS" "$HEALTHY_DEPLOYS" "$HEALTHY_CRONS" 95
+out="$(run_doctor)"
+if [[ "$out" == *"CPU requests at 95%"* && "$out" == *"will not schedule"* ]]; then
+  ok "CPU requests over the threshold -> warn, before the next pod fails"
+else
+  bad "cpu-pressure case did not report as expected: $out"
+fi
+
+# 4g6. All healthy -> positive confirmation, not silence. A check that only
+# ever speaks on failure cannot be distinguished from one that is broken.
+cluster_stub "$HEALTHY_PODS" "$HEALTHY_DEPLOYS" "$HEALTHY_CRONS" 67
+out="$(run_doctor)"
+if [[ "$out" == *"every pod in the cluster is Running or Succeeded"* \
+      && "$out" == *"CPU requests at 67%"* ]]; then
+  ok "a healthy cluster -> says so, rather than staying silent"
+else
+  bad "healthy-cluster case did not report as expected: $out"
+fi
+
+default_kubectl
+
 # ------------------------------- 5. the cutover check, inverted (SB-979)
 #
 # The cycle-runner is a k3s CronJob and its plist is deleted. A LOADED agent is
