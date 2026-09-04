@@ -221,6 +221,101 @@ else
   warnf "gh auth status failed" "$(printf '%s' "$gh_auth_out" | head -1) — run: gh auth login"
 fi
 
+# The stale-lock read that used to be here is gone with the lock itself
+# (SB-976). Nothing writes $HOME/.local/state/cycle-runner/lock any more, so
+# the check could only ever report "no lock present" — a passing check that
+# tests nothing, which is worse than no check.
+#
+# Concurrency is `concurrencyPolicy: Forbid` on the CronJob now, so the health
+# question changed with it: not "is a lock wedged" but "is the scheduler
+# actually scheduling". A CronJob that is suspended, or whose last job failed,
+# is the modern shape of the same silence launchd used to fail in.
+#
+# kubectl absent is INFO, not a failure: this same doctor runs on the Air,
+# where there is no cluster and nothing to report.
+# Which binary to ask, overridable so the offline suite can test the
+# "not installed" branch deterministically. Trimming $PATH instead does not
+# work: GitHub's ubuntu runner ships a kubectl in /usr/bin, so the case that
+# was meant to prove the absent path silently proved nothing there.
+KUBECTL="${KUBECTL:-kubectl}"
+
+# ---------------------------------------------------- cluster health (SB-1001)
+#
+# Four times now something has not been running and nothing said so: SB-953
+# (every tick raised a 1Password prompt), SB-980 (the runner died and could not
+# report it), SB-987 (/triage's plist deployed but never loaded — zero runs
+# ever), SB-1000 (missing-table ImagePullBackOff for 232 DAYS while holding
+# 550m of CPU on a 2-core node). Each was found by a human looking for
+# something else, then fixed with a check for that one thing.
+#
+# This is the generic version. Kubernetes already knows all four states;
+# nothing was asking it.
+#
+# WARN, not fail, for workloads outside cycle-runner: someone else's broken
+# deployment must be visible but must not make the agentic-delivery doctor
+# exit non-zero.
+if command -v "$KUBECTL" >/dev/null 2>&1; then
+  # Pods that are neither Running nor Succeeded. A 232-day ImagePullBackOff is
+  # not a blip; report the namespace and the reason, never just a count — a
+  # count sends the reader back to kubectl, which is the friction this exists
+  # to remove.
+  bad_pods="$("$KUBECTL" get pods -A \
+      --field-selector=status.phase!=Running,status.phase!=Succeeded \
+      --no-headers 2>/dev/null | awk '{print "     " $1 "/" $2 "  " $4}')"
+  if [ -n "$bad_pods" ]; then
+    warnf "$(printf '%s' "$bad_pods" | grep -c .) pod(s) neither Running nor Succeeded" \
+      "$(printf '%s' "$bad_pods" | head -8 | tr '\n' '~' | sed 's/~/\n     /g')"
+  else
+    ok "every pod in the cluster is Running or Succeeded"
+  fi
+
+  # Deployments with ready < desired. A deployment scaled to 0 ON PURPOSE is
+  # healthy and must not warn — SB-1000 uses exactly that to park a dead stack
+  # without deleting it, and a check that nags about it would be turned off.
+  short="$("$KUBECTL" get deploy -A --no-headers 2>/dev/null \
+    | awk '{split($3,r,"/"); if (r[2] > 0 && r[1] < r[2]) print "     " $1 "/" $2 "  " $3}')"
+  if [ -n "$short" ]; then
+    warnf "$(printf '%s' "$short" | grep -c .) deployment(s) below desired replicas" \
+      "$(printf '%s' "$short" | head -6 | tr '\n' '~' | sed 's/~/\n     /g')"
+  fi
+
+  # A CronJob that has NEVER scheduled. This is SB-987 exactly, and it is the
+  # case a "last run failed" check cannot see: there is no run to fail.
+  # jsonpath, NOT --no-headers: a CronJob's SCHEDULE column is "0 9 * * 1" —
+  # five space-separated tokens in one field — so whitespace splitting
+  # misaligns every column after it and the test for "never scheduled" lands
+  # on the wrong one. Caught by its own test; it would never have fired
+  # against real output either.
+  # ...but only once it has had a fair chance. A CronJob created an hour ago
+  # has not scheduled yet and is not broken — trd-engine-report was flagged
+  # within 11 hours of being created, before its first 16:16 slot, which is a
+  # check crying wolf on healthy work. A guard that fires on normal states is
+  # a guard someone turns off.
+  #
+  # 8 days, because it must exceed the longest schedule period in use here (a
+  # weekly `0 9 * * 1`). That delays catching a broken weekly job by up to a
+  # week — acceptable against SB-987, where nothing noticed for months.
+  never="$("$KUBECTL" get cronjob -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\t"}{.spec.suspend}{"\t"}{.status.lastScheduleTime}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' 2>/dev/null \
+    | awk -F'\t' -v cutoff="$(date -u -v-8d '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '8 days ago' '+%Y-%m-%dT%H:%M:%SZ')" \
+        '$2 != "true" && $3 == "" && $4 != "" && $4 < cutoff {print "     " $1 "  (created " substr($4,1,10) ", never run)"}')"
+  if [ -n "$never" ]; then
+    warnf "$(printf '%s' "$never" | grep -c .) CronJob(s) have never been scheduled" \
+      "built, deployed, and never run — the SB-987 shape:$(printf '%s' "$never" | head -5 | tr '\n' '~' | sed 's/~/\n     /g')"
+  fi
+
+  # Requests near allocatable. The condition that forced SB-981's fictional
+  # 50m request; reported before the NEXT pod fails to schedule rather than
+  # after.
+  cpu_pct="$("$KUBECTL" describe node 2>/dev/null \
+    | awk '/Allocated resources/,/Events/' | awk '$1 == "cpu" {gsub(/[()%]/,"",$3); print $3; exit}')"
+  if [ -n "$cpu_pct" ] && [ "$cpu_pct" -ge 85 ] 2>/dev/null; then
+    warnf "cluster CPU requests at ${cpu_pct}% of allocatable" \
+      "the next pod that needs a realistic request will not schedule — see SB-981"
+  elif [ -n "$cpu_pct" ]; then
+    ok "cluster CPU requests at ${cpu_pct}% of allocatable"
+  fi
+fi
+
 # The cutover check, inverted (SB-979). The cycle-runner is a k3s CronJob; its
 # plist is deleted. A plist that is still PRESENT is now the fault, and a
 # LOADED one is worse — two schedulers with no shared lock, racing for the same
@@ -275,23 +370,6 @@ PY
   fi
 fi
 
-# The stale-lock read that used to be here is gone with the lock itself
-# (SB-976). Nothing writes $HOME/.local/state/cycle-runner/lock any more, so
-# the check could only ever report "no lock present" — a passing check that
-# tests nothing, which is worse than no check.
-#
-# Concurrency is `concurrencyPolicy: Forbid` on the CronJob now, so the health
-# question changed with it: not "is a lock wedged" but "is the scheduler
-# actually scheduling". A CronJob that is suspended, or whose last job failed,
-# is the modern shape of the same silence launchd used to fail in.
-#
-# kubectl absent is INFO, not a failure: this same doctor runs on the Air,
-# where there is no cluster and nothing to report.
-# Which binary to ask, overridable so the offline suite can test the
-# "not installed" branch deterministically. Trimming $PATH instead does not
-# work: GitHub's ubuntu runner ships a kubectl in /usr/bin, so the case that
-# was meant to prove the absent path silently proved nothing there.
-KUBECTL="${KUBECTL:-kubectl}"
 if command -v "$KUBECTL" >/dev/null 2>&1 \
    && "$KUBECTL" get cronjob cycle-runner -n cycle-runner >/dev/null 2>&1; then
   cj="$("$KUBECTL" get cronjob cycle-runner -n cycle-runner \
