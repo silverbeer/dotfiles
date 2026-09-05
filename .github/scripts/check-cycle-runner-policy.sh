@@ -381,6 +381,119 @@ else
   bad "summary: silent=1 was not honoured: $silent_out"
 fi
 
+note "2i. code-review.sh: the verdict contract (SB-983)"
+
+# Phase 6 blocked EVERY headless run: it invoked /code-review as a skill from
+# inside the turn, the Skill tool answered "Skill execution completed", and no
+# findings text reached the turn. Phase 6 correctly refused to call silence a
+# pass — so SB-870 stopped there, and so would every ticket after it.
+#
+# The rule was right, the mechanism was wrong. Run as its own `-p` process the
+# review returns a fenced json array: objects when it has something to say,
+# `[]` when it does not. `claude` is stubbed here — the suite must never spend
+# a token or reach the network.
+CR_SH="$REPO/dot_claude/skills/cycle-runner/scripts/code-review.sh"
+cr_bin="$WORK/crbin"; mkdir -p "$cr_bin"
+cr_wt="$WORK/crwt"; mkdir -p "$cr_wt"
+
+claude_returns() {  # RESULT-BODY
+  printf '%s' "$1" >"$WORK/cr.body"
+  cat >"$cr_bin/claude" <<'STUB'
+#!/usr/bin/env bash
+jq -Rs '{result: .}' <"$CR_BODY"
+STUB
+  chmod +x "$cr_bin/claude"
+}
+
+cr_run() { CR_BODY="$WORK/cr.body" PATH="$cr_bin:$PATH" bash "$CR_SH" "$cr_wt" high 2>"$WORK/cr.err"; }
+
+# Every call below is `rc=0; cr_run || rc=$?`, never `cr_run; rc=$?`. Half
+# these cases exit non-zero ON PURPOSE — that is the behaviour under test —
+# and under `set -e` a bare failing command aborts the whole check silently,
+# part-way through, with every later test simply not running. That has now
+# bitten twice here; the first time it hid a test that never reported at all.
+
+# 2i1. findings -> the array, exit 0
+claude_returns 'Two problems.
+
+```json
+[{"file":"a.py","line":3,"summary":"divides by zero","failure_scenario":"a([])"}]
+```'
+if out="$(cr_run)" && [ "$(jq -r 'length' <<<"$out")" = "1" ]; then
+  ok "code-review: findings -> the json array, exit 0"
+else
+  bad "code-review: findings case did not behave: $out $(cat "$WORK/cr.err")"
+fi
+
+# 2i2. THE ONE THAT UNBLOCKS THE LOOP. A clean review says `[]` out loud, so
+# "clean" and "did not run" are finally distinguishable.
+claude_returns 'Single-line docs fix, nothing to find.
+
+```json
+[]
+```'
+rc=0; out="$(cr_run)" || rc=$?
+if [ "$rc" -eq 0 ] && [ "$out" = "[]" ]; then
+  ok "code-review: a clean review -> [] and exit 0, not blocked"
+else
+  bad "code-review: clean case did not behave (rc=$rc): $out"
+fi
+
+# 2i3. The SB-870 failure itself: a body with no verdict in it. Must be
+# INCONCLUSIVE (exit 3), never a pass. This is the rule that must not soften.
+claude_returns 'Skill execution completed'
+rc=0; cr_run >/dev/null || rc=$?
+if [ "$rc" -eq 3 ] && grep -q "inconclusive, not clean" "$WORK/cr.err"; then
+  ok "code-review: 'Skill execution completed' -> exit 3, inconclusive not clean (the SB-870 case)"
+else
+  bad "code-review: no-verdict case did not block (rc=$rc): $(cat "$WORK/cr.err")"
+fi
+
+# 2i4. An empty body is the same class.
+claude_returns ''
+rc=0; cr_run >/dev/null || rc=$?
+if [ "$rc" -eq 3 ]; then ok "code-review: an empty body -> exit 3"
+else bad "code-review: empty body returned rc=$rc, expected 3"; fi
+
+# 2i5. The verdict is the LAST fenced block, not the first — a review may
+# quote a snippet in its prose before it reaches its conclusion.
+claude_returns 'Here is what the diff does:
+
+```json
+{"not":"the verdict"}
+```
+
+Conclusion:
+
+```json
+[]
+```'
+out="$(cr_run || true)"
+if [ "$out" = "[]" ]; then
+  ok "code-review: takes the LAST json block, so a quoted snippet is not the verdict"
+else
+  bad "code-review: last-block case did not behave: $out"
+fi
+
+# 2i6. Something fenced but not an array is not a verdict either.
+claude_returns 'Done.
+
+```json
+{"status":"ok"}
+```'
+rc=0; cr_run >/dev/null || rc=$?
+if [ "$rc" -eq 3 ]; then ok "code-review: a non-array verdict -> exit 3"
+else bad "code-review: non-array verdict returned rc=$rc, expected 3"; fi
+
+# 2i7. A reviewer that can edit is not a reviewer — it could fix what it found
+# and report clean. Assert the tool set stays read-only.
+if grep -q 'allowedTools "Bash,Read,Grep,Glob"' "$CR_SH" \
+   && ! grep -E 'allowedTools.*(Edit|Write)' "$CR_SH" >/dev/null; then
+  ok "code-review: the reviewer gets read-only tools, so it cannot fix what it found"
+else
+  bad "code-review: the reviewer's tool set is not read-only"
+fi
+
 # The plist runs this with /bin/bash, which is 3.2 on macOS. `declare -A` and
 # other bash-4 constructs parse fine under the CI runner'"'"'s bash 5 and then
 # fail on every tick on the only machine this is deployed to.

@@ -38,7 +38,7 @@ Every file this command writes (`plan.md`, `pack.json`, gate bodies) lives there
 | 3 | Plan | `Plan`/`Explore` agent | `plan` (skipped on `agent-auto`, still posted) |
 | 4 | Implement | `dev-engineer` | — |
 | 5 | Test | resolved QE agent | `blocked` if red after one round trip |
-| 6 | Review | `/code-review high` | `blocked` if findings inconclusive |
+| 6 | Review | `code-review.sh <worktree> high` | `blocked` on exit 3 (no verdict); `[]` is clean |
 | 7 | Fix findings | `dev-engineer` | — |
 | 8 | Ship | you (inline, not `/cppp`) | `pr` |
 | 9 | CI + merge | you (CI poll, then gate) | `merge` (never runs `gh pr merge`) |
@@ -175,17 +175,35 @@ allows exactly one, not two — nobody is watching a second round go by) →
 
 ### 6. Review
 
-```
-/code-review high
+```bash
+bash ~/.claude/skills/cycle-runner/scripts/code-review.sh "$WORKTREE" high
 ```
 
-**Design assumption, stated because it isn't verified:** treated as blocking
-within this run — phase 7 does not start until findings text is actually
-present in this turn. If it returns with nothing (rather than an explicit
-"no findings"), that is **inconclusive, not clean** — `blocked` gate, body
-"review did not return findings", exit. Do not treat silence as a pass. This
-assumption should be confirmed against real `-p` fork behavior before this
-phase is trusted unattended.
+**Do NOT invoke `/code-review` as a skill from inside this turn.** That was
+the original instruction and it blocked every run. Invoked in-session the
+agent calls the Skill tool, which answers `Skill execution completed` — a
+completion marker, not a review. The findings go somewhere this turn does not
+read, phase 6 sees no text, and correctly refuses to call silence a pass.
+SB-870 died there, and so would every ticket after it.
+
+The rule was right; the mechanism was wrong. Measured 2026-09-05, run as its
+own `-p` process — which is what the script does — `/code-review high`
+returns a fenced ```json array in its result body: finding objects when there
+is something to say, `[]` when there is not. Both are machine-readable, so
+this stops depending on what a model chose to narrate.
+
+Read the exit code, not the prose:
+
+| exit | meaning | do |
+| -- | -- | -- |
+| `0`, non-empty array | findings | phase 7 |
+| `0`, `[]` | reviewed, nothing found | phase 8 |
+| `3` | no parseable verdict | **`blocked` gate**, body "review did not return a verdict", exit |
+| `2` | `claude`/`jq` missing, bad worktree | `blocked` gate — a setup fault, say so |
+
+**Silence is still inconclusive, never a pass.** That has not changed and must
+not: exit 3 blocks. What changed is that a clean review now says `[]` out
+loud, so "clean" and "did not run" are finally different things.
 
 ### 7. Fix findings
 
@@ -313,7 +331,8 @@ never improvise around them, and there is no user to hand back to:
 - `op://Personal/...` read failure — wrong vault, never a lock; do not retry
 - Test suite red after one `dev-engineer` round trip
 - Ticket scope materially bigger than the AC described
-- `/code-review high` returns inconclusive (see phase 6)
+- `code-review.sh` exits 3 — no parseable verdict (see phase 6). NOT the same
+  as a clean review, which exits 0 with `[]`
 - CI failure or 20-minute CI timeout (see phase 9)
 
 ## What this assumes
