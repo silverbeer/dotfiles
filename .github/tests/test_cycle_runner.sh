@@ -25,6 +25,9 @@ test_the_check_passes_on_the_current_tree() {
   assert_out 'ok   summary: say() marks the tick as news'
   assert_out 'ok   summary: remind() is reported but never counts as news'
   assert_out 'ok   summary: silent=1 is honoured'
+  assert_out "ok   code-review: a clean review -> [] and exit 0, not blocked"
+  assert_out "ok   code-review: 'Skill execution completed' -> exit 3"
+  assert_out 'ok   code-review: the reviewer gets read-only tools'
   assert_out 'ok   ci_state: gh reports success -> success'
   assert_out 'ok   ci_state: gh reports pending -> pending'
   assert_out 'ok   ci_state: gh reports failure -> failure'
@@ -128,6 +131,37 @@ test_remind_that_counts_as_news_is_rejected() {
   export REPO="$src"
   assert_fail check-cycle-runner-policy.sh
   assert_out 'remind() did not behave as expected'
+}
+
+# NEGATIVE: silence starts reading as a pass (SB-983). This is the rule that
+# must not soften. Phase 6 blocked every headless run because it could not
+# tell "reviewed, nothing found" from "no review happened" — and the fix was
+# to make a clean review say `[]` out loud, NOT to assume a pass when it says
+# nothing. Relaxing exit 3 to exit 0 would unblock the loop by removing the
+# only thing checking the code.
+test_an_inconclusive_review_that_passes_is_rejected() {
+  need_bin python3 bash jq
+  src="$(copy_source)"
+  cr="$src/dot_claude/skills/cycle-runner/scripts/code-review.sh"
+  edit 's/^  exit 3$/  echo "[]"; exit 0/' "$cr"
+  grep -q 'echo "\[\]"; exit 0' "$cr" || fail "fixture did not soften the inconclusive path"
+  export REPO="$src"
+  assert_fail check-cycle-runner-policy.sh
+  assert_out 'did not block'
+}
+
+# NEGATIVE: the reviewer gains write tools. A reviewer that can edit could fix
+# what it found and then report clean, which is worse than no review — the run
+# would ship a change nobody looked at, believing it had been checked.
+test_a_reviewer_with_write_tools_is_rejected() {
+  need_bin python3 bash jq
+  src="$(copy_source)"
+  cr="$src/dot_claude/skills/cycle-runner/scripts/code-review.sh"
+  edit 's/--allowedTools "Bash,Read,Grep,Glob"/--allowedTools "Bash,Read,Grep,Glob,Edit,Write"/' "$cr"
+  grep -q 'Glob,Edit,Write' "$cr" || fail "fixture did not add write tools"
+  export REPO="$src"
+  assert_fail check-cycle-runner-policy.sh
+  assert_out 'not read-only'
 }
 
 run_tests
