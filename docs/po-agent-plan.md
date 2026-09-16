@@ -46,7 +46,7 @@ that need a human least.
 
 | # | Step | Ticket | Est | Needs |
 |---|---|---|---|---|
-| 1 | [ ] cycle-report tells the truth | [SB-626](https://linear.app/silverbeer/issue/SB-626) | 3 | — |
+| 1 | [x] cycle-report tells the truth | [SB-626](https://linear.app/silverbeer/issue/SB-626) | 3 | — |
 | 2 | [ ] `/cycle` in the terminal | [SB-1087](https://linear.app/silverbeer/issue/SB-1087) | 5 | 1 |
 | ◆ | [ ] **Checkpoint A:** plan cycle 9 by hand with `/cycle` | — | — | 2, on 2026-09-20 |
 | 3 | [ ] Daily standup to Telegram | [SB-1088](https://linear.app/silverbeer/issue/SB-1088) | 3 | 2, A |
@@ -434,3 +434,56 @@ code or the ticket. Keep entries short; date and ticket each one.
   epic; resume it after.
 - 2026-09-16 · SB-1091 — `repos.json` maps `po agent*` to DOT, so
   `linear.sh new --epic "PO Agent"` works.
+- 2026-09-16 · SB-626 — **Import `cycles.py`, not `cycle-report.py`.** Everything
+  lives in `dot_claude/skills/linear-crud/scripts/cycles.py`, next to
+  `linear_api.py`. It never prints or exits and raises `LookupError`/`ValueError`.
+  `cycle-report.py` is only the CLI. The pure function that says where a cycle
+  is in time is named `cycle_phase()`, so it can't be mistaken for your
+  `cycle_state.py`. Flow:
+  `fetch_cycles()` → `select_cycle(cycles, number=|previous=, now=)` →
+  `fetch_members(id)`, then `fetch_uncompleted_upon_close(id)` (ended cycle) or
+  `previous_cycle()` + its uncompleted set (active cycle) →
+  `summarize(cycle, members, uncompleted, prev_uncompleted, prev_cycle=, now=)`.
+  Pass `now` as an aware datetime every time; `--as-of` is how the CLI tests
+  boundaries.
+- 2026-09-16 · SB-626 — **`summarize()` JSON, `"schema": 1`**
+  (`cycle-report.py --json` prints it). Keys: `cycle{id,number,starts_at,ends_at,
+  state,closed,days_left}`, `totals{source,issues{done,scope},points{done,scope}}`,
+  `split{source,planned,adhoc}` (same shape as totals), `adhoc_share{issues,points}`,
+  `created_mid_cycle`, `carry_out` (closed only:
+  `{issues,points,points_current_estimates,planned,adhoc,identifiers}`),
+  `carry_in` (only for a cycle that is not closed and not future, when the
+  previous cycle is closed: `{from_cycle,issues,points,planned,adhoc,
+  share_of_members,identifiers}`), `planning{status,note,stamped}`,
+  `delivered_by{name:{issues,points,pct}}`, `unestimated[{identifier,title,adhoc}]`.
+  Percentages are ints or `null`.
+- 2026-09-16 · SB-626 — **Cycle fields are not what they look like:**
+  - After close, an ended cycle's *membership* drifts, even for completed work
+    (C3 is 10/46 today; Linear's history says 11/48). For an ended cycle,
+    `totals` come from the last entry of `issueCountHistory` /
+    `completedIssueCountHistory` / `scopeHistory` / `completedScopeHistory`.
+    The `split` rows use today's labels and estimates, so they need not add up
+    to `totals`. Quote `totals` as the truth.
+  - `uncompletedIssuesUponClose` returns each issue's *current* state, estimate
+    and labels. C3's set sums to 71 pts; the shortfall at close was 81. That's
+    why `carry_out` has `points` (history) and `points_current_estimates`.
+    States are current too: many issues in the set have since completed.
+  - Asking for `uncompletedIssuesUponClose` inside `cycles(filter:)` fails with
+    "Query too complex". Query it per cycle via `cycle(id:)`.
+  - The history arrays are daily samples, and the active cycle's last entry
+    lags about a day. Use membership for the active cycle, as `summarize` does.
+  - `endsAt` is exclusive and falls on local midnight Eastern (`04:00Z`).
+  - **The clock and Linear's close are separate things.** `select_cycle` /
+    `cycle_phase` go by the clock. `summarize` decides where its data comes
+    from using `completedAt`: when it is set, history and carry-out are used
+    whatever `now` is. When it is null, current membership is used, even if
+    the clock says the cycle has ended. Linear's close job runs a few seconds
+    to a minute after `endsAt`, and during that gap
+    `uncompletedIssuesUponClose` is `[]`, not the real set. `--as-of` affects
+    only which cycle is selected; it can't rebuild what a cycle's membership
+    used to be.
+  - `Cycle.description` is capped at 255 chars. The stamp is `Key: value`
+    lines; `Planning: planned` or `Planning: skipped -- <note>` (C3 and C4 were
+    stamped by hand). `set_planning()` replaces only that one line and raises
+    rather than truncate. `cycle-report.py --mark-*` is a dry run unless given
+    `--yes`.

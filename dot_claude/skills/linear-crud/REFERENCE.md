@@ -85,15 +85,63 @@ Capacity + DORA-style delivery metrics (SB-360). Unlike `stats`, this uses the *
 bash scripts/metrics.sh --days 30
 ```
 
-## Cycle report — `python3 scripts/cycle-report.py [--cycle N | --previous]`
+## Cycle report — `python3 scripts/cycle-report.py [--cycle N | --previous] [--as-of ISO] [--json]`
 
 Planned vs **adhoc** split for a cycle: issues and points, completion per stream,
-adhoc share, and how many issues were created mid-cycle. Read-only.
+adhoc share, how many issues were created mid-cycle, carry-out (ended cycle) or
+carry-in (active cycle), and whether the cycle was planned. Read-only unless
+`--mark-*` is given with `--yes`. The queries and arithmetic live in
+`scripts/cycles.py` (plain dicts, no printing) so other skills can import them.
 
 ```bash
-python3 scripts/cycle-report.py              # active cycle
-python3 scripts/cycle-report.py --previous   # the one that just ended
+python3 scripts/cycle-report.py                          # active cycle
+python3 scripts/cycle-report.py --previous               # the one that just ended
+python3 scripts/cycle-report.py --cycle 3 --json         # the summary dict (schema 1)
+python3 scripts/cycle-report.py --previous --as-of 2026-08-16   # as if run on that day
 ```
+
+- **`endsAt` is exclusive.** Cycle 3 is `2026-08-09T04:00Z → 2026-08-16T04:00Z`
+  (local midnight, US/Eastern); at `04:00Z` on the 16th it has ended and cycle 4
+  is active. Active = `startsAt <= now < endsAt`; `--previous` = latest `endsAt <= now`.
+  `--as-of` takes a date (local midnight) or datetime (naive = local time), and
+  only changes which cycle is selected: a cycle Linear has closed always shows
+  its close data, because past membership cannot be rebuilt (with a warning when
+  the `--as-of` instant is before the cycle's `endsAt`).
+- **"Closed" means Linear's `completedAt`, not the clock.** The close job runs
+  shortly after `endsAt`; until it has, the report says "ended but not yet
+  closed by Linear" and uses current membership (the history is still a running
+  sample, and `uncompletedIssuesUponClose` is empty). JSON: `cycle.closed`.
+- **A closed cycle's totals come from Linear's history at close**, not from its
+  current issues. At close Linear rolls every unfinished issue into the next
+  cycle, so current membership is only the completed work (and drifts even for
+  that) — it used to report 100%. Totals are the last `issueCountHistory` /
+  `completedIssueCountHistory` / `scopeHistory` / `completedScopeHistory`
+  sample; the shortfall is `uncompletedIssuesUponClose`.
+- **Carry-out** (ended): that set's count, points = history scope − history
+  done, and a planned/adhoc split. Linear returns those issues with their
+  *current* labels and estimates, so the split's points can differ from the
+  history figure; the report says so when it does. The planned/adhoc rows of
+  an ended cycle are completed members + carry-out, on current labels, so they
+  need not sum to the history totals.
+- **Carry-in** (a cycle not yet closed): the previous cycle's carry-out still
+  in this cycle, as a share of current members. Needs the previous cycle closed.
+
+### Planning stamp — `--mark-planned | --mark-unplanned [--note TEXT] [--yes]`
+
+Whether a cycle was planned is recorded on the Linear cycle description as a
+`Planning:` line among `Key: value` lines — `Planning: planned` or
+`Planning: skipped -- <note>`. The report prints a banner for a cycle with no
+stamp (never planned?) or one stamped `skipped`.
+
+```bash
+python3 scripts/cycle-report.py --mark-unplanned --note "focus set ad hoc"   # dry run
+python3 scripts/cycle-report.py --mark-planned --cycle 9 --yes               # writes
+```
+
+Without `--yes` it prints the exact before/after description and writes
+nothing. The `Planning:` line is replaced in place (or prepended); every other
+line is kept. Linear caps the description at 255 chars (`INVALID_INPUT` above),
+and a stamp that would exceed it is refused, never truncated.
 
 The portfolio is pre-user, so unplanned work is most of the throughput — the
 `adhoc` label exists to measure that, not to scold it. Run this at every cycle

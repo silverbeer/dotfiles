@@ -13,6 +13,7 @@ LINEAR_SH=dot_claude/skills/linear-crud/scripts/linear.sh
 BOARD_PY=dot_claude/skills/linear-crud/scripts/executable_board.py
 API_PY=dot_claude/skills/linear-crud/scripts/linear_api.py
 APPLY_PY=dot_claude/skills/backlog-groom/scripts/apply.py
+CYCLES_PY=dot_claude/skills/linear-crud/scripts/cycles.py
 REPOS_JSON=dot_claude/skills/linear-crud/repos.json
 GQL=dot_claude/skills/linear-crud/scripts/executable_linear-gql.sh
 
@@ -166,6 +167,22 @@ test_non_idempotent_apply_plan_fails() {
   export REPO="$src"
   assert_fail check-linear-crud.sh
   assert_out 'FAIL: test_second_run_after_apply_plans_nothing'
+}
+
+# NEGATIVE: cycle_phase treats endsAt as inclusive. At 2026-08-16T04:00Z cycle 3
+# would then still be active alongside cycle 4, and a report run at that instant
+# reads the wrong cycle — the boundary SB-626 exists to get right.
+test_inclusive_cycle_end_fails_the_boundary_test() {
+  need_bin jq python3 git
+  src="$(copy_source)"
+  [ -f "$src/$CYCLES_PY" ] || fail "cycles.py is not in the copied tree — is it tracked?"
+  edit 's/return "active" if now < parse_ts(cycle\["endsAt"\]) else "ended"/return "active" if now <= parse_ts(cycle["endsAt"]) else "ended"/' "$src/$CYCLES_PY"
+  grep -qF 'return "active" if now <= parse_ts(cycle["endsAt"]) else "ended"' "$src/$CYCLES_PY" \
+    || fail "fixture did not make the cycle end inclusive"
+  export REPO="$src"
+  assert_fail check-linear-crud.sh
+  assert_out 'python unit tests failed'
+  assert_out 'FAIL: test_end_is_exclusive_at_the_boundary_instant'
 }
 
 # NEGATIVE: the python tests vanish. Discovery finding nothing must not be a
