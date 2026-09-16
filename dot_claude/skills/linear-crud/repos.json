@@ -154,7 +154,9 @@
       "dotfiles"
     ],
     "ghRepo": "dotfiles",
-    "epicGlobs": []
+    "epicGlobs": [
+      "po agent*"
+    ]
   },
   {
     "label": "TODO",
