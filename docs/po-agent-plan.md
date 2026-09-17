@@ -570,5 +570,6 @@ code or the ticket. Keep entries short; date and ticket each one.
   **self-updates in place** (git fetch/reset + `execv`, checked every 5 min), so
   merges ship without a restart. Exit 3 = Telegram 409 (a second reader);
   doctor warns only on a non-zero last exit. `command` overrides the image
-  ENTRYPOINT, so tini is named explicitly. `cronjob.yaml` has the same override
-  and does *not* name tini: the runner has been running without a reaper.
+  ENTRYPOINT, so tini is named explicitly. `cronjob.yaml` had the same override
+  without tini; fixed in SB-1095, and check-k3s-manifests.sh now requires tini
+  first in every container command of every manifest (a new po-chat.yaml too).
