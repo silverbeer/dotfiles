@@ -166,6 +166,30 @@ if grep -nE '^[[:space:]]*(value|password|token):[[:space:]]*["'"'"']?(gh[pousr]
   bad "a credential literal appears in a k3s manifest — these are tracked in a PUBLIC repo"
 fi
 
+# SB-1095: the image's ENTRYPOINT is tini, so pid 1 reaps what `claude` and git
+# spawn. A container `command:` REPLACES the ENTRYPOINT, which silently drops
+# tini — the CronJob ran without a reaper from SB-976 until this check. Every
+# container command in every manifest here must name tini first.
+for m in "$DIR"/*.yaml; do
+  # Print the first two list items after each `command:` key, one per line.
+  firsts="$(awk '
+    /^[[:space:]]*#/ { next }
+    # A probe `exec: command:` runs inside the container; only container commands replace the ENTRYPOINT.
+    /^[[:space:]]*command:[[:space:]]*$/ { if (prev !~ /exec:[[:space:]]*$/) { want = 2; items = "" }; prev = $0; next }
+    want > 0 && /^[[:space:]]*- / {
+      sub(/^[[:space:]]*- /, ""); items = items (items == "" ? "" : " ") $0
+      if (--want == 0) print items
+      prev = $0; next
+    }
+    { prev = $0 }
+  ' "$m")"
+  [ -n "$firsts" ] || continue
+  while IFS= read -r first; do
+    [ "$first" = "/usr/bin/tini --" ] \
+      || bad "$(basename -- "$m") has a container command starting '$first' — it replaces the image ENTRYPOINT, so tini must come first ('/usr/bin/tini', '--') or pid 1 reaps nothing (SB-1095)"
+  done <<<"$firsts"
+done
+
 [ "$rc" -eq 0 ] || die "k3s/cycle-runner manifests do not hold their invariants"
-note "cycle-runner CronJob holds its invariants (Forbid, deadlines, backoffLimit 0, Secret, PVC, no op)"
+note "cycle-runner CronJob holds its invariants (Forbid, deadlines, backoffLimit 0, Secret, PVC, no op, tini)"
 note "gatekeeper listener holds its invariants (1 replica, Recreate, PVC, Secret, cpu request, Telegram files only)"

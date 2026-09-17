@@ -245,4 +245,24 @@ test_a_missing_listener_manifest_fails_loudly() {
   assert_out "missing $src/$LS"
 }
 
+# NEGATIVE: SB-1095 — `command:` replaces the image ENTRYPOINT, so dropping
+# tini from it is silent: the Job still runs, pid 1 just reaps nothing.
+test_a_cronjob_command_without_tini_is_rejected() {
+  src="$(copy_source)"
+  grep -vE '^[[:space:]]*- (/usr/bin/tini|--)[[:space:]]*$' "$src/$CJ" >"$src/.cj" && mv "$src/.cj" "$src/$CJ"
+  grep -q '/usr/bin/tini' "$src/$CJ" && fail "fixture still names tini"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'cronjob.yaml has a container command starting'
+}
+
+# NEGATIVE: the same rule holds for the listener, and for any manifest added later.
+test_a_listener_command_without_tini_is_rejected() {
+  src="$(copy_source)"
+  grep -vE '^[[:space:]]*- (/usr/bin/tini|--)[[:space:]]*$' "$src/$LS" >"$src/.ls" && mv "$src/.ls" "$src/$LS"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'listener.yaml has a container command starting'
+}
+
 run_tests
