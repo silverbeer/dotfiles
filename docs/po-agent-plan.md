@@ -546,3 +546,29 @@ code or the ticket. Keep entries short; date and ticket each one.
 - 2026-09-16 · SB-1087 — Local ruff is 0.12.12 but `.ruff.toml` requires
   0.16.5, so `test_ruff.sh` fails on this machine regardless of the diff. CI is
   the source of truth until the local ruff is upgraded.
+- 2026-09-16 · SB-951 — **Step 7 is merged but not ticked.** Tick it once a real
+  tap was acknowledged on the phone and `kubectl logs deploy/gatekeeper-listener`
+  shows no 409 over a day. Deploy order: merge first, then
+  `kubectl apply -f k3s/cycle-runner/listener.yaml` (from the next tick on,
+  nothing reads Telegram until the listener runs; taps wait up to 24h).
+- 2026-09-16 · SB-951 — **Only `gatekeeper/scripts/listen.py` may call
+  `getUpdates`** (a test scans every script for other callers). Any process may
+  `sendMessage`. `gate.py poll` no longer reads Telegram; it retries recorded
+  decisions and hands the runner every gate with `handoff: "pending"`, once.
+- 2026-09-16 · SB-951 — **The seam for SB-1089 is the inbox**, a Maildir on the
+  PVC: `$HOME/.local/state/cycle-runner/inbox/telegram/{tmp,new,cur,done}/<update_id>.json`,
+  schema `gatekeeper.inbox/1` (`update_id, message_id, chat_id, from_id, date,
+  text, received_at`). Allowlisted private-chat free text only, after note claims
+  and free-text approve/reject. Consume with `inbox.claim_next()` (atomic
+  rename new→cur), then `complete()` or `requeue()`. Run **one serial consumer**:
+  a `claude -p` reply takes about a minute, so doing it inside the listener would
+  block taps. Messages are recorded from the first deploy, so the inbox holds real
+  samples before chat exists. Free-text `approve`/`reject` still decides the
+  newest awaiting gate; with chat that becomes ambiguous, so decide in SB-1089.
+- 2026-09-16 · SB-951 — **The listener pod**: Deployment `gatekeeper-listener`,
+  Recreate, 50m/64Mi. It clones dotfiles@main into an emptyDir at start and
+  **self-updates in place** (git fetch/reset + `execv`, checked every 5 min), so
+  merges ship without a restart. Exit 3 = Telegram 409 (a second reader);
+  doctor warns only on a non-zero last exit. `command` overrides the image
+  ENTRYPOINT, so tini is named explicitly. `cronjob.yaml` has the same override
+  and does *not* name tini: the runner has been running without a reaper.

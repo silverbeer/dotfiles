@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Offline unit tests for the gatekeeper skill (SB-508): tg.py's Telegram
 # transport (urlopen replaced, never a real socket — chunking, 409 raised by
-# name and never retried, no secret in the message body) and gate.py's
+# name and never retried, no secret in the message body), gate.py's
 # dual-channel gate logic (Telegram callback / free text, Linear comment
-# parsing, first-decision-wins, timeout -> needs-human) against a fake `gql`
-# (tests/fakes.py) — no subprocess, no Linear key, no network.
+# parsing, first-decision-wins, timeout -> needs-human), and the SB-951
+# listener and inbox (the one getUpdates reader, ack-after-record, handoff to
+# the runner) against a fake `gql` (tests/fakes.py) — no Linear key, no
+# network.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib.sh
@@ -33,7 +35,8 @@ ran="$(printf '%s\n' "$out" | sed -nE 's/^Ran ([0-9]+) tests?.*/\1/p')"
 # had stopped meaning anything — deleting the whole of test_gate.py (42 tests)
 # still left 28 and passed, so the guard's own negative test broke before the
 # guard did. Keep it just under the smaller file's count, so losing EITHER
-# file is caught.
-[ "${ran:-0}" -ge 60 ] || die "expected at least 60 tests to run, unittest reported '${ran:-none}' — discovery broken?"
+# file is caught. SB-951 added test_listen.py and test_inbox.py (134 tests in
+# four files, the smallest of them 9), hence 126.
+[ "${ran:-0}" -ge 126 ] || die "expected at least 126 tests to run, unittest reported '${ran:-none}' — discovery broken?"
 
 note "check-gatekeeper: all offline tests passed"

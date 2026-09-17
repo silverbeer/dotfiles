@@ -17,10 +17,12 @@
 edit() { sed "$1" "$2" >"$2.new" && mv "$2.new" "$2"; }
 
 CJ=k3s/cycle-runner/cronjob.yaml
+LS=k3s/cycle-runner/listener.yaml
 
 test_the_real_manifests_hold_their_invariants() {
   assert_ok check-k3s-manifests.sh
-  assert_out 'holds its invariants'
+  assert_out 'CronJob holds its invariants'
+  assert_out 'gatekeeper listener holds its invariants'
 }
 
 # NEGATIVE: the one that matters most. run.sh's mkdir/pid lock was deleted in
@@ -164,6 +166,83 @@ test_a_manifest_with_no_image_lines_fails_rather_than_passing_vacuously() {
   export REPO="$src"
   assert_fail check-k3s-manifests.sh
   assert_out 'image: lines'
+}
+
+# ------------------------------------------------ the listener (SB-951)
+#
+# Telegram allows one getUpdates reader per bot token. Each of these removes
+# one line that keeps the listener to one reader, or keeps it schedulable.
+
+# NEGATIVE: RollingUpdate (the default) starts the new pod before stopping the
+# old one — two readers, a 409, on every rollout.
+test_a_listener_without_recreate_is_rejected() {
+  src="$(copy_source)"
+  grep -v 'type: Recreate' "$src/$LS" >"$src/.ls" && mv "$src/.ls" "$src/$LS"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'Recreate'
+}
+
+# NEGATIVE: two replicas are two readers.
+test_a_listener_with_two_replicas_is_rejected() {
+  src="$(copy_source)"
+  edit 's/replicas: 1/replicas: 2/' "$src/$LS"
+  grep -q 'replicas: 2' "$src/$LS" || fail "fixture did not set two replicas"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out "does not set 'replicas: 1'"
+}
+
+# NEGATIVE: the listener's tag drifts from the Dockerfile while the CronJob's
+# does not. The weekly refresh sed used to name cronjob.yaml only, which is
+# exactly this state one merge later.
+test_a_listener_image_tag_that_drifts_is_rejected() {
+  src="$(copy_source)"
+  edit 's|cycle-runner:claude-[0-9.]*|cycle-runner:claude-9.9.9|g' "$src/$LS"
+  grep -q 'cycle-runner:claude-9.9.9' "$src/$LS" || fail "fixture did not change the listener tag"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'listener.yaml runs'
+  assert_out 'different claude'
+}
+
+test_a_listener_on_latest_is_rejected() {
+  src="$(copy_source)"
+  edit 's|cycle-runner:claude-[0-9.]*|cycle-runner:latest|g' "$src/$LS"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'listener.yaml uses'
+  assert_out 'not revertible'
+}
+
+# NEGATIVE: SB-981. An always-on pod with no cpu request on a ~95%-requested
+# node.
+test_a_listener_without_a_cpu_request_is_rejected() {
+  src="$(copy_source)"
+  grep -vE '^[[:space:]]*cpu:' "$src/$LS" >"$src/.ls" && mv "$src/.ls" "$src/$LS"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'no cpu request'
+}
+
+# NEGATIVE: the always-on pod picks up a credential it has no use for.
+test_a_listener_mounting_the_gh_token_is_rejected() {
+  src="$(copy_source)"
+  edit 's|- key: telegram-chat-id|- key: gh-token\
+                path: gh-token\
+              - key: telegram-chat-id|' "$src/$LS"
+  grep -q 'key: gh-token' "$src/$LS" || fail "fixture did not add gh-token"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'claude-token or gh-token'
+}
+
+test_a_missing_listener_manifest_fails_loudly() {
+  src="$(copy_source)"
+  rm -f "$src/$LS"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out "missing $src/$LS"
 }
 
 run_tests

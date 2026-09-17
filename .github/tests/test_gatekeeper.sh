@@ -61,16 +61,50 @@ test_missing_test_files_fails() {
   assert_out 'NO TESTS RAN'
 }
 
-# NEGATIVE: one test file survives but is thinned out below the floor —
-# discovery succeeds, so this is the count-floor guard's own test, distinct
-# from the "found nothing at all" case above.
+# NEGATIVE: one test file vanishes while the others still pass — discovery
+# succeeds, so this is the count-floor guard's own test, distinct from the
+# "found nothing at all" case above. The SMALLEST file is the one removed: the
+# floor exists so that losing any one file is caught, and the smallest is the
+# hardest case. (Not test_gate.py any more: test_listen.py imports its
+# fixture, so removing it fails the run for a different reason.)
 test_test_count_below_the_floor_fails() {
   need_bin python3
   src="$(copy_source)"
-  rm -f "$src"/dot_claude/skills/gatekeeper/tests/test_gate.py
+  rm -f "$src"/dot_claude/skills/gatekeeper/tests/test_inbox.py
   export REPO="$src"
   assert_fail check-gatekeeper.sh
-  assert_out 'expected at least 60 tests to run'
+  assert_out 'expected at least 126 tests to run'
+}
+
+# NEGATIVE: the runner's poll starts reading Telegram again (SB-951). One
+# getUpdates reader per bot token is the invariant the listener Deployment
+# exists for; a second one in `gate.py poll` is a 409 for both. The tests that
+# say so by name must fail.
+test_poll_reading_telegram_again_fails_naming_the_tests() {
+  need_bin python3
+  src="$(copy_source)"
+  edit 's/^        self.retry_pending()$/        self.transport.get_updates(offset=0, timeout=0, allowed_updates=[]); self.retry_pending()/' \
+    "$src/$GATE_PY"
+  grep -q 'self.transport.get_updates(offset=0' "$src/$GATE_PY" \
+    || fail "fixture did not put a getUpdates call into poll_once"
+  export REPO="$src"
+  assert_fail check-gatekeeper.sh
+  assert_out 'FAIL: test_poll_once_never_calls_get_updates'
+  assert_out 'FAIL: test_listen_py_is_the_only_caller_of_get_updates'
+}
+
+# NEGATIVE: the tap is no longer saved before it is applied (SB-951). With
+# Linear down, decide() fails and there is then nothing on disk to retry — the
+# human's approval is gone, which is SB-950 again by a different route.
+test_dropping_the_durable_save_before_decide_fails() {
+  need_bin python3
+  src="$(copy_source)"
+  edit '/# the tap is durable from here (SB-951)/d' "$src/$GATE_PY"
+  grep -q 'the tap is durable from here' "$src/$GATE_PY" \
+    && fail "fixture did not remove the durable save"
+  export REPO="$src"
+  assert_fail check-gatekeeper.sh
+  assert_out 'test_linear_down_keeps_the_decision_and_the_next_loop_applies_it'
 }
 
 # NEGATIVE: the marker helper in fakes.py stops matching FakeLinear's

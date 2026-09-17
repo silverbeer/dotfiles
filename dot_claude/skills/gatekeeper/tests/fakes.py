@@ -33,6 +33,9 @@ class FakeTransport:
         # nearly always fails. SB-950 — that failure used to destroy the
         # decision, so it needs to be reachable from a test.
         self.fail_answer: Exception | None = None
+        # Same, for getUpdates: a 409 (TelegramConflict) or Telegram being
+        # unreachable, as the listener sees it (SB-951).
+        self.fail_get_updates: Exception | None = None
 
     def send_message(
         self,
@@ -60,6 +63,8 @@ class FakeTransport:
 
     def get_updates(self, offset: int, timeout: int, allowed_updates: list[str]) -> list[dict[str, Any]]:
         self.offsets.append(offset)
+        if self.fail_get_updates is not None:
+            raise self.fail_get_updates
         return self.batches.pop(0) if self.batches else []
 
     def answer_callback_query(self, callback_query_id: str, text: str = "") -> None:

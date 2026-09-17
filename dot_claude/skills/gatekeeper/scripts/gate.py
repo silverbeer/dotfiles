@@ -3,9 +3,15 @@
 
 A headless agent that needs a human decision calls `gate.py open` and exits.
 The full proposal lands as a Linear comment (the record); a summary lands as a
-Telegram DM with Approve/Reject/Note buttons (the interrupt). `gate.py poll`
-watches BOTH channels; the first decision wins, is recorded with its source,
-and is echoed to the channel that lost so the two never disagree.
+Telegram DM with Approve/Reject/Note buttons (the interrupt). The first
+decision on EITHER channel wins, is recorded with its source, and is echoed to
+the channel that lost so the two never disagree.
+
+Telegram is read by listen.py and nothing else (SB-951): one always-on process
+owns `getUpdates`, answers a tap within seconds, and records the decision in
+gate state. `gate.py poll` reads Linear, applies what the listener recorded,
+and hands decided gates to the runner — it never calls `getUpdates`, because a
+second reader on one bot token is a 409.
 
 Gate state is a JSON file per gate under $GATEKEEPER_STATE/gates/. The Linear
 comment carries a marker line `<!-- sb-agent:{kind}:{run_id}:{session_id} -->`
@@ -22,10 +28,13 @@ The protocol spec lives in docs/agentic-delivery.md → "Gate protocol".
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import secrets
 import sys
+import threading
+from contextlib import contextmanager
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import tempfile
 import time
@@ -46,6 +55,7 @@ def _linear_scripts() -> Path:
 
 sys.path.insert(0, str(_linear_scripts()))
 sys.path.insert(0, str(HERE))
+import inbox  # noqa: E402
 from linear_api import gql  # noqa: E402  (tests monkeypatch gate.gql)
 from tg import (  # noqa: E402
     TelegramError,
@@ -69,6 +79,16 @@ SUMMARY_CHARS = 1500
 ECHO_MARKER = "<!-- sb-agent:echo -->"
 
 DEFAULT_TIMEOUT_HOURS = 72
+
+# A recorded decision that will not apply to Linear (SB-951). Retried with
+# exponential backoff, not every listener loop: a ticket that was deleted or
+# moved fails the same way every time, and hammering Linear every 25 seconds
+# for it helps nobody. After a day it stops being retried and becomes a
+# needs-human gate the runner sees, rather than an `awaiting` gate that never
+# leaves.
+RETRY_FIRST_SECONDS = 30
+RETRY_MAX_SECONDS = 15 * 60
+RETRY_GIVE_UP_HOURS = 24
 
 
 def state_dir() -> Path:
@@ -253,6 +273,74 @@ def load_gate(gate_id: str) -> dict:
         sys.exit(f"gate: no such gate {gate_id}")
 
 
+# Two processes write gate state now (SB-951): the listener records Telegram
+# decisions, and the runner's `poll` reads Linear, times gates out and claims
+# them. Each works from a dict it read earlier, so an unguarded save from one
+# can silently put back what the other just changed — a reminder stamp saved
+# over a decision would reopen a decided gate.
+#
+# So every write to an existing gate happens under that gate's lock, on a fresh
+# read. flock, not a lock file's existence: the kernel releases it when the
+# holder dies, so a crashed listener cannot wedge the runner. Re-entrant within
+# a thread, because a callback holds the lock across the decide() it calls.
+_locks = threading.local()
+
+
+@contextmanager
+def gate_lock(gate_id: str):
+    held = _locks.__dict__.setdefault("held", {})
+    if gate_id in held:
+        held[gate_id] += 1
+        try:
+            yield
+        finally:
+            held[gate_id] -= 1
+        return
+    gates_dir().mkdir(parents=True, exist_ok=True)
+    with open(gates_dir() / f"{gate_id}.lock", "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        held[gate_id] = 1
+        try:
+            yield
+        finally:
+            del held[gate_id]
+        # closing the file releases the flock
+
+
+def read_gate(gate_id: str) -> dict | None:
+    """The gate as it is on disk now, or None if there is no such gate. Unlike
+    load_gate it never exits: the listener must survive a stale callback."""
+    try:
+        return json.loads((gates_dir() / f"{gate_id}.json").read_text())
+    except FileNotFoundError:
+        return None
+
+
+def refresh(gate: dict) -> dict:
+    """Replace `gate`'s contents, in place, with what is on disk now. In place
+    because callers and tests hold the dict they passed in."""
+    fresh = read_gate(gate["gate_id"])
+    if fresh is not None:
+        gate.clear()
+        gate.update(fresh)
+    return gate
+
+
+def seen_update(gate: dict, update_id: int | None) -> bool:
+    """True if this gate already recorded Telegram update `update_id`. Telegram
+    redelivers anything not acked, and a redelivery must be a no-op."""
+    if update_id is None:
+        return False
+    pending = gate.get("pending_decision") or {}
+    unapplied = gate.get("unapplied_decision") or {}
+    return (
+        pending.get("update_id") == update_id
+        or unapplied.get("update_id") == update_id
+        or gate.get("decided_update_id") == update_id
+        or update_id in (gate.get("tg_update_ids") or [])
+    )
+
+
 def save_gate(gate: dict) -> None:
     _write_atomic(gates_dir() / f"{gate['gate_id']}.json", json.dumps(gate, indent=2))
 
@@ -287,10 +375,14 @@ def superseded_gates() -> list[dict]:
             continue  # a deleted ticket is not this function's problem
         if (issue.get("state") or {}).get("type") not in CLOSED_STATE_TYPES:
             continue
-        gate["status"] = "superseded"
-        gate["source"] = "ticket-closed"
-        gate["note"] = f"ticket reached {issue['state']['name']} without this gate being answered"
-        save_gate(gate)
+        with gate_lock(gate["gate_id"]):
+            refresh(gate)
+            if gate["status"] != "awaiting":
+                continue  # answered while we were asking Linear
+            gate["status"] = "superseded"
+            gate["source"] = "ticket-closed"
+            gate["note"] = f"ticket reached {issue['state']['name']} without this gate being answered"
+            save_gate(gate)
         # Drop the gate:* label entirely rather than stamping another value —
         # the question is moot, and gate:approved would imply a human answered.
         keep = [n["id"] for n in issue["labels"]["nodes"] if not n["name"].startswith("gate:")]
@@ -374,8 +466,12 @@ def _due_for_reminder(gate: dict) -> bool:
     last = gate.get("reminded_at")
     if last and (now_utc() - datetime.fromisoformat(last)).total_seconds() / 3600 < REMINDER_EVERY_HOURS:
         return False
-    gate["reminded_at"] = now_utc().isoformat()
-    save_gate(gate)
+    with gate_lock(gate["gate_id"]):
+        refresh(gate)
+        if gate["status"] != "awaiting":
+            return False
+        gate["reminded_at"] = now_utc().isoformat()
+        save_gate(gate)
     return True
 
 
@@ -394,7 +490,6 @@ class Gatekeeper:
         self.transport = transport
         self.chat_id = chat_id
         self.allowed_ids = allowed_ids
-        self.offset_path = state_dir() / "telegram-offset"
 
     # -------------------------------------------------------------- open
 
@@ -458,38 +553,170 @@ class Gatekeeper:
 
     # ------------------------------------------------------------ decide
 
-    def decide(self, gate: dict, decision: str, note: str | None, source: str) -> None:
-        """First decision wins — the caller checks status before calling. Echo
-        goes to the channel that did NOT decide, so both always agree.
+    def decide(
+        self, gate: dict, decision: str, note: str | None, source: str, update_id: int | None = None
+    ) -> bool:
+        """Apply a decision. Returns True if it landed. Echo goes to the channel
+        that did NOT decide, so both always agree.
+
+        First decision wins, and it is checked HERE, under the gate's lock, on
+        a fresh read — not by the caller, whose copy may be minutes old. A
+        decision the listener recorded but has not yet applied
+        (`pending_decision`) counts as first: a Linear comment arriving while
+        Linear is down does not overtake a tap that came before it. `cli` is
+        the human override and may decide a needs-human gate.
 
         The label update and echo happen BEFORE save_gate() marks the gate
-        resolved: if either raises, the gate must stay "awaiting" on disk so
-        `poll` retries it, rather than being marked resolved with a side
-        effect that never actually landed."""
+        resolved: if either raises, the gate must stay "awaiting" on disk —
+        with its `pending_decision`, when it has one — so the listener and
+        `poll` retry it, rather than being marked resolved with a side effect
+        that never actually landed.
+
+        A landed decision sets `handoff: pending`, which is how the runner
+        learns of it: `poll` claims it on the next tick (SB-951)."""
         status = "approved" if decision == "approve" else "rejected"
         icon = "✅" if decision == "approve" else "❌"
         suffix = f" — {note}" if note else ""
-        try:
-            issue = set_gate_label(gate["ticket"], status)
-            if source != "linear":
-                create_comment(issue["id"], f"{ECHO_MARKER}\n{icon} {status} via {source}{suffix}")
-            if source != "telegram":
-                msg = f"{icon} [{gate['kind']}] {gate['ticket']} {status} via {source}{suffix}"
-                send_text(self.transport, self.chat_id, msg)
-        except (SystemExit, Exception) as e:
-            print(
-                f"warn: gate.py decide: label update or echo failed for {gate['gate_id']} "
-                f"({gate['ticket']}): {e} — gate stays awaiting, poll will retry",
-                file=sys.stderr,
-            )
-            return
-        gate["status"] = status
-        gate["decision"] = decision
-        gate["source"] = source
-        if note:
-            gate["note"] = f"{gate['note']}\n{note}" if gate.get("note") else note
-        save_gate(gate)
+        with gate_lock(gate["gate_id"]):
+            refresh(gate)
+            open_states = ("awaiting", "needs-human") if source == "cli" else ("awaiting",)
+            if gate["status"] not in open_states:
+                print(
+                    f"gate: {gate['gate_id']} ({gate['ticket']}) is already {gate['status']} — "
+                    f"{decision} via {source} ignored, first decision wins",
+                    file=sys.stderr,
+                )
+                return False
+            pending = gate.get("pending_decision")
+            if pending and source != "cli" and (pending.get("source"), pending.get("update_id")) != (source, update_id):
+                print(
+                    f"gate: {gate['gate_id']} ({gate['ticket']}) already has a {pending.get('verb')} via "
+                    f"{pending.get('source')} waiting to apply — {decision} via {source} ignored",
+                    file=sys.stderr,
+                )
+                return False
+            try:
+                issue = set_gate_label(gate["ticket"], status)
+                if source != "linear":
+                    create_comment(issue["id"], f"{ECHO_MARKER}\n{icon} {status} via {source}{suffix}")
+                if source != "telegram":
+                    msg = f"{icon} [{gate['kind']}] {gate['ticket']} {status} via {source}{suffix}"
+                    send_text(self.transport, self.chat_id, msg)
+            except (SystemExit, Exception) as e:
+                print(
+                    f"warn: gate.py decide: label update or echo failed for {gate['gate_id']} "
+                    f"({gate['ticket']}): {e} — gate stays awaiting, the decision is retried",
+                    file=sys.stderr,
+                )
+                if pending and (pending.get("source"), pending.get("update_id")) == (source, update_id):
+                    attempts = int(pending.get("attempts") or 0) + 1
+                    delay = min(RETRY_FIRST_SECONDS * 2 ** (attempts - 1), RETRY_MAX_SECONDS)
+                    pending["attempts"] = attempts
+                    pending["last_error"] = str(e)[:300]
+                    pending["next_retry_at"] = (now_utc() + timedelta(seconds=delay)).isoformat()
+                    save_gate(gate)
+                return False
+            gate["status"] = status
+            gate["decision"] = decision
+            gate["source"] = source
+            if note:
+                gate["note"] = f"{gate['note']}\n{note}" if gate.get("note") else note
+            gate.pop("pending_decision", None)
+            if update_id is not None:
+                gate["decided_update_id"] = update_id
+            gate["handoff"] = "pending"
+            save_gate(gate)
         self.close_gate_dm(gate, f"{icon} {status} via {source}")
+        return True
+
+    def retry_pending(self) -> None:
+        """Apply every decision that was recorded but did not land — Linear was
+        down when the tap arrived. Called by the listener every loop and by
+        `poll` every tick, so neither being down strands a decision.
+
+        Both honour `next_retry_at` (30s doubling to 15min). A decision still
+        failing a day after it was recorded is given up on: see
+        give_up_pending()."""
+        now = now_utc()
+        for gate in awaiting_gates():
+            pending = gate.get("pending_decision")
+            if not pending:
+                continue
+            due = pending.get("next_retry_at")
+            if due and datetime.fromisoformat(due) > now:
+                continue
+            recorded = pending.get("at")
+            if recorded and now - datetime.fromisoformat(recorded) >= timedelta(hours=RETRY_GIVE_UP_HOURS):
+                self.give_up_pending(gate)
+                continue
+            source = pending.get("source", "telegram")
+            self.decide(gate, pending["verb"], pending.get("note"), source, pending.get("update_id"))
+
+    def give_up_pending(self, gate: dict) -> bool:
+        """Stop retrying a decision that has not applied for a day.
+
+        The gate becomes needs-human with `reason: decision_not_applied`, the
+        recorded verb and note kept as `unapplied_decision`, and `handoff:
+        pending` so the runner reports it. The human is told once. Nothing
+        here may raise: Linear is, by construction, the thing that is failing,
+        and the DM is a courtesy."""
+        with gate_lock(gate["gate_id"]):
+            refresh(gate)
+            pending = gate.get("pending_decision")
+            if gate["status"] != "awaiting" or not pending:
+                return False
+            gate["status"] = "needs-human"
+            gate["decision"] = "needs-human"
+            gate["source"] = pending.get("source", "telegram")
+            gate["reason"] = "decision_not_applied"
+            gate["unapplied_decision"] = gate.pop("pending_decision")
+            gate["handoff"] = "pending"
+            save_gate(gate)
+        verb = pending.get("verb")
+        error = pending.get("last_error") or "unknown error"
+        print(
+            f"gate: {gate['gate_id']} ({gate['ticket']}) {verb} not applied after {RETRY_GIVE_UP_HOURS}h "
+            f"— needs a human: {error}",
+            file=sys.stderr,
+        )
+        try:
+            set_gate_label(gate["ticket"], "needs-human")
+        except (SystemExit, Exception) as e:  # noqa: BLE001 — Linear is what is failing
+            print(f"warn: gate.py: could not label {gate['ticket']} needs-human: {e}", file=sys.stderr)
+        try:
+            send_text(
+                self.transport,
+                self.chat_id,
+                f"🛑 recorded your {verb} on {gate['ticket']} but couldn't apply it to Linear for "
+                f"{RETRY_GIVE_UP_HOURS}h: {error}\n"
+                f"Resolve with `gate.py resolve {gate['gate_id']} approve|reject --source cli`",
+            )
+        except Exception as e:  # noqa: BLE001 — the gate is already needs-human on disk
+            print(f"warn: gate.py: could not DM the give-up for {gate['gate_id']}: {e}", file=sys.stderr)
+        self.close_gate_dm(gate, f"🛑 needs a human — your {verb} could not be applied")
+        return True
+
+    def claim_handoffs(self) -> list[dict]:
+        """Every gate decided since the runner last looked, marked `claimed`.
+
+        At most once, as before: the claim is saved before the runner acts, so
+        a runner that dies mid-resume does not resume twice. A gate with no
+        `handoff` field at all predates SB-951 and was already acted on by the
+        poll that resolved it, so it is never emitted — the first deploy must
+        not replay history."""
+        claimed = []
+        for gate in all_gates():
+            if gate.get("handoff") != "pending":
+                continue
+            with gate_lock(gate["gate_id"]):
+                refresh(gate)
+                if gate.get("handoff") != "pending":
+                    continue
+                gate["handoff"] = "claimed"
+                gate["claimed_at"] = now_utc().isoformat()
+                save_gate(gate)
+            claimed.append(gate)
+        return claimed
 
     def close_gate_dm(self, gate: dict, outcome: str) -> None:
         """Strike the gate's Telegram message and take its buttons away.
@@ -529,11 +756,18 @@ class Gatekeeper:
                 file=sys.stderr,
             )
 
-    def mark_needs_human(self, gate: dict, hours: float) -> None:
-        gate["status"] = "needs-human"
-        gate["decision"] = "needs-human"
-        gate["source"] = "timeout"
-        save_gate(gate)
+    def mark_needs_human(self, gate: dict, hours: float) -> bool:
+        with gate_lock(gate["gate_id"]):
+            refresh(gate)
+            # A gate with a recorded decision was answered in time; it is only
+            # waiting for Linear to come back, not for a human.
+            if gate["status"] != "awaiting" or gate.get("pending_decision"):
+                return False
+            gate["status"] = "needs-human"
+            gate["decision"] = "needs-human"
+            gate["source"] = "timeout"
+            gate["handoff"] = "pending"
+            save_gate(gate)
         set_gate_label(gate["ticket"], "needs-human")
         send_text(
             self.transport,
@@ -544,42 +778,14 @@ class Gatekeeper:
         # The buttons go even though nobody answered: they no longer work, and
         # leaving them invites a tap that silently does nothing.
         self.close_gate_dm(gate, f"🛑 needs a human — unanswered for {hours:.0f}h")
+        return True
 
     # ----------------------------------------------------------- telegram
-
-    def _offset(self) -> int:
-        try:
-            return int(self.offset_path.read_text().strip())
-        except (OSError, ValueError):
-            return 0
-
-    def _remember(self, offset: int) -> None:
-        _write_atomic(self.offset_path, str(offset))
-
-    def drain_telegram(self, timeout: int) -> None:
-        updates = self.transport.get_updates(
-            offset=self._offset(), timeout=timeout, allowed_updates=["callback_query", "message"]
-        )
-        for update in updates:
-            try:
-                self._handle(update)
-            except TelegramError as exc:
-                # Transport trouble: the decision may not have been recorded.
-                # Do NOT ack — Telegram replays unacked updates for 24h, which
-                # is exactly the safety net wanted here. Stop the drain so the
-                # rest of the batch is retried in order on the next poll
-                # (SB-950: acking through a failure destroyed a real approval).
-                print(f"gate: telegram error draining update {update.get('update_id')}: {exc}", file=sys.stderr)
-                return
-            except Exception as exc:  # noqa: BLE001 — poison-pill guard
-                # A bug in our own handling, not a transport failure. Ack it:
-                # an update we can never process must not block every future
-                # poll behind it for 24h.
-                print(
-                    f"gate: dropping unprocessable update {update.get('update_id')}: {exc!r}",
-                    file=sys.stderr,
-                )
-            self._remember(int(update["update_id"]) + 1)
+    #
+    # Handling only. Fetching updates and acking them is listen.py's, and only
+    # listen.py's (SB-951) — see its module docstring for why there is one
+    # reader. Every handler here is safe to run twice on the same update:
+    # Telegram redelivers whatever the listener could not ack.
 
     def _allowed(self, sender: dict) -> bool:
         # Numeric id, never username: usernames are changeable and, once
@@ -589,27 +795,32 @@ class Gatekeeper:
         except (TypeError, ValueError):
             return False
 
-    def _handle(self, update: dict) -> None:
+    def handle_update(self, update: dict) -> None:
+        """Route one update by type: a button tap goes to its gate; a message
+        is a gate answer if a gate claims it, and otherwise goes to the inbox
+        (SB-951)."""
+        update_id = update.get("update_id")
         if "callback_query" in update:
-            self._handle_callback(update["callback_query"])
+            self._handle_callback(update["callback_query"], update_id)
         elif "message" in update:
-            self._handle_message(update["message"])
+            self._handle_message(update["message"], update_id)
 
     def _answer_quietly(self, cq: dict, text: str = "") -> None:
         """Best-effort `answerCallbackQuery`. NEVER raises (SB-950).
 
-        A callback query id expires about a minute after the tap, and this
-        poller runs on a 30-minute tick, so the answer usually fails. It used
-        to be called first and unguarded: the raise propagated, `drain_telegram`
-        acked the update in its `finally` anyway, and the human's decision was
-        destroyed by the failure of a courtesy toast. The toast is optional;
-        the decision is the payload."""
+        A callback query id expires about a minute after the tap. When the
+        poller ran on a 30-minute tick the answer nearly always failed; the
+        listener answers within seconds, but a redelivered update still
+        carries an expired id. It used to be called first and unguarded: the
+        raise propagated, the update was acked anyway, and the human's
+        decision was destroyed by the failure of a courtesy toast. The toast
+        is optional; the decision is the payload."""
         try:
             self.transport.answer_callback_query(cq.get("id", ""), text)
         except TelegramError as exc:
             print(f"gate: answerCallbackQuery failed (harmless): {exc}", file=sys.stderr)
 
-    def _handle_callback(self, cq: dict) -> None:
+    def _handle_callback(self, cq: dict, update_id: int | None = None) -> None:
         # Silence is the right reply to a stranger, and answering costs nothing.
         if not self._allowed(cq.get("from") or {}):
             self._answer_quietly(cq)
@@ -619,45 +830,100 @@ class Gatekeeper:
             self._answer_quietly(cq)
             return
         gate_id, verb = parsed
-        gate = next((g for g in awaiting_gates() if g["gate_id"] == gate_id), None)
-        if gate is None:
-            self._answer_quietly(cq, "already resolved")
-            send_text(self.transport, self.chat_id, f"gate {gate_id} is not awaiting (already resolved?)")
-            return
-        # Record FIRST, acknowledge second: everything below this line is a
-        # courtesy, and a courtesy must not be able to lose a decision.
-        if verb == "note":
-            gate["note_pending"] = True
-            save_gate(gate)
-            self._answer_quietly(cq, "send your note")
-            send_text(self.transport, self.chat_id, f"💬 reply with your note for [{gate['kind']}] {gate['ticket']}")
-        else:
-            self.decide(gate, verb, None, "telegram")
+        with gate_lock(gate_id):
+            gate = read_gate(gate_id)
+            if gate is not None and seen_update(gate, update_id):
+                # A redelivery of a tap already recorded. Answering again is
+                # harmless; "not awaiting" would tell the human their own tap
+                # failed.
+                self._answer_quietly(cq)
+                return
+            if gate is None or gate["status"] != "awaiting":
+                self._answer_quietly(cq, "already resolved")
+                send_text(self.transport, self.chat_id, f"gate {gate_id} is not awaiting (already resolved?)")
+                return
+            if gate.get("pending_decision"):
+                self._answer_quietly(cq, "already decided")
+                return
+            if verb == "note":
+                gate["note_pending"] = True
+                if update_id is not None:
+                    gate.setdefault("tg_update_ids", []).append(update_id)
+                save_gate(gate)
+                self._answer_quietly(cq, "send your note")
+                send_text(
+                    self.transport, self.chat_id, f"💬 reply with your note for [{gate['kind']}] {gate['ticket']}"
+                )
+                return
+            # Record FIRST, acknowledge second, apply third (SB-951). The
+            # record is what makes the tap durable: if Linear is down, decide()
+            # fails, `pending_decision` stays on disk and the next loop applies
+            # it. The toast goes before the Linear round trip because the
+            # human is looking at a spinner until it arrives.
+            gate["pending_decision"] = {
+                "verb": verb,
+                "note": None,
+                "source": "telegram",
+                "update_id": update_id,
+                "at": now_utc().isoformat(),
+            }
+            save_gate(gate)  # the tap is durable from here (SB-951)
             self._answer_quietly(cq, f"{verb}d — {gate['ticket']}")
+            self.decide(gate, verb, None, "telegram", update_id)
 
-    def _handle_message(self, message: dict) -> None:
+    def _handle_message(self, message: dict, update_id: int | None = None) -> None:
         chat = message.get("chat") or {}
         if chat.get("type") != "private" or not self._allowed(message.get("from") or {}):
             return
         text = (message.get("text") or "").strip()
         if not text:
             return
+        # A redelivery of a message already routed somewhere.
+        if update_id is not None and (
+            inbox.exists(update_id) or any(seen_update(g, update_id) for g in all_gates())
+        ):
+            return
         # A pending 💬 Note claims the next text: it attaches, the gate stays
         # awaiting. Most recent claim wins if several are somehow pending.
         pending = [g for g in awaiting_gates() if g.get("note_pending")]
         if pending:
             gate = pending[-1]
-            gate["note_pending"] = False
-            gate["note"] = f"{gate['note']}\n{text}" if gate.get("note") else text
-            save_gate(gate)
-            send_text(self.transport, self.chat_id, f"noted on [{gate['kind']}] {gate['ticket']} — still awaiting")
-            return
+            with gate_lock(gate["gate_id"]):
+                refresh(gate)
+                claimed = gate["status"] == "awaiting" and gate.get("note_pending")
+                if claimed:
+                    gate["note_pending"] = False
+                    gate["note"] = f"{gate['note']}\n{text}" if gate.get("note") else text
+                    if update_id is not None:
+                        gate.setdefault("tg_update_ids", []).append(update_id)
+                    save_gate(gate)
+            if claimed:
+                send_text(self.transport, self.chat_id, f"noted on [{gate['kind']}] {gate['ticket']} — still awaiting")
+                return
         decision = parse_decision(text)
         open_gates = awaiting_gates()
-        if decision is None or not open_gates:
+        if decision is not None and open_gates:
+            # Free text names no gate; it applies to the most recently opened
+            # one. Recorded before it is applied, same as a tap.
+            gate = open_gates[-1]
+            with gate_lock(gate["gate_id"]):
+                refresh(gate)
+                if gate["status"] != "awaiting" or gate.get("pending_decision"):
+                    return
+                gate["pending_decision"] = {
+                    "verb": decision[0],
+                    "note": decision[1],
+                    "source": "telegram",
+                    "update_id": update_id,
+                    "at": now_utc().isoformat(),
+                }
+                save_gate(gate)  # the message is durable from here (SB-951)
+                self.decide(gate, decision[0], decision[1], "telegram", update_id)
             return
-        # Free text names no gate; it applies to the most recently opened one.
-        self.decide(open_gates[-1], decision[0], decision[1], "telegram")
+        # Not a gate answer. It used to be dropped; now it is kept for the PO
+        # chat (SB-1089), which reads the inbox and never getUpdates.
+        if update_id is not None:
+            inbox.record(message, update_id)
 
     # ------------------------------------------------------------- linear
 
@@ -677,13 +943,24 @@ class Gatekeeper:
                 self.decide(gate, decision[0], decision[1], "linear")
                 return
             if c["id"] not in gate["forwarded_comment_ids"]:
-                gate["forwarded_comment_ids"].append(c["id"])
-                save_gate(gate)
+                with gate_lock(gate["gate_id"]):
+                    refresh(gate)
+                    if c["id"] in gate["forwarded_comment_ids"]:
+                        continue
+                    gate["forwarded_comment_ids"].append(c["id"])
+                    save_gate(gate)
                 send_text(self.transport, self.chat_id, f"💬 {gate['ticket']} (Linear): {c['body']}")
 
     # --------------------------------------------------------------- poll
 
-    def poll_once(self, timeout: int) -> list[dict]:
+    def poll_once(self) -> list[dict]:
+        """One round for the runner: close finished and timed-out gates, apply
+        decisions the listener recorded, read Linear, and claim everything
+        decided since the last round.
+
+        Never reads Telegram (SB-951). listen.py is the one `getUpdates`
+        reader; a second one here is a 409 for both. A tap made while the
+        listener is down waits in Telegram (24h) until it is back."""
         # Before anything else: a gate whose ticket is already finished has no
         # question left to ask (SB-949).
         for gate in superseded_gates():
@@ -699,21 +976,16 @@ class Gatekeeper:
             self.close_gate_dm(gate, "superseded — the ticket finished without this gate")
         timeout_hours = float(os.environ.get("GATE_TIMEOUT_HOURS", DEFAULT_TIMEOUT_HOURS))
         cutoff = now_utc() - timedelta(hours=timeout_hours)
-        timed_out = set()
         for gate in awaiting_gates():
             if datetime.fromisoformat(gate["opened_at"]) < cutoff:
                 self.mark_needs_human(gate, timeout_hours)
-                timed_out.add(gate["gate_id"])
-        still_awaiting = {g["gate_id"] for g in awaiting_gates()}
-        if still_awaiting:
-            self.drain_telegram(timeout)
+        self.retry_pending()
         for gate in awaiting_gates():
             self.check_linear(gate)
-        # `before` covers both gates that resolved via Telegram/Linear this
-        # tick AND ones that just timed out, so timeout→needs-human shows up
-        # in the same "resolved" list `poll`'s JSON output reports.
-        before = still_awaiting | timed_out
-        return [g for g in all_gates() if g["gate_id"] in before and g["status"] != "awaiting"]
+        # Everything decided since the last round — by the listener, by Linear
+        # just now, by `resolve`, or by the timeout above — in the one
+        # "resolved" list `poll`'s JSON output reports.
+        return self.claim_handoffs()
 
 
 # ------------------------------------------------------------------ wiring
@@ -725,9 +997,9 @@ def telegram_text(kind: str, ticket: str, title: str, body: str, link: str, issu
     The ticket link is ALWAYS present (SB-954). `pr` and `merge` gates pass the
     PR as `link`, and with a single-link trailer that silently replaced the only
     route back to the ticket — on exactly the gates where a human wants both:
-    read the PR, decide on the ticket. It also matters for answering: until the
-    long-poll agent lands (SB-951), a Linear comment is the more reliable
-    channel, and the message has to say so.
+    read the PR, decide on the ticket. It also matters for answering: the
+    buttons depend on the listener being up (SB-951), while a Linear comment
+    is read by the runner either way, so the message offers both.
     """
     summary = body.strip()
     if len(summary) > SUMMARY_CHARS:
@@ -792,9 +1064,10 @@ def cmd_poll(args: argparse.Namespace) -> int:
     gk = gatekeeper_from_env()
     resolved: list[dict] = []
     while True:
-        resolved.extend(gk.poll_once(args.timeout))
+        resolved.extend(gk.poll_once())
         if args.once or not awaiting_gates():
             break
+        time.sleep(args.timeout)
     print(
         json.dumps(
             {
@@ -860,9 +1133,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="no network; print what would be sent")
     p.set_defaults(func=cmd_open)
 
-    p = sub.add_parser("poll", help="drain Telegram + read Linear comments until gates resolve")
+    p = sub.add_parser("poll", help="read recorded decisions + Linear comments until gates resolve")
     p.add_argument("--once", action="store_true")
-    p.add_argument("--timeout", type=int, default=25, help="getUpdates long-poll seconds")
+    p.add_argument("--timeout", type=int, default=25, help="seconds between rounds without --once")
     p.set_defaults(func=cmd_poll)
 
     p = sub.add_parser("status", help="JSON of one gate, or all")

@@ -42,6 +42,14 @@ test_the_check_passes_on_the_current_tree() {
   assert_out 'ok   a newly created CronJob -> silent until it has had a fair chance'
   assert_out 'ok   CPU requests over the threshold -> warn'
   assert_out 'ok   a healthy cluster -> says so'
+  assert_out 'ok   no kubectl -> the listener check is info too'
+  assert_out 'ok   a healthy listener -> ok, no restart or drift warning'
+  assert_out 'ok   a listener with 0/1 ready -> fail'
+  assert_out 'ok   a missing listener -> fail, with the apply command'
+  assert_out 'ok   a listener whose last exit was 3 -> warn, names the second reader'
+  assert_out 'ok   a listener that crashed -> warn, says crashed, not 409'
+  assert_out 'ok   restarts with a clean last exit -> ok, mentions the count, no warn'
+  assert_out 'ok   a listener image that differs from the CronJob -> warn, names both'
   assert_out 'ok   a loaded cycle-runner agent -> fail, with the unload command'
   assert_out 'ok   no agent and no plist -> ok, the CronJob is the only scheduler'
   assert_out 'ok   an unloaded leftover plist -> warn, with the rm'
@@ -221,6 +229,46 @@ test_a_never_scheduled_check_without_an_age_guard_is_rejected() {
   export REPO="$src"
   assert_fail check-doctor.sh
   assert_out 'created today was reported as never having run'
+}
+
+# NEGATIVE: a listener with nothing ready stops failing (SB-951). It is the one
+# Telegram reader; when it is down every tap spins and every other check is
+# green — the same silence a loaded-but-dead launchd agent used to have.
+test_a_listener_not_ready_that_stops_failing_is_rejected() {
+  need_bin bash python3
+  src="$(copy_source)"
+  edit 's|if \[ "\$gl_ready" -lt 1 \]; then|if false; then|' "$src/$DOCTOR"
+  grep -q 'gl_ready" -lt 1' "$src/$DOCTOR" && fail "fixture did not defeat the not-ready branch"
+  export REPO="$src"
+  assert_fail check-doctor.sh
+  assert_out 'listener-not-ready case did not report as expected'
+}
+
+# NEGATIVE: a non-clean last exit stops warning. listen.py exits 3 on a 409,
+# so that exit IS the "second getUpdates reader" signal — and a Deployment
+# that keeps coming back to 1/1 hides it completely.
+test_listener_unclean_exits_that_stop_warning_are_rejected() {
+  need_bin bash python3
+  src="$(copy_source)"
+  edit 's|if \[ -n "\$gl_crashes" \]; then|if false; then|' "$src/$DOCTOR"
+  grep -q 'if \[ -n "\$gl_crashes" \]' "$src/$DOCTOR" && fail "fixture did not defeat the unclean-exit branch"
+  export REPO="$src"
+  assert_fail check-doctor.sh
+  assert_out 'listener-exit-3 case did not report as expected'
+  assert_out 'listener-crash case did not report as expected'
+}
+
+# NEGATIVE: the warning goes back to keying on restartCount. It only ever
+# grows, so the warning would be on for ever after one harmless restart.
+test_listener_warning_keyed_on_restart_count_is_rejected() {
+  need_bin bash python3
+  src="$(copy_source)"
+  edit 's|if \[ -n "\$gl_crashes" \]; then|if [ -n "$gl_crashes" ] \|\| [ "$gl_restart_count" -gt 0 ]; then|' "$src/$DOCTOR"
+  grep -qF '[ -n "$gl_crashes" ] || [ "$gl_restart_count" -gt 0 ]; then' "$src/$DOCTOR" \
+    || fail "fixture did not key the warning on restartCount"
+  export REPO="$src"
+  assert_fail check-doctor.sh
+  assert_out 'listener-clean-restarts case did not report as expected'
 }
 
 run_tests

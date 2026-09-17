@@ -422,6 +422,65 @@ else
   infof "kubectl not installed, skipping the cycle-runner CronJob check"
 fi
 
+# The gatekeeper listener (SB-951): the one process that reads Telegram. Not
+# running is a FAILURE, the same as a loaded cycle-runner plist — nothing else
+# answers a button tap, and the tap spins with every other check green.
+#
+# A non-clean LAST EXIT is a WARN, named by what it means: listen.py exits 3
+# (and only 3) on a 409, i.e. a second getUpdates reader on the bot token;
+# anything else non-zero is a crash or a kill. It is invisible otherwise,
+# behind a Deployment that keeps coming back to 1/1.
+#
+# restartCount alone is NOT a warning. It only ever goes up — a node restart
+# or a `kubectl rollout restart` counts too — so a check keyed on it would be
+# permanently on after the first harmless one, and a warning that is always on
+# is a warning nobody reads. Self-update does not restart the container at all
+# (listen.py re-execs in place), so a count here is never a normal update.
+if command -v "$KUBECTL" >/dev/null 2>&1; then
+  if gl="$("$KUBECTL" get deploy gatekeeper-listener -n cycle-runner \
+          -o jsonpath='{.status.readyReplicas}{"\t"}{.spec.replicas}{"\t"}{.spec.template.spec.containers[0].image}' 2>/dev/null)"; then
+    gl_ready="$(printf '%s' "$gl" | cut -f1)"
+    gl_desired="$(printf '%s' "$gl" | cut -f2)"
+    gl_image="$(printf '%s' "$gl" | cut -f3)"
+    gl_pods="$("$KUBECTL" get pod -l app=gatekeeper-listener -n cycle-runner \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[0].restartCount}{"\t"}{.status.containerStatuses[0].lastState.terminated.reason}{"\t"}{.status.containerStatuses[0].lastState.terminated.exitCode}{"\n"}{end}' 2>/dev/null)"
+    gl_restart_count="$(printf '%s\n' "$gl_pods" | awk -F'\t' '$2 ~ /^[0-9]+$/ {n += $2} END {print n + 0}')"
+    gl_crashes="$(printf '%s\n' "$gl_pods" | awk -F'\t' '$4 != "" && $4 != "0" {
+        what = ($4 == "3") ? "a second getUpdates reader (409)" : "crashed or killed"
+        print "     " $1 "  last exit " $4 " (" ($3 == "" ? "?" : $3) "): " what }')"
+
+    # readyReplicas is ABSENT, not 0, when nothing is ready.
+    case "$gl_ready" in ''|*[!0-9]*) gl_ready=0 ;; esac
+    if [ "$gl_ready" -lt 1 ]; then
+      failf "gatekeeper-listener is not running (${gl_ready}/${gl_desired:-?} ready) — nothing reads Telegram, button taps go unanswered" \
+        "run: kubectl -n cycle-runner describe deploy gatekeeper-listener; kubectl -n cycle-runner logs deploy/gatekeeper-listener"
+    elif [ "$gl_restart_count" -gt 0 ]; then
+      ok "gatekeeper-listener running (${gl_ready}/${gl_desired} ready; ${gl_restart_count} restart(s) over its life)"
+    else
+      ok "gatekeeper-listener running (${gl_ready}/${gl_desired} ready)"
+    fi
+
+    if [ -n "$gl_crashes" ]; then
+      warnf "gatekeeper-listener's last exit was not clean" \
+        "exit 3 = a second getUpdates reader on the bot token (Telegram 409); any other non-zero = the listener crashed or was killed — kubectl -n cycle-runner logs --previous deploy/gatekeeper-listener:$(printf '%s' "$gl_crashes" | head -3 | tr '\n' '~' | sed 's/~/\n     /g')"
+    fi
+
+    # Same image as the CronJob. The weekly refresh bumps both manifests in one
+    # PR, so a difference means one was applied and the other was not, and the
+    # listener and a tick are running different toolchains. `cj_image` is set
+    # above only when the CronJob exists; no CronJob, nothing to compare.
+    if [ -n "${cj_image:-}" ] && [ -n "$gl_image" ] && [ "$gl_image" != "$cj_image" ]; then
+      warnf "gatekeeper-listener runs $gl_image but the CronJob runs $cj_image" \
+        "apply both manifests from the same commit: kubectl apply -f k3s/cycle-runner/cronjob.yaml -f k3s/cycle-runner/listener.yaml"
+    fi
+  else
+    failf "no gatekeeper-listener Deployment in the cluster — nothing reads Telegram, button taps go unanswered" \
+      "run: kubectl apply -f k3s/cycle-runner/listener.yaml  (after the change is merged to main — it clones main)"
+  fi
+else
+  infof "kubectl not installed, skipping the gatekeeper-listener check"
+fi
+
 echo "── chezmoi sync ──────────────────────────"
 # The actual root-cause fix for PR #37 silently reverting PR #35: that
 # happened because `chezmoi re-add` was run on a machine whose ~/.claude was
