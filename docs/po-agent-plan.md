@@ -47,23 +47,24 @@ that need a human least.
 | # | Step | Ticket | Est | Needs |
 |---|---|---|---|---|
 | 1 | [x] cycle-report tells the truth | [SB-626](https://linear.app/silverbeer/issue/SB-626) | 3 | — |
-| 2 | [ ] `/cycle` in the terminal | [SB-1087](https://linear.app/silverbeer/issue/SB-1087) | 5 | 1 |
+| 2 | [x] `/cycle` in the terminal | [SB-1087](https://linear.app/silverbeer/issue/SB-1087) | 5 | 1 |
+| 7 | [ ] Telegram long-poll listener | [SB-951](https://linear.app/silverbeer/issue/SB-951) | 5 | — |
+| 8 | [ ] Chat with the PO from Telegram | [SB-1089](https://linear.app/silverbeer/issue/SB-1089) | 8 | 2, 7 |
 | ◆ | [ ] **Checkpoint A:** plan cycle 9 by hand with `/cycle` | — | — | 2, on 2026-09-20 |
 | 3 | [ ] Daily standup to Telegram | [SB-1088](https://linear.app/silverbeer/issue/SB-1088) | 3 | 2, A |
 | 4 | [ ] Runner prefers the cycle | [SB-989](https://linear.app/silverbeer/issue/SB-989) | 3 | — |
 | 5 | [ ] Triage actually runs, in-cluster | [SB-987](https://linear.app/silverbeer/issue/SB-987) | 3 | — |
 | 6 | [ ] PO feeds the runner | [SB-1090](https://linear.app/silverbeer/issue/SB-1090) | 5 | 2, 4, 5 |
 | ◆ | [ ] **Checkpoint B:** review cycle 10 and plan cycle 11 with the runner fed | — | — | 6, on 2026-10-04 |
-| 7 | [ ] Telegram long-poll listener | [SB-951](https://linear.app/silverbeer/issue/SB-951) | 5 | — |
-| 8 | [ ] Chat with the PO from Telegram | [SB-1089](https://linear.app/silverbeer/issue/SB-1089) | 8 | 2, 7 |
 | 9 | [ ] Close-out | — | — | all |
 
-**Why chat comes last and feeding the runner comes before it.** `/cycle` (step 2)
-is already a conversation, just in the terminal. The Telegram chat is the largest
-piece (13 points with its listener) and gets better once the PO's questions have
-been tested for two cycles at the checkpoints. Feeding the runner turns an idle
-loop into delivered tickets, which is the fastest way to show the epic is working.
-Steps 7–8 depend only on step 2, so they can move earlier without breaking anything.
+**Rows are in execution order; step numbers are kept so the prompts below still
+match.** Chat (steps 7–8) was originally last, so the PO's questions would be
+tested at two checkpoints first. On 2026-09-16, after step 2 shipped, it moved
+to run next: the user wants to talk to the PO from Telegram as soon as possible.
+Steps 7–8 depend only on step 2, so nothing breaks. The cost: chat goes live
+before Checkpoint A, so its first conversations are where the PO's bad questions
+surface — note them for Checkpoint A rather than tuning chat blind.
 
 **Cycles.** Steps 1–2 are in cycle 8, and steps 3–5 in cycle 9. Nothing past that
 is pre-assigned. Checkpoint A's `/cycle plan` places later steps; that is the
@@ -487,3 +488,61 @@ code or the ticket. Keep entries short; date and ticket each one.
     stamped by hand). `set_planning()` replaces only that one line and raises
     rather than truncate. `cycle-report.py --mark-*` is a dry run unless given
     `--yes`.
+- 2026-09-16 · SB-1087 — **Where it lives.** Skill `dot_claude/skills/po-agent/`
+  (`scripts/cycle_state.py` read-only, `scripts/cycle_apply.py` the only writer),
+  command `dot_claude/commands/cycle.md` (the conversation rules — SB-1089 reuses
+  this text, don't fork it). **The JSON schema reference is
+  `dot_claude/skills/po-agent/SKILL.md`**, field by field; a test
+  (`SkillMdSchema` in `.github/tests/linear_crud/test_cycle_state.py`) fails if
+  the doc and the emitted keys drift. Schema id `"po-agent.cycle_state/1"`:
+  adding a field or enum value keeps `/1`, renaming or removing bumps it.
+  `summary` is `cycles.summarize()` verbatim with its own `"schema": 1`.
+- 2026-09-16 · SB-1087 — **How to invoke.**
+  `python3 ~/.claude/skills/po-agent/scripts/cycle_state.py --cycle current|next|plan-target|N`
+  (`--plan` adds `plan` to any selection; `--include/--exclude/--pin SB-N`
+  re-fit; `--as-of` for boundaries). ~9 queries for review, ≤12 for a plan;
+  stdout is only the JSON, errors go to stderr with non-zero exit. Writes:
+  `cycle_apply.py --changes file.json` is a dry run; `--confirm` writes,
+  idempotently, one `issueUpdate` per issue, stamp last; a mid-batch failure
+  stops and re-running the same file finishes the job.
+- 2026-09-16 · SB-1087 — **For the standup (SB-1088):** quote `summary.totals`,
+  `summary.split`, `summary.carry_in`, `at_risk`, `waiting_on_human`,
+  `velocity.capacity_points`. `waiting_on_human` is **workspace-wide**, each
+  entry flagged `in_cycle` — on 2026-09-16 the only open gate (SB-990) was
+  outside every cycle. Done/canceled tickets that still carry a gate label
+  (SB-964) are excluded. Gate age comes from issue history `addedLabels`
+  (`age_source: history`), falling back to `updatedAt`.
+- 2026-09-16 · SB-1087 — **For chat (SB-1089):** the PO answers from the JSON, so
+  "what's at risk?" is `at_risk.not_started` + `at_risk.stalled`. Stalled means
+  started and `max(updatedAt, startedAt)` older than `--stale-days` (3):
+  Linear's automatic cycle rollover adds history but does **not** bump
+  `updatedAt`, so it never counts as movement. `not_started` stays empty until
+  `days_left ≤ --at-risk-days` (3) — cycle 8 had 20 unstarted planned tickets and
+  an empty list on day 3. Checkpoint A hasn't happened, so there are no
+  checkpoint lessons yet; note what the chat PO gets wrong for it.
+- 2026-09-16 · SB-1087 — **For runner feeding (SB-1090):** add readiness to
+  `issues[]` (it already has `has_ac`, `estimate`, `repo`, `driven`, `gate`,
+  `blocked_by`, `blocks`). `has_ac` matches `## Acceptance`, `Done when`,
+  `Definition of done`, `Exit criteria` headings or any `- [ ]` checklist;
+  descriptions are not emitted. "Planned" means only "no `adhoc` label", so
+  long-lived tickets (SB-100) count as planned.
+- 2026-09-16 · SB-1087 — **Capacity and plan, as first seen live.** Capacity 55 =
+  `floor(163.0 mean pts over C5–C7 × (1 − 322/489 adhoc pts done))`. Carry-over
+  alone (40 issues, 139 pts) exceeds it, and carry-over ranks first, so SB-1088 /
+  SB-989 / SB-987 (already in cycle 9) fell into `does_not_fit`. `--include` only
+  adds a ticket to the ranking; **`--pin` ranks it first** (still capacity-bound,
+  `plan.pinned_exceeds_capacity` when pins alone overflow). With those three
+  pinned, all fit. While the previous cycle is still running, carry-over is
+  `projected` (`plan.carry_over_projected`): it counts toward capacity, but
+  `cycle_apply.py` **refuses** to move any issue out of a started, unclosed
+  cycle (`ActiveCycleMove`; escape hatch `--allow-active-cycle-move`, only on an
+  explicit ask). Drop decisions made before close go in the stamp note and are
+  applied after Linear rolls the work forward (`"cycle": null` then).
+- 2026-09-16 · SB-1087 — **"A rejected plan writes nothing" needs two checks.**
+  `linear.sh list --all` has no cycle column and lists only your assigned
+  issues, so it can't see a cycle move. Also compare cycle membership
+  (`cycle_state.py --cycle N` `issues[]` before/after) and `cycle.planning`.
+  Both were identical after the cycle 9 dry run was rejected.
+- 2026-09-16 · SB-1087 — Local ruff is 0.12.12 but `.ruff.toml` requires
+  0.16.5, so `test_ruff.sh` fails on this machine regardless of the diff. CI is
+  the source of truth until the local ruff is upgraded.

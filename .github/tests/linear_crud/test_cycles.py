@@ -336,6 +336,42 @@ class MarkPlanning(unittest.TestCase):
         gql.assert_not_called()
 
 
+class FetchMembers(unittest.TestCase):
+    """extra_fields (SB-1087): po-agent's cycle_state.py is the only caller
+    that passes it, splicing fields onto Q_MEMBERS's nodes selection. A bad
+    splice point would silently drop the `labels` field summarize() needs, or
+    double it, or leak into the shared module-level query string."""
+
+    def test_no_extra_fields_sends_the_base_query_unchanged(self):
+        with mock.patch.object(cycles, "gql", return_value={"issues": {"nodes": []}}) as gql:
+            cycles.fetch_members("cycle-4-uuid")
+        self.assertEqual(gql.call_args.args[0], cycles.Q_MEMBERS)
+        self.assertEqual(gql.call_args.args[1], {"id": "cycle-4-uuid"})
+
+    def test_extra_fields_are_spliced_in_once_after_labels(self):
+        with mock.patch.object(cycles, "gql", return_value={"issues": {"nodes": []}}) as gql:
+            cycles.fetch_members("cycle-4-uuid", "url priority updatedAt")
+        query = gql.call_args.args[0]
+        self.assertEqual(query.count("labels{nodes{name}}"), 1)
+        self.assertIn("labels{nodes{name}} url priority updatedAt }", query)
+        self.assertNotEqual(query, cycles.Q_MEMBERS)
+
+    # NEGATIVE: splicing must not mutate the shared query constant other
+    # cycles reuse — a str.replace on the module global would leak across calls.
+    def test_extra_fields_do_not_mutate_the_module_level_query_constant(self):
+        with mock.patch.object(cycles, "gql", return_value={"issues": {"nodes": []}}):
+            cycles.fetch_members("cycle-4-uuid", "url")
+        self.assertNotIn("url", cycles.Q_MEMBERS)
+        with mock.patch.object(cycles, "gql", return_value={"issues": {"nodes": []}}) as gql:
+            cycles.fetch_members("cycle-4-uuid")
+        self.assertEqual(gql.call_args.args[0], cycles.Q_MEMBERS)
+
+    def test_result_nodes_pass_through_unchanged(self):
+        nodes = [fx.issue(1, 3)]
+        with mock.patch.object(cycles, "gql", return_value={"issues": {"nodes": nodes}}):
+            self.assertEqual(cycles.fetch_members("cycle-4-uuid", "url"), nodes)
+
+
 # ------------------------------------------------------------ summarize
 
 class SummarizeClosedCycle(unittest.TestCase):

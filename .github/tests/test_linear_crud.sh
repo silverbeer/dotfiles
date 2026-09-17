@@ -14,6 +14,7 @@ BOARD_PY=dot_claude/skills/linear-crud/scripts/executable_board.py
 API_PY=dot_claude/skills/linear-crud/scripts/linear_api.py
 APPLY_PY=dot_claude/skills/backlog-groom/scripts/apply.py
 CYCLES_PY=dot_claude/skills/linear-crud/scripts/cycles.py
+CYCLE_STATE_PY=dot_claude/skills/po-agent/scripts/cycle_state.py
 REPOS_JSON=dot_claude/skills/linear-crud/repos.json
 GQL=dot_claude/skills/linear-crud/scripts/executable_linear-gql.sh
 
@@ -185,6 +186,22 @@ test_inclusive_cycle_end_fails_the_boundary_test() {
   assert_out 'FAIL: test_end_is_exclusive_at_the_boundary_instant'
 }
 
+# NEGATIVE: the plan fit stops counting the ticket it is about to add, so a
+# cumulative total just under capacity lets one more ticket overshoot it. The
+# PO agent quotes proposed_points as "fits"; a plan over capacity is the exact
+# failure /cycle plan exists to push back on (SB-1087).
+test_over_capacity_plan_fit_fails_the_python_tests() {
+  need_bin jq python3 git
+  src="$(copy_source)"
+  [ -f "$src/$CYCLE_STATE_PY" ] || fail "cycle_state.py is not in the copied tree — is it tracked?"
+  edit 's/and cumulative + est <= capacity:/and cumulative <= capacity:/' "$src/$CYCLE_STATE_PY"
+  grep -q 'and cumulative <= capacity:' "$src/$CYCLE_STATE_PY" || fail "fixture did not break the capacity fit"
+  export REPO="$src"
+  assert_fail check-linear-crud.sh
+  assert_out 'python unit tests failed'
+  assert_out 'FAIL: test_fit_never_exceeds_capacity'
+}
+
 # NEGATIVE: the python tests vanish. Discovery finding nothing must not be a
 # green run.
 test_missing_python_tests_fail() {
@@ -193,7 +210,7 @@ test_missing_python_tests_fail() {
   rm "$src"/.github/tests/linear_crud/test_*.py
   export REPO="$src"
   assert_fail check-linear-crud.sh
-  assert_out 'expected at least 15 tests to run'
+  assert_out 'expected at least 200 tests to run'
 }
 
 # NEGATIVE: --http1.1 is dropped from linear-gql.sh. Every Linear call the
