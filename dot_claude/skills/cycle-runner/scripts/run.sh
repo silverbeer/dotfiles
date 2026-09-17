@@ -4,7 +4,10 @@
 # Invoked by a k3s CronJob every 30 minutes (SB-976). It never loops — that is
 # what makes it safe to run on a schedule. Each invocation:
 #
-#   1. Drains `gate.py poll --once`. For every gate that resolved:
+#   1. Drains `gate.py poll --once`, which reads Linear and the decisions the
+#      gatekeeper listener recorded from Telegram — it never reads Telegram
+#      itself; the listener is the one getUpdates reader (SB-951). For every
+#      gate decided since the last tick:
 #      - approved `merge`  -> THIS SCRIPT re-confirms CI is green (never trusts
 #        the gate answer as a substitute for that check) and runs
 #        `gh pr merge --squash --delete-branch` itself — never Claude

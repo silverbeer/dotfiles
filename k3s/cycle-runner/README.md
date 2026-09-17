@@ -1,8 +1,9 @@
 # cycle-runner in k3s
 
 The cycle-runner runs as a CronJob every 30 minutes (SB-976), on the
-rancher-desktop cluster. This directory holds the image it runs (SB-975) and
-the manifests that schedule it.
+rancher-desktop cluster, next to the gatekeeper listener, a one-replica
+Deployment that owns Telegram (SB-951). This directory holds the image both
+run (SB-975) and their manifests.
 
 ## Deploy
 
@@ -10,7 +11,16 @@ the manifests that schedule it.
 kubectl apply -f k3s/cycle-runner/namespace.yaml
 bash k3s/cycle-runner/provision-cluster-secret.sh   # reads the mini's files, not 1Password
 kubectl apply -f k3s/cycle-runner/pvc.yaml -f k3s/cycle-runner/cronjob.yaml
+kubectl apply -f k3s/cycle-runner/listener.yaml
 ```
+
+**Merge first, then apply `listener.yaml`.** Both pods run code cloned from
+`dotfiles@main`, not code from your checkout. Applied before the SB-951 merge,
+the listener clones a main that has no `listen.py` and crash-loops, while the
+runner's `gate.py poll` on that main still reads Telegram, a second reader.
+After the merge and before the apply, no one reads Telegram: taps wait (Telegram
+keeps them for 24h) and are answered once the listener starts. Linear comments
+work throughout.
 
 The Secret carries five keys. Three are read as **files** by `env.sh` in both
 the cycle-runner and gatekeeper skills, via `CYCLE_RUNNER_SECRETS_DIR=/secrets`
@@ -22,6 +32,31 @@ there is no zsh in a pod — `linear-api-key`, `gh-token`.
 are already on disk from `provision-secrets.sh`; this copies them in. Re-run it
 after any rotation — a CronJob reads the Secret at pod start, so the next tick
 picks it up.
+
+## The gatekeeper listener
+
+`listener.yaml` runs `gatekeeper/scripts/listen.py`, the only process that
+calls Telegram's `getUpdates`. Telegram allows one reader per bot token, so the
+Deployment is `replicas: 1` with `strategy: Recreate`: a rolling update would
+briefly run two. A tap is recorded on its gate, answered within seconds, then
+applied to Linear. The runner's `gate.py poll` picks up the recorded decision
+on its next tick. Free text that isn't a gate answer goes to
+`$STATE/inbox/telegram/` (see the gatekeeper SKILL.md).
+
+It mounts only `telegram-token` and `telegram-chat-id` from the Secret, plus
+`linear-api-key` as an env var. It clones dotfiles into an `emptyDir` on every
+container start and never runs from the PVC's `.claude/`, which `bootstrap.sh`
+replaces on every tick. Every five minutes it checks whether `main` has moved,
+and if so it fetches, resets its clone and re-execs itself in place. It does
+not exit to update: every exit bumps `restartCount` and is subject to the
+kubelet's restart backoff. `kubectl -n cycle-runner rollout restart
+deploy/gatekeeper-listener` also works.
+
+`doctor.sh` fails if the listener is missing or not ready. It warns when the
+last exit was non-zero: **exit 3** means a Telegram 409, a second `getUpdates`
+reader; any other code is a crash or a kill. It also warns if the listener's
+image differs from the CronJob's. A restart count with a clean last exit is
+only mentioned in the ok line.
 
 ## What the scheduler replaced
 
@@ -67,11 +102,11 @@ semantics and isolation.
 
 ## Keeping `claude` current
 
-The CronJob is pinned to `ghcr.io/silverbeer/cycle-runner:claude-<version>`,
+The CronJob and the listener are pinned to `ghcr.io/silverbeer/cycle-runner:claude-<version>`,
 never `:latest`. `:latest` with `imagePullPolicy: Always` means a rebuild lands
 in the next tick with nobody having looked at it, and leaves nothing to revert
-*to*. `check-k3s-manifests.sh` fails the build if the tag and the Dockerfile's
-`ARG CLAUDE_VERSION` disagree.
+*to*. `check-k3s-manifests.sh` fails the build if either tag and the
+Dockerfile's `ARG CLAUDE_VERSION` disagree.
 
 `.github/workflows/cycle-runner-image-refresh.yml` runs weekly (Mon 07:00 UTC,
 or on demand):

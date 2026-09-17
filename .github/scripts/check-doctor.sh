@@ -390,6 +390,12 @@ if [[ "$out" == *"kubectl not installed, skipping the cycle-runner CronJob check
 else
   bad "kubectl-absent case did not report as expected: $out"
 fi
+if [[ "$out" == *"kubectl not installed, skipping the gatekeeper-listener check"* \
+      && "$out" != *"gatekeeper-listener is not running"* && "$out" != *"no gatekeeper-listener Deployment"* ]]; then
+  ok "no kubectl -> the listener check is info too"
+else
+  bad "kubectl-absent listener case did not report as expected: $out"
+fi
 
 # 4b. healthy: scheduled, not suspended.
 kubectl_stub 'case "$*" in
@@ -612,6 +618,105 @@ if [[ "$out" == *"every pod in the cluster is Running or Succeeded"* \
   ok "a healthy cluster -> says so, rather than staying silent"
 else
   bad "healthy-cluster case did not report as expected: $out"
+fi
+
+default_kubectl
+
+# ------------------------------------- 4h. gatekeeper listener (SB-951)
+#
+# The one Telegram reader. Not running is a FAILURE, like a loaded cycle-runner
+# plist: nothing else answers a tap, and every other check stays green.
+
+# A kubectl that answers the listener's two queries (and the CronJob's image,
+# for the drift comparison) from fixtures.
+listener_stub() {  # READY DESIRED LISTENER_IMAGE POD_ROWS
+  cat >"$bin/kubectl" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"get deploy gatekeeper-listener -n cycle-runner -o jsonpath"*) printf '%s\\t%s\\t%s' "$1" "$2" "$3" ;;
+  *"get pod -l app=gatekeeper-listener"*) printf '%b' "$4" ;;
+  *"get cronjob cycle-runner -n cycle-runner -o jsonpath={.spec.jobTemplate"*) printf 'ghcr.io/silverbeer/cycle-runner:claude-2.1.258' ;;
+  *"get cronjob cycle-runner -n cycle-runner -o jsonpath"*) printf "false\\t2026-09-04T11:00:00Z\\t2026-09-04T11:00:12Z" ;;
+  *"get cronjob"*) exit 0 ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$bin/kubectl"
+}
+LISTENER_IMAGE=ghcr.io/silverbeer/cycle-runner:claude-2.1.258
+QUIET_POD='gatekeeper-listener-abc\t0\t\t\n'
+
+# 4h1. healthy: 1/1, no restarts, same image as the CronJob -> ok, nothing else.
+listener_stub 1 1 "$LISTENER_IMAGE" "$QUIET_POD"
+out="$(run_doctor)"
+if [[ "$out" == *"gatekeeper-listener running (1/1 ready)"* && "$out" != *"last exit was not clean"* \
+      && "$out" != *"gatekeeper-listener runs"* ]]; then
+  ok "a healthy listener -> ok, no restart or drift warning"
+else
+  bad "healthy-listener case did not report as expected: $out"
+fi
+
+# 4h2. 0 ready. readyReplicas is ABSENT from the object, not 0, when nothing is
+# ready — so the fixture sends an empty field, the shape kubectl really prints.
+listener_stub "" 1 "$LISTENER_IMAGE" "$QUIET_POD"
+out="$(run_doctor)"
+if [[ "$out" == *"gatekeeper-listener is not running (0/1 ready)"* ]]; then
+  ok "a listener with 0/1 ready -> fail"
+else
+  bad "listener-not-ready case did not report as expected: $out"
+fi
+
+# 4h3. no Deployment at all -> fail, with the apply command.
+kubectl_stub 'case "$*" in
+  *"get cronjob"*) exit 0 ;;
+  *) exit 1 ;;
+esac'
+out="$(run_doctor)"
+if [[ "$out" == *"no gatekeeper-listener Deployment in the cluster"* && "$out" == *"kubectl apply -f k3s/cycle-runner/listener.yaml"* ]]; then
+  ok "a missing listener -> fail, with the apply command"
+else
+  bad "missing-listener case did not report as expected: $out"
+fi
+
+# 4h4. last exit 3: listen.py's dedicated code for a 409 — a second
+# getUpdates reader exists. Named as that, not as a generic crash.
+listener_stub 1 1 "$LISTENER_IMAGE" 'gatekeeper-listener-abc\t3\tError\t3\n'
+out="$(run_doctor)"
+if [[ "$out" == *"last exit was not clean"* && "$out" == *"last exit 3 (Error): a second getUpdates reader (409)"* ]]; then
+  ok "a listener whose last exit was 3 -> warn, names the second reader"
+else
+  bad "listener-exit-3 case did not report as expected: $out"
+fi
+
+# 4h5. any other non-zero last exit is a crash or a kill.
+listener_stub 1 1 "$LISTENER_IMAGE" 'gatekeeper-listener-abc\t2\tOOMKilled\t137\n'
+out="$(run_doctor)"
+if [[ "$out" == *"last exit was not clean"* && "$out" == *"last exit 137 (OOMKilled): crashed or killed"* \
+      && "$out" != *"a second getUpdates reader (409)"* ]]; then
+  ok "a listener that crashed -> warn, says crashed, not 409"
+else
+  bad "listener-crash case did not report as expected: $out"
+fi
+
+# 4h6. restarts with a CLEAN last exit (a node restart, a rollout restart) are
+# not a warning: restartCount only ever grows, so keying on it would leave the
+# warning permanently on after the first harmless restart.
+listener_stub 1 1 "$LISTENER_IMAGE" 'gatekeeper-listener-abc\t5\tCompleted\t0\n'
+out="$(run_doctor)"
+if [[ "$out" == *"gatekeeper-listener running (1/1 ready; 5 restart(s) over its life)"* \
+      && "$out" != *"last exit was not clean"* ]]; then
+  ok "restarts with a clean last exit -> ok, mentions the count, no warn"
+else
+  bad "listener-clean-restarts case did not report as expected: $out"
+fi
+
+# 4h7. the listener runs a different image from the CronJob.
+listener_stub 1 1 ghcr.io/silverbeer/cycle-runner:claude-2.1.200 "$QUIET_POD"
+out="$(run_doctor)"
+if [[ "$out" == *"gatekeeper-listener runs ghcr.io/silverbeer/cycle-runner:claude-2.1.200 but the CronJob runs ghcr.io/silverbeer/cycle-runner:claude-2.1.258"* ]]; then
+  ok "a listener image that differs from the CronJob -> warn, names both"
+else
+  bad "listener-image-drift case did not report as expected: $out"
 fi
 
 default_kubectl

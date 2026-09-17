@@ -1,0 +1,184 @@
+# The gatekeeper listener: the one process that reads Telegram (SB-951).
+#
+# Before this, the runner's `gate.py poll` read Telegram once per 30-minute
+# tick. A button tap spun until the next tick, and by then its callback id had
+# expired, so the toast never arrived (SB-950). This runs all the time instead:
+# a tap is recorded and answered within seconds, and the runner reads the
+# recorded decision on its next tick.
+#
+# Telegram allows exactly ONE getUpdates reader per bot token; a second gets a
+# 409 and so does the first. Every choice below that looks conservative is in
+# service of that one invariant.
+#
+# A Deployment, not launchd: the runner already lives here, and so do the
+# image, the Secret and the gate state this has to share with it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gatekeeper-listener
+  namespace: cycle-runner
+  labels:
+    app: gatekeeper-listener
+spec:
+  # One. Never scale this: two replicas are two getUpdates readers.
+  replicas: 1
+
+  # Recreate, not RollingUpdate. A rolling update starts the new pod BEFORE
+  # stopping the old one, which is two readers for as long as the overlap
+  # lasts — a 409 on every rollout. Recreate stops the old pod first; the cost
+  # is a few seconds with no reader, and Telegram holds taps for 24h.
+  strategy:
+    type: Recreate
+
+  selector:
+    matchLabels:
+      app: gatekeeper-listener
+
+  template:
+    metadata:
+      labels:
+        app: gatekeeper-listener
+    spec:
+      # listen.py stops on SIGTERM mid long-poll, in well under a second. Ten
+      # seconds is room for the update in hand to finish; any longer only
+      # stretches the no-reader gap of a Recreate rollout.
+      terminationGracePeriodSeconds: 10
+
+      containers:
+        - name: listen
+          # Same pin as cronjob.yaml. The weekly refresh workflow bumps both
+          # files together, check-k3s-manifests.sh fails if they disagree, and
+          # doctor.sh warns if the running Deployment and CronJob differ.
+          image: ghcr.io/silverbeer/cycle-runner:claude-2.1.258
+          imagePullPolicy: IfNotPresent
+          # The code comes from a fresh clone on every container start, NOT
+          # from the PVC's ~/.claude: bootstrap.sh deletes and re-copies the
+          # skills there every tick, which would pull the files out from under
+          # a process that runs for days.
+          #
+          # Not an initContainer either: an initContainer runs once per POD,
+          # but a crashed or liveness-killed CONTAINER restarts on its own.
+          # The clone has to happen inside the command, so any restart
+          # re-clones.
+          #
+          # Self-update does NOT go through a restart. listen.py compares
+          # dotfiles@main with the commit it started from every five minutes;
+          # when it moves, it fetches and resets this clone and re-execs
+          # itself in place (same pid, same env). An exit would bump
+          # restartCount for good and hit the kubelet's restart backoff
+          # (10s doubling to 5min), so two quick merges would stretch the gap
+          # with no reader. `kubectl rollout restart deploy/gatekeeper-listener`
+          # still works, and re-clones.
+          #
+          # Exit codes: 3 means Telegram answered 409, i.e. a second
+          # getUpdates reader exists; nothing else exits 3. doctor.sh reads
+          # the last exit code and names it.
+          # `command` replaces the image ENTRYPOINT, so tini is named here
+          # explicitly: it stays pid 1, reaps git children, and forwards SIGTERM
+          # to python across the in-place execv self-update.
+          command:
+            - /usr/bin/tini
+            - --
+            - bash
+            - -eu
+            - -o
+            - pipefail
+            - -c
+            - |
+              rm -rf /work/dotfiles
+              git clone --quiet --depth 1 --branch "${DOTFILES_REF}" \
+                "${DOTFILES_REPO}" /work/dotfiles
+              gk=/work/dotfiles/dot_claude/skills/gatekeeper/scripts
+              . "$gk/env.sh"
+              exec python3 "$gk/listen.py" --repo /work/dotfiles --ref "${DOTFILES_REF}"
+          env:
+            # $HOME is the volume, so gate state is the runner's own:
+            # .local/state/cycle-runner/{gates,inbox,telegram-offset}. Sharing
+            # that directory IS the handoff between the two.
+            - name: HOME
+              value: /data/home
+            - name: DOTFILES_REPO
+              value: https://github.com/silverbeer/dotfiles
+            - name: DOTFILES_REF
+              value: main
+            # gatekeeper/env.sh reads telegram-token and telegram-chat-id from
+            # here — the same mechanism the CronJob uses.
+            - name: CYCLE_RUNNER_SECRETS_DIR
+              value: /secrets
+            # A decision is applied to Linear (label + echo comment) the
+            # moment it is recorded.
+            - name: LINEAR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cycle-runner
+                  key: linear-api-key
+            # kubectl logs shows each line as it happens, not in 4k blocks.
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          # A process that is up but wedged answers no taps, and nothing else
+          # would notice. listen.py writes the heartbeat at least once per
+          # long poll (25s) and once per backoff (at most ~66s).
+          #
+          # The initial delay covers the clone: the heartbeat on the PVC is the
+          # previous container's, and is already stale by the time this starts.
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - f=/data/home/.local/state/cycle-runner/listener/heartbeat; [ -f "$f" ] && [ $(( $(date +%s) - $(stat -c %Y "$f") )) -lt 120 ]
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+          volumeMounts:
+            - name: home
+              mountPath: /data
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+            - name: work
+              mountPath: /work
+          resources:
+            requests:
+              # A real request, not a formality (SB-981). The CronJob's 50m is
+              # a floor for a pod that bursts for minutes and exits; this one
+              # never exits, and spends nearly all of its life blocked in a
+              # long poll. 50m is honest for that, and the node is ~95%
+              # requested, so every millicore here is one some other pod
+              # cannot schedule on.
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              # No CPU limit: a throttled listener is a slow toast, which is
+              # the thing this exists to fix. Memory is capped because a leak
+              # in a process that runs for weeks should kill the pod, not the
+              # node.
+              memory: 256Mi
+
+      volumes:
+        # The runner's PVC, mounted by this pod and every CronJob pod at once.
+        # That works because ReadWriteOnce means one NODE, not one pod, and
+        # the cluster has one node. A local-path volume lives on one node's
+        # disk: with a second node, everything that mounts this is confined
+        # to that one, and a move to networked storage that honours RWO per
+        # attachment would stop the co-mount outright. Revisit both manifests
+        # before adding a node.
+        - name: home
+          persistentVolumeClaim:
+            claimName: cycle-runner-home
+        - name: secrets
+          secret:
+            secretName: cycle-runner
+            defaultMode: 0400
+            # Only the two Telegram files. The listener runs no claude and
+            # pushes nothing, so claude-token and gh-token are not mounted:
+            # an always-on pod should hold the fewest credentials possible.
+            items:
+              - key: telegram-token
+                path: telegram-token
+              - key: telegram-chat-id
+                path: telegram-chat-id
+        # The clone. Container-lifetime scratch, re-cloned on every container
+        # start and updated in place by self-update.
+        - name: work
+          emptyDir: {}

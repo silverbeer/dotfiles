@@ -7,12 +7,16 @@ opens. GATEKEEPER_STATE points at a fresh tempdir per test.
 
 from __future__ import annotations
 
+import io
+import json
 import os
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
@@ -55,6 +59,10 @@ class GateTestCase(unittest.TestCase):
 
         self.transport = FakeTransport()
         self.gk = gate.Gatekeeper(self.transport, chat_id="42", allowed_ids={42})
+
+    def later(self, **delta):
+        """now_utc() moved forward, for anything waiting on `next_retry_at`."""
+        return mock.patch.object(gate, "now_utc", return_value=datetime.now(timezone.utc) + timedelta(**delta))
 
     def open_gate(self, kind="plan", ticket="SB-1", body="proposal body here"):
         return self.gk.open_gate(kind, ticket, body, session_id="s1", run_id="r1", link="")
@@ -227,7 +235,7 @@ class SupersededGateTests(GateTestCase):
     def test_poll_closes_superseded_gates_before_draining(self):
         g = self.open_gate()
         self.linear.state_name, self.linear.state_type = "Done", "completed"
-        self.gk.poll_once(timeout=0)
+        self.gk.poll_once()
         self.assertEqual(gate.load_gate(g["gate_id"])["status"], "superseded")
         # and it must no longer count as awaiting, or it keeps parking the ticket
         self.assertEqual([x["gate_id"] for x in gate.awaiting_gates()], [])
@@ -309,51 +317,6 @@ class CallbackAnswerFailureTests(GateTestCase):
         self.assertIn(("cb-stranger-2", ""), self.transport.answered)
 
 
-class DrainAckPolicyTests(GateTestCase):
-    """SB-950, the other half: what `drain_telegram` acks. Telegram replays an
-    unacked update for 24h, which is the safety net — acking one whose decision
-    was never recorded throws the human's answer away permanently."""
-
-    def _batch(self, gate_dict, verb="approve", update_id=500, cq_id="cb-drain"):
-        return [
-            {
-                "update_id": update_id,
-                "callback_query": {"id": cq_id, "from": {"id": 42}, "data": f"{gate_dict['gate_id']}:{verb}"},
-            }
-        ]
-
-    def test_a_clean_update_is_acked(self):
-        g = self.open_gate()
-        self.transport.batches = [self._batch(g, update_id=500)]
-        self.gk.drain_telegram(timeout=0)
-
-        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "approved")
-        self.assertEqual(self.gk._offset(), 501)
-
-    def test_a_transport_failure_does_not_ack_so_telegram_redelivers(self):
-        g = self.open_gate()
-        # send_text runs after the decision is saved; make it blow up to stand
-        # in for any transport failure mid-handling.
-        self.transport.batches = [self._batch(g, verb="note", update_id=700)]
-        self.transport.fail_send = gate.TelegramError("Could not reach Telegram: timed out")
-
-        self.gk.drain_telegram(timeout=0)
-
-        # Offset must NOT have advanced past an update we could not finish.
-        self.assertNotEqual(self.gk._offset(), 701)
-
-    def test_an_unprocessable_update_is_acked_so_it_cannot_block_the_queue(self):
-        g = self.open_gate()
-        batch = self._batch(g, update_id=900)
-        # A shape the handler cannot process at all — not a transport problem.
-        batch[0]["callback_query"]["from"] = None
-        self.transport.batches = [batch]
-
-        self.gk.drain_telegram(timeout=0)
-
-        self.assertEqual(self.gk._offset(), 901)
-
-
 class LinearChannelTests(GateTestCase):
     def test_linear_approve_with_note_is_parsed(self):
         g = self.open_gate()
@@ -411,11 +374,14 @@ class FirstDecisionWinsTests(GateTestCase):
     def test_both_channels_decide_first_wins_and_source_is_recorded(self):
         g = self.open_gate()
         gate_id = g["gate_id"]
-        approve_cb = {"id": "cb1", "from": {"id": 42}, "data": f"{gate_id}:approve"}
-        self.transport.batches = [[{"update_id": 1, "callback_query": approve_cb}]]
+        # The listener handles the tap; the runner's poll then reads a Linear
+        # rejection posted after it (SB-951 split the two).
+        self.gk.handle_update(
+            {"update_id": 1, "callback_query": {"id": "cb1", "from": {"id": 42}, "data": f"{gate_id}:approve"}}
+        )
         self.linear.add_comment("reject: too slow", user_id="user-1")
 
-        resolved = self.gk.poll_once(timeout=5)
+        resolved = self.gk.poll_once()
 
         self.assertEqual(len(resolved), 1)
         self.assertEqual(resolved[0]["status"], "approved")
@@ -425,6 +391,225 @@ class FirstDecisionWinsTests(GateTestCase):
         self.assertEqual(loaded["source"], "telegram")
         self.assertIsNone(loaded["note"])  # the Linear rejection never applied
 
+    def test_a_stale_copy_cannot_overwrite_a_decision_made_elsewhere(self):
+        """decide() re-reads under the lock. The runner's poll works from a
+        dict it read before the listener recorded a tap; deciding from that
+        copy must not flip the gate or post a second echo."""
+        g = self.open_gate()
+        stale = gate.load_gate(g["gate_id"])
+        self.callback(g, "approve")
+        comments = len(self.linear.comments)
+
+        self.assertFalse(self.gk.decide(stale, "reject", "too slow", "linear"))
+
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertEqual((loaded["status"], loaded["source"]), ("approved", "telegram"))
+        self.assertEqual(len(self.linear.comments), comments)
+        self.assertEqual(self.linear.labels, ["type:feature", "gate:approved"])
+
+    def test_a_recorded_but_unapplied_tap_still_beats_a_later_linear_comment(self):
+        """Linear down when the tap arrived: the decision is on disk as
+        `pending_decision`. A Linear comment read once Linear is back came
+        second, and must not overtake it."""
+        g = self.open_gate()
+        self.linear.fail_issue_update = SystemExit("linear-gql: 500 Internal Server Error")
+        self.callback(g, "approve")
+        self.linear.fail_issue_update = None
+        self.linear.add_comment("reject: too slow", user_id="user-1")
+
+        self.gk.check_linear(gate.load_gate(g["gate_id"]))
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "awaiting")
+
+        with self.later(minutes=1):
+            self.gk.poll_once()
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertEqual((loaded["status"], loaded["source"]), ("approved", "telegram"))
+
+
+class RetryBackoffTests(GateTestCase):
+    """SB-951 review. A recorded decision that cannot apply — the ticket was
+    deleted, or moved out of reach — used to be retried every listener loop for
+    ever, and the gate never left `awaiting` because the timeout skips gates
+    with a recorded decision."""
+
+    def setUp(self):
+        super().setUp()
+        self.g = self.open_gate()
+        self.linear.fail_issue_update = SystemExit("linear-gql: Entity not found: Issue")
+        self.gk.handle_update(self.tap())
+
+    def tap(self):
+        cq = {"id": "cb77", "from": {"id": 42}, "data": f"{self.g['gate_id']}:approve"}
+        return {"update_id": 77, "callback_query": cq}
+
+    def pending(self):
+        return gate.load_gate(self.g["gate_id"])["pending_decision"]
+
+    def test_the_first_failure_is_recorded_with_a_retry_30s_out(self):
+        pd = self.pending()
+        self.assertEqual(pd["attempts"], 1)
+        self.assertIn("Entity not found", pd["last_error"])
+        wait = (datetime.fromisoformat(pd["next_retry_at"]) - gate.now_utc()).total_seconds()
+        self.assertTrue(25 <= wait <= 30, wait)
+
+    def test_no_retry_before_next_retry_at(self):
+        queries = len(self.linear.queries)
+        self.gk.retry_pending()
+        self.assertEqual(len(self.linear.queries), queries, "the listener retried before next_retry_at")
+        self.gk.poll_once()
+        self.assertEqual(self.pending()["attempts"], 1, "poll retried before next_retry_at")
+
+    def test_the_delay_doubles_and_caps_at_15_minutes(self):
+        delays = []
+        for _ in range(7):
+            when = datetime.fromisoformat(self.pending()["next_retry_at"]) + timedelta(seconds=1)
+            with mock.patch.object(gate, "now_utc", return_value=when):
+                self.gk.retry_pending()
+            delays.append(round((datetime.fromisoformat(self.pending()["next_retry_at"]) - when).total_seconds()))
+        self.assertEqual(delays, [60, 120, 240, 480, 900, 900, 900])
+        self.assertEqual(self.pending()["attempts"], 8)
+
+    def test_a_later_successful_retry_clears_the_pending_decision(self):
+        self.linear.fail_issue_update = None
+        with self.later(seconds=31):
+            self.gk.retry_pending()
+        loaded = gate.load_gate(self.g["gate_id"])
+        self.assertEqual((loaded["status"], loaded["source"], loaded["handoff"]), ("approved", "telegram", "pending"))
+        self.assertNotIn("pending_decision", loaded)
+
+    def test_after_24h_it_gives_up_to_needs_human_and_says_so_once(self):
+        recorded = datetime.fromisoformat(self.pending()["at"])
+        with mock.patch.object(gate, "now_utc", return_value=recorded + timedelta(hours=24, seconds=1)):
+            self.gk.retry_pending()
+        with mock.patch.object(gate, "now_utc", return_value=recorded + timedelta(hours=30)):
+            self.gk.retry_pending()
+            self.gk.poll_once()
+
+        loaded = gate.load_gate(self.g["gate_id"])
+        self.assertEqual((loaded["status"], loaded["reason"]), ("needs-human", "decision_not_applied"))
+        self.assertEqual(loaded["unapplied_decision"]["verb"], "approve")
+        self.assertNotIn("pending_decision", loaded)
+        self.assertEqual(loaded["handoff"], "claimed", "the runner was never handed the stuck gate")
+        dms = [t for t in self.transport.texts if "couldn't apply it to Linear" in t]
+        self.assertEqual(len(dms), 1, self.transport.texts)
+        self.assertIn("recorded your approve on SB-1", dms[0])
+        self.assertIn("Entity not found", dms[0])
+
+        # the original tap, redelivered after the give-up, is still a quiet no-op
+        sent = list(self.transport.texts)
+        self.gk.handle_update(self.tap())
+        self.assertEqual(self.transport.texts, sent)
+
+    def test_a_failing_dm_does_not_block_the_give_up(self):
+        self.transport.fail_send = TelegramError("Could not reach Telegram")
+        recorded = datetime.fromisoformat(self.pending()["at"])
+        with mock.patch.object(gate, "now_utc", return_value=recorded + timedelta(hours=25)):
+            self.gk.retry_pending()
+        self.assertEqual(gate.load_gate(self.g["gate_id"])["status"], "needs-human")
+
+
+class PollNeverReadsTelegramTests(GateTestCase):
+    """SB-951. Telegram allows one getUpdates reader per bot token, and that
+    reader is listen.py. A poll that reads too is a 409 for both."""
+
+    def _pending_tap(self, g):
+        self.transport.batches = [
+            [{"update_id": 9, "callback_query": {"id": "cb9", "from": {"id": 42}, "data": f"{g['gate_id']}:approve"}}]
+        ]
+
+    def test_poll_once_never_calls_get_updates(self):
+        g = self.open_gate()
+        self._pending_tap(g)
+        self.gk.poll_once()
+        self.assertEqual(self.transport.offsets, [], "poll_once read Telegram — only listen.py may")
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "awaiting")
+
+    def test_cmd_poll_never_calls_get_updates(self):
+        g = self.open_gate()
+        self._pending_tap(g)
+        with mock.patch.object(gate, "gatekeeper_from_env", return_value=self.gk), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            gate.main(["poll", "--once"])
+        self.assertEqual(self.transport.offsets, [], "gate.py poll read Telegram — only listen.py may")
+        self.assertEqual(json.loads(out.getvalue())["resolved"], [])
+
+
+class HandoffTests(GateTestCase):
+    """SB-951. The runner learns of a decision from `handoff`, not from having
+    witnessed it: the listener decides between ticks, so `poll` has to find
+    decisions it did not make."""
+
+    def test_a_gate_decided_between_ticks_is_emitted_once_then_claimed(self):
+        g = self.open_gate()
+        self.callback(g, "approve")  # the listener, while no tick is running
+
+        first = self.gk.poll_once()
+        self.assertEqual([x["gate_id"] for x in first], [g["gate_id"]])
+        self.assertEqual(first[0]["status"], "approved")
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertEqual(loaded["handoff"], "claimed")
+        self.assertIsNotNone(loaded.get("claimed_at"))
+
+        self.assertEqual(self.gk.poll_once(), [], "a claimed gate was handed to the runner twice")
+
+    def test_a_gate_resolved_before_sb_951_is_never_emitted(self):
+        """No `handoff` field means an older poll already acted on it. The first
+        deploy must not resume every session in the gate history."""
+        g = self.open_gate()
+        legacy = gate.load_gate(g["gate_id"])
+        legacy.update(status="approved", decision="approve", source="telegram")
+        gate.save_gate(legacy)
+        self.assertEqual(self.gk.poll_once(), [])
+
+    def test_a_cli_resolve_is_handed_over_too(self):
+        g = self.open_gate()
+        self.gk.decide(g, "reject", "not now", "cli")
+        self.assertEqual([x["status"] for x in self.gk.poll_once()], ["rejected"])
+
+    def test_a_failed_decision_is_not_handed_over(self):
+        g = self.open_gate()
+        self.linear.fail_issue_update = SystemExit("linear-gql: 500 Internal Server Error")
+        self.gk.decide(g, "approve", None, "cli")
+        self.assertNotIn("handoff", gate.load_gate(g["gate_id"]))
+
+
+class GateLockTests(GateTestCase):
+    """SB-951. The listener and the runner's poll write the same gate files, so
+    decide() takes a per-gate kernel lock around re-read, check and save."""
+
+    def test_decide_waits_for_another_process_holding_the_gate_lock(self):
+        g = self.open_gate()
+        lock_path = gate.gates_dir() / f"{g['gate_id']}.lock"
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import fcntl, sys, time\n"
+                "f = open(sys.argv[1], 'a')\n"
+                "fcntl.flock(f, fcntl.LOCK_EX)\n"
+                "print('held', flush=True)\n"
+                "time.sleep(float(sys.argv[2]))\n",
+                str(lock_path),
+                "0.8",
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(holder.wait)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        started = time.monotonic()
+
+        self.assertTrue(self.gk.decide(g, "approve", None, "cli"))
+
+        self.assertGreaterEqual(time.monotonic() - started, 0.5, "decide() did not wait for the gate lock")
+        holder.stdout.close()
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "approved")
+
+    def test_the_lock_is_reentrant_within_a_thread(self):
+        g = self.open_gate()
+        with gate.gate_lock(g["gate_id"]):
+            self.assertTrue(self.gk.decide(g, "approve", None, "cli"))
+
 
 class TimeoutTests(GateTestCase):
     def test_gate_older_than_the_timeout_becomes_needs_human(self):
@@ -433,7 +618,7 @@ class TimeoutTests(GateTestCase):
         loaded["opened_at"] = (gate.now_utc() - timedelta(hours=100)).isoformat()
         gate.save_gate(loaded)
 
-        self.gk.poll_once(timeout=1)
+        self.gk.poll_once()
 
         loaded = gate.load_gate(g["gate_id"])
         self.assertEqual(loaded["status"], "needs-human")
@@ -442,7 +627,7 @@ class TimeoutTests(GateTestCase):
 
     def test_a_gate_within_the_timeout_is_left_alone(self):
         g = self.open_gate()
-        self.gk.poll_once(timeout=0)
+        self.gk.poll_once()
         self.assertEqual(gate.load_gate(g["gate_id"])["status"], "awaiting")
 
     def test_timeout_shows_up_in_poll_onces_resolved_list(self):
@@ -451,7 +636,7 @@ class TimeoutTests(GateTestCase):
         loaded["opened_at"] = (gate.now_utc() - timedelta(hours=100)).isoformat()
         gate.save_gate(loaded)
 
-        resolved = self.gk.poll_once(timeout=1)
+        resolved = self.gk.poll_once()
 
         self.assertEqual(len(resolved), 1)
         self.assertEqual(resolved[0]["gate_id"], g["gate_id"])
@@ -584,7 +769,7 @@ class CloseGateDmTests(GateTestCase):
         told anything. Its buttons sat there looking live."""
         self.open_gate()
         self.linear.state_type = "completed"
-        self.gk.poll_once(0)
+        self.gk.poll_once()
         self.assertTrue(self.transport.edited, "a superseded gate left its DM untouched")
         _, _, text, markup = self.transport.edited[-1]
         self.assertIn("superseded", text)

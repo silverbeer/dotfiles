@@ -17,8 +17,9 @@ set -euo pipefail
 
 DIR="$REPO/k3s/cycle-runner"
 CJ="$DIR/cronjob.yaml"
+LS="$DIR/listener.yaml"
 
-for f in "$CJ" "$DIR/namespace.yaml" "$DIR/pvc.yaml" "$DIR/bootstrap.sh"; do
+for f in "$CJ" "$LS" "$DIR/namespace.yaml" "$DIR/pvc.yaml" "$DIR/bootstrap.sh"; do
   [ -r "$f" ] || die "missing $f"
 done
 
@@ -93,7 +94,8 @@ has '^[[:space:]]*claimName:[[:space:]]*cycle-runner-home[[:space:]]*$' \
 dockerfile_ver="$(sed -n 's/^ARG CLAUDE_VERSION=\(.*\)$/\1/p' "$DIR/Dockerfile" | head -1)"
 [ -n "$dockerfile_ver" ] || bad "could not read CLAUDE_VERSION out of the Dockerfile"
 
-# Every image: line, so the initContainer cannot quietly diverge from the tick.
+# Every image: line in BOTH files, so neither the initContainer nor the
+# listener can quietly diverge from the tick.
 #
 # The count is asserted first. This loop already went green while iterating
 # ZERO times, because the extractor used \S — a GNU shorthand BSD sed does not
@@ -103,19 +105,61 @@ dockerfile_ver="$(sed -n 's/^ARG CLAUDE_VERSION=\(.*\)$/\1/p' "$DIR/Dockerfile" 
 n_images="$(grep -cE '^[[:space:]]*image:' "$CJ" || true)"
 [ "${n_images:-0}" -ge 2 ] \
   || bad "found $n_images image: lines in cronjob.yaml — expected at least 2 (bootstrap + tick); has the extractor gone stale?"
+n_images="$(grep -cE '^[[:space:]]*image:' "$LS" || true)"
+[ "${n_images:-0}" -ge 1 ] \
+  || bad "found $n_images image: lines in listener.yaml — expected at least 1; has the extractor gone stale?"
 
-while read -r img; do
-  [ -z "$img" ] && continue
-  case "$img" in
-    *:latest)
-      bad "cronjob.yaml uses '$img' — :latest is not revertible and gives doctor no version to read (SB-978)" ;;
-    *":claude-$dockerfile_ver") ;;
-    *)
-      bad "cronjob.yaml runs '$img' but the Dockerfile pins CLAUDE_VERSION=$dockerfile_ver — the cluster would run a different claude from the one the contract test was built against" ;;
-  esac
-# [^[:space:]] rather than \S: BSD sed (macOS) does not know the shorthand and
-# matches nothing, which made this loop iterate zero times and pass silently.
-done < <(sed -nE 's|^[[:space:]]*image:[[:space:]]*([^[:space:]]+).*|\1|p' "$CJ")
+for manifest in "$CJ" "$LS"; do
+  name="$(basename "$manifest")"
+  while read -r img; do
+    [ -z "$img" ] && continue
+    case "$img" in
+      *:latest)
+        bad "$name uses '$img' — :latest is not revertible and gives doctor no version to read (SB-978)" ;;
+      *":claude-$dockerfile_ver") ;;
+      *)
+        bad "$name runs '$img' but the Dockerfile pins CLAUDE_VERSION=$dockerfile_ver — the cluster would run a different claude from the one the contract test was built against" ;;
+    esac
+  # [^[:space:]] rather than \S: BSD sed (macOS) does not know the shorthand and
+  # matches nothing, which made this loop iterate zero times and pass silently.
+  done < <(sed -nE 's|^[[:space:]]*image:[[:space:]]*([^[:space:]]+).*|\1|p' "$manifest")
+done
+
+# ------------------------------------------------ the listener (SB-951)
+#
+# Telegram allows ONE getUpdates reader per bot token. The listener Deployment
+# is that reader, and two lines of its YAML are what keep it to one: delete
+# either and it still applies, still runs, and 409s the day a rollout or a
+# scale-up overlaps two pods.
+ls_has() {  # PATTERN MESSAGE
+  grep -qE -- "$1" "$LS" || bad "$2"
+}
+
+ls_has '^[[:space:]]*replicas:[[:space:]]*1[[:space:]]*$' \
+  "listener.yaml does not set 'replicas: 1' — two listener pods are two getUpdates readers, a 409 for both (SB-951)"
+ls_has '^[[:space:]]*type:[[:space:]]*Recreate[[:space:]]*$' \
+  "listener.yaml has no 'strategy: type: Recreate' — a rolling update starts the new pod before stopping the old one: two getUpdates readers, a 409 on every rollout (SB-951)"
+
+# Same state as the runner — the shared gate files ARE the handoff — and the
+# same credentials mechanism.
+ls_has '^[[:space:]]*claimName:[[:space:]]*cycle-runner-home[[:space:]]*$' \
+  "listener.yaml does not mount the cycle-runner-home PVC — decisions it records would never reach the runner"
+ls_has '^[[:space:]]*secretName:[[:space:]]*cycle-runner[[:space:]]*$' \
+  "listener.yaml does not mount the cycle-runner Secret — gatekeeper/env.sh reads the Telegram token from it"
+ls_has '^[[:space:]]*value:[[:space:]]*/secrets[[:space:]]*$' \
+  "listener.yaml does not point CYCLE_RUNNER_SECRETS_DIR at the Secret mount — env.sh would find no Telegram token"
+
+# SB-981: the node is ~95% requested. An always-on pod with no cpu request is
+# counted by the scheduler as using none, which on a node this full is the
+# arithmetic that left the last pod Pending.
+ls_has '^[[:space:]]*cpu:[[:space:]]*[0-9]+m?[[:space:]]*$' \
+  "listener.yaml has no cpu request — an always-on pod needs a real one on a node this full (SB-981)"
+
+# The listener runs no claude and pushes nothing; an always-on pod holds the
+# fewest credentials it can.
+if grep -vE '^[[:space:]]*#' "$LS" | grep -qE '(key|path):[[:space:]]*(claude-token|gh-token)[[:space:]]*$'; then
+  bad "listener.yaml mounts claude-token or gh-token — the listener needs only the two Telegram files and the Linear key"
+fi
 
 # Anything that looks like a credential literal in a manifest is a hard stop.
 if grep -nE '^[[:space:]]*(value|password|token):[[:space:]]*["'"'"']?(gh[pousr]_|sk-|xox|ey[JI])' "$DIR"/*.yaml; then
@@ -124,3 +168,4 @@ fi
 
 [ "$rc" -eq 0 ] || die "k3s/cycle-runner manifests do not hold their invariants"
 note "cycle-runner CronJob holds its invariants (Forbid, deadlines, backoffLimit 0, Secret, PVC, no op)"
+note "gatekeeper listener holds its invariants (1 replica, Recreate, PVC, Secret, cpu request, Telegram files only)"
