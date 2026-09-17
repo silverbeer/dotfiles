@@ -46,6 +46,8 @@ query($id:ID!){ issues(filter:{cycle:{id:{eq:$id}}}, first:250){
     nodes{ identifier title estimate createdAt
            state{name type} labels{nodes{name}} } } }
 """
+# Where fetch_members splices a caller's extra fields (SB-1087).
+_MEMBER_FIELDS_END = "labels{nodes{name}} }"
 
 Q_UNCOMPLETED = """
 query($id:String!){ cycle(id:$id){ uncompletedIssuesUponClose(first:250){
@@ -65,10 +67,16 @@ def fetch_cycles() -> list[dict]:
     return nodes
 
 
-def fetch_members(cycle_id: str) -> list[dict]:
+def fetch_members(cycle_id: str, extra_fields: str = "") -> list[dict]:
     """Issues in the cycle NOW. For an ended cycle that is only what stayed
-    behind at close, and it drifts afterwards even for completed work."""
-    nodes = gql(Q_MEMBERS, {"id": cycle_id})["issues"]["nodes"]
+    behind at close, and it drifts afterwards even for completed work.
+
+    `extra_fields` is GraphQL selected on each node on top of the fields
+    summarize() needs, e.g. "url priority updatedAt"."""
+    query = Q_MEMBERS
+    if extra_fields:
+        query = Q_MEMBERS.replace(_MEMBER_FIELDS_END, f"labels{{nodes{{name}}}} {extra_fields} }}", 1)
+    nodes = gql(query, {"id": cycle_id})["issues"]["nodes"]
     warn_if_capped(nodes, 250, "cycle issues")
     return nodes
 

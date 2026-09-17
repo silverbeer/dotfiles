@@ -131,3 +131,39 @@ def c3_uncompleted():
     adhoc = [issue(300 + k, est, state="started", labels=("TRD", "adhoc"))
              for k, est in enumerate(_C3_CARRIED_ADHOC)]
     return planned + adhoc
+
+
+# ------------------------------------------------------------ SB-1087
+
+def make_cycle(n, starts, ends, description=None, completed=None, **history):
+    """A cycle beyond the 2-4 fixture set, same shape as cycles()."""
+    return _cycle(n, starts, ends, description, completed, **history)
+
+
+def c5():
+    """Cycle 5, the week after cycle 4. Not closed."""
+    return make_cycle(5, "2026-08-23T04:00:00.000Z", "2026-08-30T04:00:00.000Z")
+
+
+def rich(base, *, priority=0, description=None, started=None, updated=None, project=None,
+         blocks=(), blocked_by=(), cycle=None, history=()):
+    """An issue() with the fields cycle_state's member and candidate queries
+    add. `blocks` / `blocked_by` are (identifier, state type) pairs; `history`
+    is (createdAt, [added label names]) newest first, as Linear returns it."""
+    out = dict(base)
+    out.update({
+        "url": f"https://linear.app/silverbeer/issue/{base['identifier']}",
+        "priority": priority,
+        "description": description,
+        "startedAt": started,
+        "updatedAt": updated or base["createdAt"],
+        "project": {"name": project} if project else None,
+        "relations": {"nodes": [
+            {"type": "blocks", "relatedIssue": {"identifier": k, "state": {"type": t}}} for k, t in blocks]},
+        "inverseRelations": {"nodes": [
+            {"type": "blocks", "issue": {"identifier": k, "state": {"type": t}}} for k, t in blocked_by]},
+        "cycle": {"id": cycle["id"], "number": cycle["number"]} if cycle else None,
+        "history": {"nodes": [
+            {"createdAt": ts, "addedLabels": [{"name": n} for n in added]} for ts, added in history]},
+    })
+    return out

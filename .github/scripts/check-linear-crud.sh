@@ -11,7 +11,8 @@
 #   2. the `stats` jq program against a fixture             (bash, inline)
 #   3. `linear.sh pack` output schema inside a temp git repo (bash, inline)
 #   4-6. board.py graph helpers, linear_api.warn_if_capped,
-#        apply.py plan() idempotence                (.github/tests/linear_crud)
+#        apply.py plan() idempotence, po-agent's cycle_state.py / cycle_apply.py
+#                                                   (.github/tests/linear_crud)
 #
 # linear.sh is sourced: it returns before its dispatcher when BASH_SOURCE != $0,
 # so the functions are defined without running a subcommand.
@@ -28,6 +29,7 @@ done
 skills_src="$REPO/dot_claude/skills"
 [ -f "$skills_src/linear-crud/scripts/linear.sh" ] || die "missing $skills_src/linear-crud/scripts/linear.sh — wrong REPO?"
 [ -f "$skills_src/backlog-groom/scripts/apply.py" ] || die "missing $skills_src/backlog-groom/scripts/apply.py — wrong REPO?"
+[ -f "$skills_src/po-agent/scripts/cycle_state.py" ] || die "missing $skills_src/po-agent/scripts/cycle_state.py — wrong REPO?"
 tests_dir="$REPO/.github/tests/linear_crud"
 [ -d "$tests_dir" ] || die "missing $tests_dir"
 
@@ -35,7 +37,9 @@ tests_dir="$REPO/.github/tests/linear_crud"
 
 SKILLS="$WORK/skills"
 rm -rf "$SKILLS"; mkdir -p "$SKILLS"
-cp -R "$skills_src/linear-crud" "$skills_src/backlog-groom" "$SKILLS/"
+# po-agent imports cycle-runner's pick.py (gate labels, board graph helpers),
+# so both come along.
+cp -R "$skills_src/linear-crud" "$skills_src/backlog-groom" "$skills_src/po-agent" "$skills_src/cycle-runner" "$SKILLS/"
 SCRIPTS="$SKILLS/linear-crud/scripts"
 LINEAR_SH="$SCRIPTS/linear.sh"
 REPOS_JSON="$SKILLS/linear-crud/repos.json"
@@ -492,7 +496,7 @@ else
   sed 's/^/    | /' "$WORK/py.out" >&2
 fi
 py_ran="$(sed -nE 's/^Ran ([0-9]+) tests?.*/\1/p' "$WORK/py.out")"
-[ "${py_ran:-0}" -ge 15 ] || bad "python: expected at least 15 tests to run, unittest reported '${py_ran:-none}' — discovery broken?"
+[ "${py_ran:-0}" -ge 200 ] || bad "python: expected at least 200 tests to run, unittest reported '${py_ran:-none}' — discovery broken?"
 
 # ---------------------------------------------------------------- verdict
 
