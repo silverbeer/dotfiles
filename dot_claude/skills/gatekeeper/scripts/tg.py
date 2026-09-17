@@ -64,6 +64,8 @@ class Transport(Protocol):
 
     def answer_callback_query(self, callback_query_id: str, text: str = "") -> None: ...
 
+    def send_chat_action(self, chat_id: str, action: str = "typing") -> None: ...
+
     def get_me(self) -> dict: ...
 
 
@@ -165,6 +167,12 @@ class TelegramTransport:
         if text:
             payload["text"] = text
         self._call("answerCallbackQuery", payload, timeout=15)
+
+    def send_chat_action(self, chat_id: str, action: str = "typing") -> None:
+        """"typing…" under the chat title (SB-1089). Telegram clears it after
+        about five seconds or at the next message, so a caller doing slow work
+        repeats it every few seconds."""
+        self._call("sendChatAction", {"chat_id": chat_id, "action": action}, timeout=10)
 
     def get_me(self) -> dict:
         return self._call("getMe", {}, timeout=15) or {}

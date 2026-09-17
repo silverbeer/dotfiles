@@ -6,27 +6,39 @@
 # only defers the problem to the day someone bumps it; this is what makes the
 # bump fail loudly (SB-978 schedules exactly that bump, weekly).
 #
-# The list below is the set of flags run.sh and triage-run.sh actually pass —
-# no more. Asserting a flag the runner does not use would block a build over a
-# dependency that does not exist. .github/scripts/check-claude-cli-contract.sh
-# keeps the two in step from the other direction: it greps the runner for the
-# flags it passes and fails if one is missing from here.
+# The list below is the set of flags run.sh, triage-run.sh and the PO chat
+# (po-agent/scripts/po_chat.py, SB-1089) actually pass — no more. Asserting a
+# flag nothing uses would block a build over a dependency that does not exist.
+# .github/scripts/check-claude-cli-contract.sh keeps the two in step from the
+# other direction: it greps those callers for the flags they pass and fails if
+# one is missing from here.
 #
 # Deliberately NOT listed: --max-turns. `claude --help` on 2.1.251 does not
 # have it; it was assumed once and the run failed. doctor.sh carries the same
-# note. Nor --max-budget-usd or --no-session-persistence: both exist, neither
-# is passed today, and a contract should assert what breaks us, not what might.
+# note. Nor --no-session-persistence: it exists, only doctor.sh's probe passes
+# it, and a contract should assert what breaks us, not what might.
+#
+# The PO chat's flags are its SB-991 isolation. If one of --tools,
+# --strict-mcp-config, --disable-slash-commands or --setting-sources went away,
+# the chat would not merely fail: it could run with interactive config loaded.
 set -uo pipefail
 
 REQUIRED_FLAGS=(
   --allowedTools
+  --append-system-prompt
+  --disable-slash-commands
   --disallowedTools
   --json-schema
+  --max-budget-usd
+  --model
   --output-format
   --permission-mode
   --print
   --resume
   --session-id
+  --setting-sources
+  --strict-mcp-config
+  --tools
 )
 
 rc=0

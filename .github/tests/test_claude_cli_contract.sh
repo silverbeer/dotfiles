@@ -14,6 +14,7 @@
 
 CONTRACT=k3s/cycle-runner/claude-cli-contract.sh
 RUN_SH=dot_claude/skills/cycle-runner/scripts/run.sh
+PO_CHAT=dot_claude/skills/po-agent/scripts/po_chat.py
 
 test_real_repo_contract_covers_every_flag_the_runner_passes() {
   assert_ok check-claude-cli-contract.sh
@@ -56,7 +57,7 @@ test_removing_a_flag_from_required_flags_is_rejected() {
 # still passes, so no assert_fail can see it.
 test_two_flags_separated_by_a_single_space_are_both_extracted() {
   assert_ok check-claude-cli-contract.sh
-  assert_out 'all 8 flags'
+  assert_out 'all 15 flags'
 }
 
 # The prompt argument carries the SLASH COMMAND's own options —
@@ -80,6 +81,43 @@ test_a_grep_that_finds_no_invocations_fails_rather_than_passing_vacuously() {
   export REPO="$src"
   assert_fail check-claude-cli-contract.sh
   assert_out 'no claude invocations'
+}
+
+# NEGATIVE: the PO chat (SB-1089) passes a new flag. Its argv is a python list,
+# not a shell line, so it is read from between its marker comments.
+test_a_new_po_chat_flag_missing_from_the_contract_is_rejected() {
+  src="$(copy_source)"
+  perl -0pi -e 's/(\s+"--strict-mcp-config",)/\n        "--fallback-model",$1/' "$src/$PO_CHAT"
+  grep -q -- '"--fallback-model",' "$src/$PO_CHAT" || fail "fixture did not inject the flag"
+
+  export REPO="$src"
+  assert_fail check-claude-cli-contract.sh
+  assert_out '--fallback-model'
+  assert_out 'not in the contract'
+}
+
+# NEGATIVE: the SB-991 isolation flags are in the contract. Dropping one from
+# REQUIRED_FLAGS while the chat still passes it must fail.
+test_removing_a_po_chat_isolation_flag_from_the_contract_is_rejected() {
+  src="$(copy_source)"
+  grep -vx '  --setting-sources' "$src/$CONTRACT" >"$src/.c.new"
+  mv "$src/.c.new" "$src/$CONTRACT"
+
+  export REPO="$src"
+  assert_fail check-claude-cli-contract.sh
+  assert_out '--setting-sources'
+}
+
+# The markers are what the check reads. Without them it would find nothing in
+# the chat and pass, checking nothing; it must die instead.
+test_po_chat_markers_that_go_missing_fail_rather_than_passing_vacuously() {
+  src="$(copy_source)"
+  grep -v '# claude-cli-contract:' "$src/$PO_CHAT" >"$src/.p.new"
+  mv "$src/.p.new" "$src/$PO_CHAT"
+
+  export REPO="$src"
+  assert_fail check-claude-cli-contract.sh
+  assert_out 'claude-cli-contract: begin/end'
 }
 
 test_a_missing_contract_script_fails_loudly() {

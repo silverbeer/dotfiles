@@ -178,11 +178,12 @@ jobs:
           git checkout -b "$branch"
 
           # Every place, together. check-k3s-manifests.sh fails the PR if the
-          # Dockerfile ARG and either manifest's image tag ever disagree — the
-          # gatekeeper listener (SB-951) runs the same image as the CronJob.
+          # Dockerfile ARG and any manifest's image tag ever disagree — the
+          # gatekeeper listener (SB-951) and the PO chat (SB-1089) run the
+          # same image as the CronJob.
           sed -i "s|^ARG CLAUDE_VERSION=.*|ARG CLAUDE_VERSION=$LATEST|" k3s/cycle-runner/Dockerfile
           sed -i "s|cycle-runner:claude-$CURRENT|cycle-runner:claude-$LATEST|g" \
-            k3s/cycle-runner/cronjob.yaml k3s/cycle-runner/listener.yaml
+            k3s/cycle-runner/cronjob.yaml k3s/cycle-runner/listener.yaml k3s/cycle-runner/po-chat.yaml
           git diff --quiet && { echo "nothing changed — the sed did not match" >&2; exit 1; }
 
           git commit -am "chore(cycle-runner): claude $CURRENT -> $LATEST

@@ -75,6 +75,27 @@ class SilentPayloadTests(unittest.TestCase):
             self.assertNotIn("disable_notification", captured)
 
 
+class ChatActionTests(unittest.TestCase):
+    """SB-1089: "typing…" while the PO chat waits on `claude -p`."""
+
+    def test_the_payload_names_the_chat_and_the_action(self):
+        calls = []
+
+        def fake_call(method, payload, timeout=15):
+            calls.append((method, payload))
+            return True
+
+        t = tg.TelegramTransport(FAKE_TOKEN)
+        with mock.patch.object(t, "_call", fake_call):
+            t.send_chat_action("42")
+        self.assertEqual(calls, [("sendChatAction", {"chat_id": "42", "action": "typing"})])
+
+    def test_the_fake_records_it(self):
+        transport = FakeTransport()
+        transport.send_chat_action("42", "typing")
+        self.assertEqual(transport.actions, [("42", "typing")])
+
+
 class LinkKeyboardTests(unittest.TestCase):
     """Entities make a URL clickable; a URL button makes it tappable. Different
     guarantee: the button carries its target in the markup, so no offset, no

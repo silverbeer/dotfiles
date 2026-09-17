@@ -77,6 +77,9 @@ def record(message: dict, update_id: int, root: Path | None = None) -> Path | No
         "date": message.get("date"),
         "text": message.get("text") or "",
         "received_at": datetime.now(timezone.utc).isoformat(),
+        # Added in SB-1089, so still /1. A reply to one of the PO's questions
+        # is how the chat knows which ticket an answer belongs to.
+        "reply_to_message_id": (message.get("reply_to_message") or {}).get("message_id"),
     }
     tmp = root / "tmp" / name
     with open(tmp, "w") as fh:

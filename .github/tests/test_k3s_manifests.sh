@@ -18,11 +18,13 @@ edit() { sed "$1" "$2" >"$2.new" && mv "$2.new" "$2"; }
 
 CJ=k3s/cycle-runner/cronjob.yaml
 LS=k3s/cycle-runner/listener.yaml
+PC=k3s/cycle-runner/po-chat.yaml
 
 test_the_real_manifests_hold_their_invariants() {
   assert_ok check-k3s-manifests.sh
   assert_out 'CronJob holds its invariants'
   assert_out 'gatekeeper listener holds its invariants'
+  assert_out 'PO chat holds its invariants'
 }
 
 # NEGATIVE: the one that matters most. run.sh's mkdir/pid lock was deleted in
@@ -263,6 +265,94 @@ test_a_listener_command_without_tini_is_rejected() {
   export REPO="$src"
   assert_fail check-k3s-manifests.sh
   assert_out 'listener.yaml has a container command starting'
+}
+
+# ------------------------------------------------ the PO chat (SB-1089)
+#
+# Each removes one line that keeps the chat to one writer of its state, keeps
+# interactive config out of its claude, or keeps its credentials to three.
+
+test_a_po_chat_with_two_replicas_is_rejected() {
+  src="$(copy_source)"
+  edit 's/replicas: 1/replicas: 2/' "$src/$PC"
+  grep -q 'replicas: 2' "$src/$PC" || fail "fixture did not set two replicas"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out "po-chat.yaml does not set 'replicas: 1'"
+}
+
+test_a_po_chat_without_recreate_is_rejected() {
+  src="$(copy_source)"
+  grep -v 'type: Recreate' "$src/$PC" >"$src/.pc" && mv "$src/.pc" "$src/$PC"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out "po-chat.yaml has no 'strategy: type: Recreate'"
+}
+
+# NEGATIVE: SB-991. Without its own config dir, claude in the chat loads the
+# runner's ~/.claude, and every interactive plugin and hook with it.
+test_a_po_chat_without_its_own_claude_config_dir_is_rejected() {
+  src="$(copy_source)"
+  grep -v 'name: CLAUDE_CONFIG_DIR' "$src/$PC" >"$src/.pc" && mv "$src/.pc" "$src/$PC"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'does not set CLAUDE_CONFIG_DIR'
+}
+
+test_a_po_chat_without_a_memory_limit_is_rejected() {
+  src="$(copy_source)"
+  edit 's/memory: 1Gi/memory: ""/' "$src/$PC"
+  grep -q 'memory: 1Gi' "$src/$PC" && fail "fixture did not drop the memory limit"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'po-chat.yaml has no memory limit'
+}
+
+test_a_po_chat_without_a_cpu_request_is_rejected() {
+  src="$(copy_source)"
+  grep -vE '^[[:space:]]*cpu:' "$src/$PC" >"$src/.pc" && mv "$src/.pc" "$src/$PC"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'po-chat.yaml has no cpu request'
+}
+
+# NEGATIVE: the chat picks up a credential it has no use for.
+test_a_po_chat_mounting_the_gh_token_is_rejected() {
+  src="$(copy_source)"
+  edit 's|- key: telegram-chat-id|- key: gh-token\
+                path: gh-token\
+              - key: telegram-chat-id|' "$src/$PC"
+  grep -q 'key: gh-token' "$src/$PC" || fail "fixture did not add gh-token"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'expected exactly claude-token, telegram-token and telegram-chat-id'
+}
+
+# NEGATIVE: ...and one it cannot do without: no claude-token, no PO.
+test_a_po_chat_missing_the_claude_token_is_rejected() {
+  src="$(copy_source)"
+  grep -vE '(key|path): claude-token' "$src/$PC" >"$src/.pc" && mv "$src/.pc" "$src/$PC"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out "mounts Secret items 'telegram-chat-id telegram-token'"
+}
+
+test_a_po_chat_image_tag_that_drifts_is_rejected() {
+  src="$(copy_source)"
+  edit 's|cycle-runner:claude-[0-9.]*|cycle-runner:claude-9.9.9|g' "$src/$PC"
+  grep -q 'cycle-runner:claude-9.9.9' "$src/$PC" || fail "fixture did not change the po-chat tag"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'po-chat.yaml runs'
+  assert_out 'different claude'
+}
+
+test_a_missing_po_chat_manifest_fails_loudly() {
+  src="$(copy_source)"
+  rm -f "$src/$PC"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out "missing $src/$PC"
 }
 
 run_tests

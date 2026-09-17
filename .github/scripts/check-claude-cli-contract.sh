@@ -8,8 +8,9 @@
 # release that renames it takes the runner down at 2am — which is the exact
 # failure the contract exists to prevent.
 #
-# So this greps the runner for the flags it actually passes and fails if one is
-# not in the contract. One place, checked from both directions.
+# So this greps the runner, and the PO chat, for the flags they actually pass
+# and fails if one is not in the contract. One place, checked from both
+# directions.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib.sh
@@ -17,6 +18,7 @@ set -euo pipefail
 
 CONTRACT="$REPO/k3s/cycle-runner/claude-cli-contract.sh"
 SCRIPTS="$REPO/dot_claude/skills/cycle-runner/scripts"
+PO_CHAT="$REPO/dot_claude/skills/po-agent/scripts/po_chat.py"
 
 [ -r "$CONTRACT" ] || die "no contract script at $CONTRACT"
 
@@ -69,15 +71,26 @@ for f in "$SCRIPTS"/*.sh; do
   ' "$f" | grep -oE -- '(^|[[:space:]])--?[a-zA-Z][a-zA-Z-]*' \
     | tr -d ' ' >>"$used" || true
 done
+[ -s "$used" ] || die "found no claude invocations under $SCRIPTS — has the grep gone stale?"
+
+# The PO chat (SB-1089) builds its argv as a python list, one quoted string per
+# element, between two marker comments in claude_argv(). The markers are what
+# this reads: a list reformatted onto one line still parses, and a grep over
+# the whole file would also pick up cycle_apply's --changes and --confirm,
+# which are not claude flags.
+[ -r "$PO_CHAT" ] || die "no PO chat at $PO_CHAT — moved? update this check"
+po_flags="$(sed -n '/# claude-cli-contract: begin/,/# claude-cli-contract: end/p' "$PO_CHAT")"
+[ -n "$po_flags" ] || die "found no '# claude-cli-contract: begin/end' markers in $PO_CHAT — has the grep gone stale?"
+printf '%s\n' "$po_flags" | grep -oE -- '"--?[a-zA-Z][a-zA-Z-]*"' | tr -d '"' >>"$used" \
+  || die "found no claude flags between the markers in $PO_CHAT — has the grep gone stale?"
 sed -i.bak 's/^-p$/--print/' "$used" && rm -f "$used.bak"
 sort -u -o "$used" "$used"
-[ -s "$used" ] || die "found no claude invocations under $SCRIPTS — has the grep gone stale?"
 
 missing="$(comm -23 "$used" "$declared" || true)"
 if [ -n "$missing" ]; then
-  err "these flags are passed to \`claude\` by the runner but are not in the contract:"
+  err "these flags are passed to \`claude\` by the runner or the PO chat but are not in the contract:"
   printf '%s\n' "$missing" | sed 's/^/    /' >&2
   die "add them to REQUIRED_FLAGS in k3s/cycle-runner/claude-cli-contract.sh"
 fi
 
-note "claude CLI contract covers all $(wc -l <"$used" | tr -d ' ') flags the runner passes"
+note "claude CLI contract covers all $(wc -l <"$used" | tr -d ' ') flags the runner and the PO chat pass"

@@ -97,7 +97,7 @@ write).
 
 ## Inbox seam for the PO chat
 
-Free text that no gate claims is kept for SB-1089 in a Maildir under
+Free text that no gate claims is kept for the PO chat (SB-1089) in a Maildir under
 `$GATEKEEPER_STATE/inbox/telegram/`, one file per update, named
 `<update_id>.json`:
 
@@ -125,13 +125,25 @@ removing one bumps it):
 ```json
 {"schema": "gatekeeper.inbox/1", "update_id": 123456789, "message_id": 42,
  "chat_id": 111, "from_id": 111, "date": 1789000000,
- "text": "what's at risk this cycle?", "received_at": "2026-09-16T12:00:00+00:00"}
+ "text": "what's at risk this cycle?", "received_at": "2026-09-16T12:00:00+00:00",
+ "reply_to_message_id": null}
 ```
+
+`reply_to_message_id` (added in SB-1089, still `/1`) is the `message_id` of the
+message this one replies to in Telegram, or `null`. Records written before it
+existed don't have the field, so read it with `.get`.
 
 Only allowlisted senders in a private chat, with non-empty text, are recorded.
 A reply goes out with `tg.send_text`, which is safe from any process. The
-listener records messages whether or not anything consumes them, so nothing
-sent before SB-1089 is lost.
+listener records messages whether or not anything consumes them.
+
+**The one consumer is the PO chat**: `po-agent/scripts/po_chat.py consume`,
+the `po-chat` Deployment (`k3s/cycle-runner/po-chat.yaml`). It claims one
+message at a time, and it answers with `tg.send_text` plus
+`send_chat_action` ("typing…") while it works. While a gate is awaiting, a
+free-text `approve` or `reject` still decides the newest one, and a pending
+💬 Note still claims the next text. Neither reaches the chat. Everything else
+does, including `yes` and `no` to a PO proposal.
 
 ## Config (env)
 

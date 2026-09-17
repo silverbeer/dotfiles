@@ -15,6 +15,7 @@ API_PY=dot_claude/skills/linear-crud/scripts/linear_api.py
 APPLY_PY=dot_claude/skills/backlog-groom/scripts/apply.py
 CYCLES_PY=dot_claude/skills/linear-crud/scripts/cycles.py
 CYCLE_STATE_PY=dot_claude/skills/po-agent/scripts/cycle_state.py
+PO_CHAT_PY=dot_claude/skills/po-agent/scripts/po_chat.py
 REPOS_JSON=dot_claude/skills/linear-crud/repos.json
 GQL=dot_claude/skills/linear-crud/scripts/executable_linear-gql.sh
 
@@ -202,6 +203,32 @@ test_over_capacity_plan_fit_fails_the_python_tests() {
   assert_out 'FAIL: test_fit_never_exceeds_capacity'
 }
 
+# NEGATIVE: the PO chat's yes gets looser (SB-1089). "yeah" is not consent to
+# an exact change list, and a matcher that accepts it writes to Linear on a
+# word the user may have meant as "yeah, but".
+test_a_looser_po_chat_yes_fails_the_python_tests() {
+  need_bin jq python3 git
+  src="$(copy_source)"
+  [ -f "$src/$PO_CHAT_PY" ] || fail "po_chat.py is not in the copied tree — is it tracked?"
+  edit 's/(yes|y|yes please|apply)/(yes|y|yes please|apply|yeah)/' "$src/$PO_CHAT_PY"
+  grep -q 'apply|yeah)' "$src/$PO_CHAT_PY" || fail "fixture did not loosen the yes matcher"
+  export REPO="$src"
+  assert_fail check-linear-crud.sh
+  assert_out 'python unit tests failed'
+  assert_out 'FAIL: test_only_a_plain_yes_counts'
+}
+
+# NEGATIVE: losing test_po_chat.py alone must trip the floor, not just losing
+# everything.
+test_losing_the_po_chat_tests_trips_the_floor() {
+  need_bin jq python3 git
+  src="$(copy_source)"
+  rm "$src"/.github/tests/linear_crud/test_po_chat.py
+  export REPO="$src"
+  assert_fail check-linear-crud.sh
+  assert_out 'expected at least 280 tests to run'
+}
+
 # NEGATIVE: the python tests vanish. Discovery finding nothing must not be a
 # green run.
 test_missing_python_tests_fail() {
@@ -210,7 +237,7 @@ test_missing_python_tests_fail() {
   rm "$src"/.github/tests/linear_crud/test_*.py
   export REPO="$src"
   assert_fail check-linear-crud.sh
-  assert_out 'expected at least 200 tests to run'
+  assert_out 'expected at least 280 tests to run'
 }
 
 # NEGATIVE: --http1.1 is dropped from linear-gql.sh. Every Linear call the
