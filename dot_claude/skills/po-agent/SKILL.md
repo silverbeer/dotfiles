@@ -177,41 +177,59 @@ The PO, over Telegram (SB-1089). It runs as the `po-chat` Deployment
 (`k3s/cycle-runner/po-chat.yaml`).
 
 ```bash
-python3 $S/po_chat.py consume                          # for ever: answer the gatekeeper inbox
-python3 $S/po_chat.py ask SB-12 "Estimate SB-12? 1/2/3/5/8"   # post a question; the reply lands on SB-12
+python3 $S/po_chat.py consume     # for ever: answer the gatekeeper inbox (the Deployment runs this)
+
+# Ask a question from the pod, where the question file lands on the PVC the
+# chat reads. It refuses to run anywhere else (PO_CHAT_POD), because elsewhere
+# the user's reply would be silently dropped.
+kubectl exec deploy/po-chat --namespace cycle-runner -- \
+  python3 /work/dotfiles/dot_claude/skills/po-agent/scripts/po_chat.py ask SB-12 "Estimate SB-12? 1/2/3/5/8"
 ```
 
 `consume` reads the gatekeeper inbox, never Telegram: `listen.py` is the one
 `getUpdates` reader. Each message goes through these steps, in order:
 
-1. **A proposal is pending.** A plain `yes` (also `y`, `yes please`, `apply`,
-   optionally ending in `.` or `!`) applies exactly the dry-run file with
-   `cycle_apply.py --confirm`. It applies only if the proposal is under 30
-   minutes old and the file still hashes to what was shown. `--confirm` appears
-   in one function, `apply_pending`. Any other message, including `no`, discards
-   the proposal, says "Nothing written." and goes on to the PO with a note.
-2. **A reply to a PO question.** The answer goes through the runner's
+1. **A reply to a PO question.** The answer goes through the runner's
    `scan_log_clean` (gitleaks, fail closed), then is posted as a comment on the
-   ticket: `PO question (Telegram): …` followed by `Answer: …`. Each question is
-   answered once. A message that isn't a Telegram reply never becomes a comment.
+   ticket, carrying `gate.py`'s echo marker: `PO question (Telegram): …` followed
+   by `Answer: …`. Each question is answered once. An answer the scan does not
+   pass reaches nothing at all — not Linear, not the chat log, not the PO. A
+   message that isn't a Telegram reply never becomes a comment, and a reply to a
+   question never touches a pending proposal.
+2. **A proposal is pending.** A plain `yes` (also `y`, `yes please`, `apply`,
+   optionally ending in `.` or `!`) applies exactly the dry-run file with
+   `cycle_apply.py --confirm`. `--confirm` appears in one function,
+   `apply_pending`, and it is reached only when all of this holds: the dry run
+   was **delivered** (`pending.json` is written after the send, with that
+   message's `message_id` and `sent_at`), the yes was sent **after** it and
+   within 30 minutes, by Telegram's own clock, it is not a reply to some other
+   message, and the file still hashes to what was shown. Any other message,
+   including `no`, discards the proposal, says "Nothing written." and goes on to
+   the PO with a note. A message older than the proposal (a redelivery) leaves
+   it alone.
 3. **The daily budget.** If today's spend (Eastern) is at `PO_CHAT_DAILY_USD`,
-   the bot says so and doesn't call `claude`.
+   the bot says so and doesn't call `claude`. A call whose cost cannot be read —
+   a timeout, a kill, unreadable output, a SIGTERM after it started — is charged
+   the per-message cap.
 4. **`claude -p`.** One session per cycle, `--resume`d until the cycle number
-   changes. The prompt holds the live `cycle_state.py --cycle current` JSON
-   (`plan-target` if there is no active cycle), or a note that it is unchanged.
+   changes, the system prompt changes, or it reaches `PO_CHAT_MAX_TURNS`. The
+   prompt, on **stdin**, holds the live `cycle_state.py --cycle current` JSON, or
+   a note that it is unchanged, with the day counts. There is no fallback to
+   another cycle: if `--cycle current` fails, the bot says so and calls nobody.
    The system prompt is `chat.md` (the adapter) then `commands/cycle.md` (the
    rules), both read on every call. The model has no tools and no MCP servers,
-   skills or settings, so its only output is JSON:
-   `{reply, changes, ask}`. A non-null `changes` is dry-run and kept pending
-   for the NEXT message. A non-null `ask` is posted as a question when its
-   ticket resolves.
+   skills or settings, so its only output is JSON: `{reply, changes, ask}`,
+   with `changes` schema-checked as a `cycle_apply.py` changes file. A missing
+   `structured_output` is an error, never prose. A non-null `changes` is dry-run
+   and kept pending for a LATER message. A non-null `ask` is posted as a
+   question when its ticket resolves.
 
 State is under `$GATEKEEPER_STATE/po-chat/`:
 
 | path | holds |
 |---|---|
-| `sessions/cycle-<N>.json` | `{session_id, created_at, turns, last_state_sha}` |
-| `pending.json`, `pending-changes.json` | `{changes, sha256, proposed_at, expires_at, cycle}` and the exact file dry-run |
+| `sessions/cycle-<N>.json` | `{session_id, created_at, turns, last_state_sha, prompt_sha}`. `last_state_sha` ignores fields only the clock moves, so a day that changed nothing is not resent |
+| `pending.json`, `pending-changes.json` | `{changes, sha256, proposed_at, cycle, message_id, sent_at, expires_at}` and the exact file dry-run. Written only once the dry run has been delivered |
 | `questions/<telegram message_id>.json` | `{ticket, issue_id, url, question, asked_at, message_id, answered_update_id}` |
 | `ledger/<YYYY-MM-DD ET>.json` | `{spent_usd, calls}` |
 | `log/<YYYY-MM-DD ET>.jsonl` | `{ts, update_id, dir, text, cost, session_id, latency_s}` per message in and out |
@@ -223,6 +241,8 @@ State is under `$GATEKEEPER_STATE/po-chat/`:
 | `PO_CHAT_MODEL` | `sonnet` | `--model` |
 | `PO_CHAT_MSG_USD` | `0.75` | `--max-budget-usd` per call. Over it, the cost is charged and the bot says so |
 | `PO_CHAT_DAILY_USD` | `10` | a day's spend, Eastern |
+| `PO_CHAT_MAX_TURNS` | `30` | turns before a session is rotated, so its history cannot grow past the per-message cap |
+| `PO_CHAT_POD` | set by the Deployment | `ask` refuses to run without it |
 | `CLAUDE_CONFIG_DIR` | set by the Deployment | a config dir of the chat's own, so no plugin leaks in (SB-991) |
 
 Also needs `LINEAR_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` (`cycle-runner/scripts/env.sh`)

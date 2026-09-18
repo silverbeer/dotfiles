@@ -180,6 +180,8 @@ pc_has '^[[:space:]]*type:[[:space:]]*Recreate[[:space:]]*$' \
   "po-chat.yaml has no 'strategy: type: Recreate' — a rolling update runs two chat pods over the same pending proposal (SB-1089)"
 pc_has '^[[:space:]]*claimName:[[:space:]]*cycle-runner-home[[:space:]]*$' \
   "po-chat.yaml does not mount the cycle-runner-home PVC — it would never see the inbox the listener writes"
+pc_has '^[[:space:]]*secretName:[[:space:]]*cycle-runner[[:space:]]*$' \
+  "po-chat.yaml does not mount the cycle-runner Secret — env.sh would find no claude or Telegram token"
 pc_has '^[[:space:]]*value:[[:space:]]*/secrets[[:space:]]*$' \
   "po-chat.yaml does not point CYCLE_RUNNER_SECRETS_DIR at the Secret mount — env.sh would find no claude or Telegram token"
 pc_has '^[[:space:]]*-[[:space:]]*name:[[:space:]]*CLAUDE_CONFIG_DIR[[:space:]]*$' \

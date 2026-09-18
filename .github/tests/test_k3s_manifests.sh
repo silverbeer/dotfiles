@@ -299,6 +299,17 @@ test_a_po_chat_without_its_own_claude_config_dir_is_rejected() {
   assert_out 'does not set CLAUDE_CONFIG_DIR'
 }
 
+# NEGATIVE: the chat mounts some other Secret, so env.sh finds no token and
+# every message dies on a missing credential.
+test_a_po_chat_pointed_at_another_secret_is_rejected() {
+  src="$(copy_source)"
+  edit 's/secretName: cycle-runner/secretName: something-else/' "$src/$PC"
+  grep -q 'secretName: something-else' "$src/$PC" || fail "fixture did not change the secret name"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'po-chat.yaml does not mount the cycle-runner Secret'
+}
+
 test_a_po_chat_without_a_memory_limit_is_rejected() {
   src="$(copy_source)"
   edit 's/memory: 1Gi/memory: ""/' "$src/$PC"

@@ -86,20 +86,25 @@ spec:
               stop=""
               pid=""
               trap 'stop=1; [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null' TERM INT
+              # Everything long-running goes through this, so the trap above can
+              # interrupt it. bash runs a trap only between foreground commands,
+              # so a SIGTERM during `git fetch` would otherwise wait for the
+              # network, and the kubelet would SIGKILL the pod instead.
+              bg() { "$@" & pid=$!; wait "$pid"; }
               while [ -z "$stop" ]; do
-                python3 "$skills/po-agent/scripts/po_chat.py" consume \
-                  --repo /work/dotfiles --ref "${DOTFILES_REF}" &
-                pid=$!
                 rc=0
-                wait "$pid" || rc=$?
+                bg python3 "$skills/po-agent/scripts/po_chat.py" consume \
+                  --repo /work/dotfiles --ref "${DOTFILES_REF}" || rc=$?
                 if [ -n "$stop" ]; then
                   wait "$pid" 2>/dev/null || true
                   exit 0
                 fi
                 [ "$rc" -eq 75 ] || exit "$rc"
-                if git -C /work/dotfiles fetch --quiet --depth 1 origin "${DOTFILES_REF}" \
-                   && git -C /work/dotfiles reset --quiet --hard FETCH_HEAD; then
+                if bg git -C /work/dotfiles fetch --quiet --depth 1 origin "${DOTFILES_REF}" \
+                   && bg git -C /work/dotfiles reset --quiet --hard FETCH_HEAD; then
                   echo "po-chat: dotfiles now at $(git -C /work/dotfiles rev-parse --short HEAD)"
+                elif [ -n "$stop" ]; then
+                  exit 0
                 else
                   echo "po-chat: fetch failed, running the current code again" >&2
                 fi
@@ -144,6 +149,11 @@ spec:
               value: "0.75"
             - name: PO_CHAT_DAILY_USD
               value: "10"
+            # `po_chat.py ask` refuses to run without this. Outside the pod it
+            # would record the question in a state dir the chat never reads, so
+            # the user's reply would be silently dropped.
+            - name: PO_CHAT_POD
+              value: "1"
           # A process that is up but wedged answers nothing. po_chat.py writes
           # the heartbeat every loop (at most every 2s when idle) and every 4s
           # while it waits on claude. The initial delay covers the clone.

@@ -33,6 +33,7 @@ os.environ.setdefault("GATEKEEPER_QUIET_START", "0")
 os.environ.setdefault("GATEKEEPER_QUIET_END", "0")
 
 import gate  # noqa: E402
+import inbox  # noqa: E402
 from fakes import FakeLinear, FakeTransport  # noqa: E402
 from tg import TelegramError  # noqa: E402
 
@@ -153,6 +154,62 @@ class CallbackTests(GateTestCase):
         self.assertEqual(loaded["status"], "rejected")
         self.assertEqual(loaded["source"], "telegram")
         self.assertEqual(loaded["note"], "needs another pass")
+
+
+class ReplyRoutingTests(GateTestCase):
+    """SB-1089: a Telegram reply names what it answers. Only a reply to a gate's
+    own DM may decide or annotate a gate, and only that gate."""
+
+    def reply(self, text, reply_to, update_id):
+        self.gk._handle_message(
+            {"message_id": update_id * 10, "chat": {"id": 42, "type": "private"}, "from": {"id": 42},
+             "date": 1789000000, "text": text, "reply_to_message": {"message_id": reply_to}},
+            update_id,
+        )
+
+    def inbox_ids(self):
+        return sorted(int(p.stem) for p in (inbox.inbox_dir() / "new").glob("*.json"))
+
+    def test_approve_replying_to_a_po_question_leaves_an_awaiting_merge_gate_untouched(self):
+        g = self.open_gate(kind="merge")
+        self.reply("approve: x", reply_to=999, update_id=700)
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "awaiting")
+        self.assertIsNone(gate.load_gate(g["gate_id"]).get("pending_decision"))
+        self.assertEqual(self.inbox_ids(), [700])
+
+    def test_a_pending_note_does_not_capture_a_reply_to_another_message(self):
+        g = self.open_gate()
+        self.callback(g, "note", cq_id="cb-note")
+        self.reply("3, it's small", reply_to=999, update_id=701)
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertTrue(loaded["note_pending"])
+        self.assertIsNone(loaded["note"])
+        self.assertEqual(self.inbox_ids(), [701])
+
+    def test_a_reply_to_a_gate_dm_decides_that_gate_not_the_newest(self):
+        older = self.open_gate(kind="plan")
+        newer = self.open_gate(kind="merge")
+        self.reply("approve", reply_to=older["tg_message_id"], update_id=702)
+        self.assertEqual(gate.load_gate(older["gate_id"])["status"], "approved")
+        self.assertEqual(gate.load_gate(newer["gate_id"])["status"], "awaiting")
+        self.assertEqual(self.inbox_ids(), [])
+
+    def test_a_reply_to_a_gate_dm_with_a_pending_note_attaches_to_that_gate(self):
+        older = self.open_gate()
+        newer = self.open_gate()
+        self.callback(older, "note", cq_id="cb-note")
+        self.reply("check the migration", reply_to=older["tg_message_id"], update_id=703)
+        self.assertEqual(gate.load_gate(older["gate_id"])["note"], "check the migration")
+        self.assertIsNone(gate.load_gate(newer["gate_id"])["note"])
+
+    def test_a_decision_replying_to_a_resolved_gate_decides_nothing(self):
+        g = self.open_gate()
+        self.callback(g, "reject", cq_id="cb-r")
+        other = self.open_gate()
+        self.reply("approve", reply_to=g["tg_message_id"], update_id=704)
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "rejected")
+        self.assertEqual(gate.load_gate(other["gate_id"])["status"], "awaiting")
+        self.assertIn("already rejected — nothing decided", self.transport.texts[-1])
 
 
 class ParkedReminderTests(GateTestCase):

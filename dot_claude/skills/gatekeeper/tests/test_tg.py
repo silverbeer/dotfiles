@@ -90,6 +90,30 @@ class ChatActionTests(unittest.TestCase):
             t.send_chat_action("42")
         self.assertEqual(calls, [("sendChatAction", {"chat_id": "42", "action": "typing"})])
 
+    def test_a_response_cut_off_mid_read_is_a_telegram_error(self):
+        """A reply that fails after the request went out is still one exception
+        type for callers (SB-1089), and never carries the token."""
+        import http.client
+
+        class Cut:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                raise http.client.IncompleteRead(b"{")
+
+        t = tg.TelegramTransport(FAKE_TOKEN)
+        for failure in (Cut(), TimeoutError("timed out")):
+            with self.subTest(failure=type(failure).__name__):
+                side = {"side_effect": failure} if isinstance(failure, Exception) else {"return_value": failure}
+                with mock.patch("urllib.request.urlopen", **side):
+                    with self.assertRaises(tg.TelegramError) as ctx:
+                        t.send_chat_action("42")
+                self.assertNotIn(FAKE_TOKEN, str(ctx.exception))
+
     def test_the_fake_records_it(self):
         transport = FakeTransport()
         transport.send_chat_action("42", "typing")

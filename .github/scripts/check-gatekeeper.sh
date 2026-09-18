@@ -36,8 +36,8 @@ ran="$(printf '%s\n' "$out" | sed -nE 's/^Ran ([0-9]+) tests?.*/\1/p')"
 # still left 28 and passed, so the guard's own negative test broke before the
 # guard did. Keep it just under the smaller file's count, so losing EITHER
 # file is caught. SB-951 added test_listen.py and test_inbox.py (134 tests in
-# four files, the smallest of them 9), hence 126. SB-1089 made it 137, the
+# four files, the smallest of them 9), hence 126. SB-1089 made it 143, the
 # smallest 10, hence 128.
-[ "${ran:-0}" -ge 128 ] || die "expected at least 128 tests to run, unittest reported '${ran:-none}' — discovery broken?"
+[ "${ran:-0}" -ge 134 ] || die "expected at least 134 tests to run, unittest reported '${ran:-none}' — discovery broken?"
 
 note "check-gatekeeper: all offline tests passed"

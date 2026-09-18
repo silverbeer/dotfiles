@@ -57,7 +57,8 @@ test_removing_a_flag_from_required_flags_is_rejected() {
 # still passes, so no assert_fail can see it.
 test_two_flags_separated_by_a_single_space_are_both_extracted() {
   assert_ok check-claude-cli-contract.sh
-  assert_out 'all 15 flags'
+  assert_out 'all 8 flags the runner passes'
+  assert_out 'all 12 flags the PO chat passes'
 }
 
 # The prompt argument carries the SLASH COMMAND's own options —
@@ -118,6 +119,25 @@ test_po_chat_markers_that_go_missing_fail_rather_than_passing_vacuously() {
   export REPO="$src"
   assert_fail check-claude-cli-contract.sh
   assert_out 'claude-cli-contract: begin/end'
+}
+
+# NEGATIVE: a claude flag passed from outside every marker block. The marker
+# extraction cannot see it, so the contract would never guard it.
+test_a_flag_literal_outside_the_markers_is_rejected() {
+  src="$(copy_source)"
+  perl -0pi -e 's/\ndef claude_env\(/\nSTRAY = ["--fallback-model"]\n\n\ndef claude_env(/' "$src/$PO_CHAT"
+  grep -q -- 'STRAY = \["--fallback-model"\]' "$src/$PO_CHAT" || fail "fixture did not add a stray flag"
+
+  export REPO="$src"
+  assert_fail check-claude-cli-contract.sh
+  assert_out 'outside every marker block'
+}
+
+# ...and the complement: our own scripts' flags, inside a not-claude-argv
+# block, are not claude flags and must not trip it.
+test_our_own_scripts_flags_inside_their_markers_are_allowed() {
+  assert_ok check-claude-cli-contract.sh
+  assert_not_out 'outside every marker block'
 }
 
 test_a_missing_contract_script_fails_loudly() {

@@ -10,14 +10,17 @@ hold. This file only says what is different here.
   you can't do. If a re-fit would change your answer, say so and tell the user to
   run `/cycle plan` in the terminal. Never re-rank by hand.
 - **Writing.** Where "Writing" says to write a changes file and run the dry run,
-  put the change set in `changes` instead, in the changes-file shape from the
-  po-agent SKILL.md. The bot runs the dry run, shows it, and applies it only if
+  put the change set in `changes` instead. Its JSON schema is enforced on your
+  output, so follow that shape rather than any example. The bot runs the dry run, shows it, and applies it only if
   the user's next message is a plain yes. Leave `changes` null otherwise. Never
   set it in the same turn as asking whether to make a change: first describe the
   change list in `reply`, then set `changes` once the user agrees to it.
 - **Questions go in `ask`**: `{"ticket": "SB-N", "question": "..."}`, one per turn.
   The bot posts it as its own message, and the user's reply lands as a comment on
   that ticket. Leave `ask` null when you have no question.
+- **`--allow-active-cycle-move` does not exist here.** A cycle move out of a
+  running cycle is refused, and the chat never overrides that. If the user wants
+  one now, tell them to do it in the terminal.
 - `reply` is plain text for a phone: no Markdown tables or headings, and full
   ticket URLs from the JSON.
 - `<system_note>` lines come from the bot, not the user. They say what happened

@@ -18,6 +18,7 @@ Two things this module refuses to do:
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.error
@@ -93,6 +94,11 @@ class TelegramTransport:
             raise TelegramError(f"Telegram rejected {method} (HTTP {exc.code}).") from None
         except urllib.error.URLError as exc:
             raise TelegramError(f"Could not reach Telegram: {exc.reason}") from None
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            # The response was cut off, timed out mid-read or was not JSON
+            # (SB-1089). One exception type for callers to catch; the class name
+            # only, since the token is in the URL.
+            raise TelegramError(f"Telegram {method} response failed ({exc.__class__.__name__})") from None
         if not body.get("ok"):
             raise TelegramError(f"Telegram refused {method}: {body.get('description', 'unknown')}")
         return body.get("result")
