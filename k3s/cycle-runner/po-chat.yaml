@@ -1,0 +1,213 @@
+# The PO chat: free-text Telegram messages answered by the PO agent (SB-1089).
+#
+# It never reads Telegram. The gatekeeper listener (listener.yaml) is the one
+# getUpdates reader, and it records every free-text message that no gate
+# claims in the inbox on the shared PVC. This pod consumes that inbox, one
+# message at a time: live cycle_state.py JSON, one `claude -p` turn, a reply
+# with tg.send_text. Sending from a second process is fine; only reading
+# conflicts.
+#
+# A separate Deployment, not a thread in the listener: a reply takes about a
+# minute, and a button tap must not wait behind it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: po-chat
+  namespace: cycle-runner
+  labels:
+    app: po-chat
+spec:
+  # One. The inbox is a Maildir and claiming is atomic, so two consumers would
+  # not double-answer a message. But pending proposals, sessions and the
+  # budget ledger are single-writer files, and a second pod would race on them.
+  replicas: 1
+
+  # Recreate, for the same reason: never two pods over the same pending.json.
+  # A message that arrives during the gap waits in the inbox.
+  strategy:
+    type: Recreate
+
+  selector:
+    matchLabels:
+      app: po-chat
+
+  template:
+    metadata:
+      labels:
+        app: po-chat
+    spec:
+      # SIGTERM terminates a `claude` call in flight and requeues its message.
+      # Anything else in hand (a Linear write, a comment) finishes first, and
+      # those take seconds.
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: chat
+          # Same pin as cronjob.yaml. The weekly refresh workflow bumps all
+          # three manifests together, check-k3s-manifests.sh fails if they
+          # disagree, and doctor.sh warns if the running Deployment differs.
+          image: ghcr.io/silverbeer/cycle-runner:claude-2.1.258
+          imagePullPolicy: IfNotPresent
+          # The code comes from a fresh clone on every container start, as in
+          # listener.yaml, and never from the PVC's ~/.claude, which
+          # bootstrap.sh replaces on every tick.
+          #
+          # Self-update is a loop, not an execv. po_chat.py checks
+          # dotfiles@main every five minutes, BETWEEN messages, and exits 75
+          # when it has moved. The loop then fetches, resets the clone and
+          # runs it again, in the same container, so there is no restart and
+          # no kubelet backoff. Any other exit code ends the container, and
+          # the restart re-clones. A failed fetch keeps the current code, and
+          # po_chat.py asks again five minutes later.
+          #
+          # python runs in the background with `wait`, so that bash can hand
+          # tini's SIGTERM on to it: a foreground child would get no signal,
+          # and would be killed at the end of the grace period.
+          #
+          # `command` replaces the image ENTRYPOINT, so tini is named here and
+          # stays pid 1, reaping git and claude children.
+          command:
+            - /usr/bin/tini
+            - --
+            - bash
+            - -eu
+            - -o
+            - pipefail
+            - -c
+            - |
+              rm -rf /work/dotfiles
+              git clone --quiet --depth 1 --branch "${DOTFILES_REF}" \
+                "${DOTFILES_REPO}" /work/dotfiles
+              skills=/work/dotfiles/dot_claude/skills
+              # CLAUDE_CODE_OAUTH_TOKEN from /secrets/claude-token, then the
+              # two Telegram vars: the same files the CronJob reads.
+              . "$skills/cycle-runner/scripts/env.sh"
+              . "$skills/gatekeeper/scripts/env.sh"
+              stop=""
+              pid=""
+              trap 'stop=1; [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null' TERM INT
+              # Everything long-running goes through this, so the trap above can
+              # interrupt it. bash runs a trap only between foreground commands,
+              # so a SIGTERM during `git fetch` would otherwise wait for the
+              # network, and the kubelet would SIGKILL the pod instead.
+              bg() { "$@" & pid=$!; wait "$pid"; }
+              while [ -z "$stop" ]; do
+                rc=0
+                bg python3 "$skills/po-agent/scripts/po_chat.py" consume \
+                  --repo /work/dotfiles --ref "${DOTFILES_REF}" || rc=$?
+                if [ -n "$stop" ]; then
+                  wait "$pid" 2>/dev/null || true
+                  exit 0
+                fi
+                [ "$rc" -eq 75 ] || exit "$rc"
+                if bg git -C /work/dotfiles fetch --quiet --depth 1 origin "${DOTFILES_REF}" \
+                   && bg git -C /work/dotfiles reset --quiet --hard FETCH_HEAD; then
+                  echo "po-chat: dotfiles now at $(git -C /work/dotfiles rev-parse --short HEAD)"
+                elif [ -n "$stop" ]; then
+                  exit 0
+                else
+                  echo "po-chat: fetch failed, running the current code again" >&2
+                fi
+              done
+              exit 0
+          env:
+            # $HOME is the volume. The inbox the listener writes is
+            # .local/state/cycle-runner/inbox/telegram, and this pod's own
+            # state is .local/state/cycle-runner/po-chat.
+            - name: HOME
+              value: /data/home
+            - name: DOTFILES_REPO
+              value: https://github.com/silverbeer/dotfiles
+            - name: DOTFILES_REF
+              value: main
+            # cycle-runner/env.sh reads claude-token and gatekeeper/env.sh
+            # reads the two Telegram files, both from here.
+            - name: CYCLE_RUNNER_SECRETS_DIR
+              value: /secrets
+            # cycle_state.py reads Linear, cycle_apply.py writes an approved
+            # change set, and an answered question becomes a comment.
+            - name: LINEAR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cycle-runner
+                  key: linear-api-key
+            # SB-991: a config dir of its own, NOT ~/.claude. That one is the
+            # runner's, and bootstrap.sh fills it with every skill, command
+            # and agent. Nothing is installed in this one, so no plugin, hook
+            # or CLAUDE.md can leak into the chat. On the PVC, because the
+            # per-cycle sessions resumed with --resume are stored here.
+            - name: CLAUDE_CONFIG_DIR
+              value: /data/home/.local/state/cycle-runner/po-chat/claude
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            # Knobs (the defaults are po_chat.py's): the model, and the caps
+            # on one `claude -p` call and on a day's spend (Eastern). Over
+            # either cap the bot says so rather than dropping the message.
+            - name: PO_CHAT_MODEL
+              value: sonnet
+            - name: PO_CHAT_MSG_USD
+              value: "0.75"
+            - name: PO_CHAT_DAILY_USD
+              value: "10"
+            # `po_chat.py ask` refuses to run without this. Outside the pod it
+            # would record the question in a state dir the chat never reads, so
+            # the user's reply would be silently dropped.
+            - name: PO_CHAT_POD
+              value: "1"
+          # A process that is up but wedged answers nothing. po_chat.py writes
+          # the heartbeat every loop (at most every 2s when idle) and every 4s
+          # while it waits on claude. The initial delay covers the clone.
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - f=/data/home/.local/state/cycle-runner/po-chat/heartbeat; [ -f "$f" ] && [ $(( $(date +%s) - $(stat -c %Y "$f") )) -lt 120 ]
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+          volumeMounts:
+            - name: home
+              mountPath: /data
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+            - name: work
+              mountPath: /work
+          resources:
+            requests:
+              # Idle nearly all the time, in a 2-second inbox poll. Bursts to a
+              # `claude` process for about a minute per message. The node is
+              # ~95% requested (SB-981), so the request is the idle cost.
+              cpu: 50m
+              # The claude CLI is a node process. What it holds during a turn
+              # is the realistic floor, not the idle python loop.
+              memory: 384Mi
+            limits:
+              # No CPU limit: throttling claude only makes the reply slower.
+              # Memory is capped so a leak kills the pod, not the node.
+              memory: 1Gi
+
+      volumes:
+        # The runner's PVC, shared with the CronJob and the listener. See
+        # listener.yaml on why ReadWriteOnce allows that on one node.
+        - name: home
+          persistentVolumeClaim:
+            claimName: cycle-runner-home
+        - name: secrets
+          secret:
+            secretName: cycle-runner
+            defaultMode: 0400
+            # claude-token for the PO, and the two Telegram files for replies.
+            # No gh-token: the chat pushes nothing and opens no PR.
+            items:
+              - key: claude-token
+                path: claude-token
+              - key: telegram-token
+                path: telegram-token
+              - key: telegram-chat-id
+                path: telegram-chat-id
+        # The clone. Container-lifetime scratch, re-cloned on every container
+        # start and updated in place by the loop.
+        - name: work
+          emptyDir: {}

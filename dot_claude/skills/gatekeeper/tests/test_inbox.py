@@ -56,6 +56,16 @@ class RecordTests(InboxTestCase):
             },
         )
         self.assertIn("received_at", rec)
+        self.assertIsNone(rec["reply_to_message_id"])
+
+    def test_a_reply_records_the_message_it_replies_to(self):
+        """SB-1089: a reply to one of the PO's questions is how the chat finds
+        the ticket the answer belongs to. Added under /1, so readers of older
+        records must tolerate its absence."""
+        msg = dict(message("SB-12 can wait"), reply_to_message={"message_id": 77, "text": "❓ SB-12"})
+        rec = json.loads(inbox.record(msg, 601, self.root).read_text())
+        self.assertEqual(rec["schema"], "gatekeeper.inbox/1")
+        self.assertEqual(rec["reply_to_message_id"], 77)
 
     def test_a_redelivered_update_is_not_recorded_again_wherever_it_has_got_to(self):
         """Telegram redelivers anything unacked. The PO must not see a message

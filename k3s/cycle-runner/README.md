@@ -1,9 +1,10 @@
 # cycle-runner in k3s
 
 The cycle-runner runs as a CronJob every 30 minutes (SB-976), on the
-rancher-desktop cluster, next to the gatekeeper listener, a one-replica
-Deployment that owns Telegram (SB-951). This directory holds the image both
-run (SB-975) and their manifests.
+rancher-desktop cluster, next to two one-replica Deployments: the gatekeeper
+listener, which owns Telegram (SB-951), and the PO chat, which answers what the
+listener records (SB-1089). This directory holds the image all three run
+(SB-975) and their manifests.
 
 ## Deploy
 
@@ -12,6 +13,7 @@ kubectl apply -f k3s/cycle-runner/namespace.yaml
 bash k3s/cycle-runner/provision-cluster-secret.sh   # reads the mini's files, not 1Password
 kubectl apply -f k3s/cycle-runner/pvc.yaml -f k3s/cycle-runner/cronjob.yaml
 kubectl apply -f k3s/cycle-runner/listener.yaml
+kubectl apply -f k3s/cycle-runner/po-chat.yaml
 ```
 
 **Merge first, then apply `listener.yaml`.** Both pods run code cloned from
@@ -58,6 +60,31 @@ reader; any other code is a crash or a kill. It also warns if the listener's
 image differs from the CronJob's. A restart count with a clean last exit is
 only mentioned in the ok line.
 
+## The PO chat
+
+`po-chat.yaml` runs `po-agent/scripts/po_chat.py consume`. It never calls
+`getUpdates`: it reads the inbox the listener writes on the PVC, one message at
+a time, and replies with `sendMessage`. It builds the reply from live
+`cycle_state.py` JSON and one `claude -p` turn. That call has no tools, a
+per-message budget cap, and a `CLAUDE_CONFIG_DIR` of its own under
+`.local/state/cycle-runner/po-chat/claude`, so none of the runner's `~/.claude`
+leaks in (SB-991). Linear writes happen only after a plain `yes` to a dry run.
+See the po-agent SKILL.md.
+
+**Merge first, then apply `po-chat.yaml`.** Like the listener, it clones
+`dotfiles@main` and runs `po_chat.py` from that clone. Applied before the merge,
+it has nothing to run and crash-loops. Messages sent in the meantime wait in the
+inbox and are answered once it starts.
+
+It mounts `claude-token`, `telegram-token` and `telegram-chat-id` from the
+Secret, and `linear-api-key` as an env var, but no `gh-token`. It requests
+50m CPU and 384Mi (a `claude` turn is a node process), with a 1Gi limit.
+Self-update is a loop in the container command: `po_chat.py` exits 75
+between messages when `main` has moved, and the loop fetches, resets and runs
+it again without a restart. `doctor.sh` fails if the Deployment is missing or
+not ready, and warns on a non-zero last exit or an image that differs from the
+CronJob's.
+
 ## What the scheduler replaced
 
 | `run.sh` before | now |
@@ -102,14 +129,14 @@ semantics and isolation.
 
 ## Keeping `claude` current
 
-The CronJob and the listener are pinned to `ghcr.io/silverbeer/cycle-runner:claude-<version>`,
+The CronJob, the listener and the PO chat are pinned to `ghcr.io/silverbeer/cycle-runner:claude-<version>`,
 never `:latest`. `:latest` with `imagePullPolicy: Always` means a rebuild lands
 in the next tick with nobody having looked at it, and leaves nothing to revert
-*to*. `check-k3s-manifests.sh` fails the build if either tag and the
+*to*. `check-k3s-manifests.sh` fails the build if any tag and the
 Dockerfile's `ARG CLAUDE_VERSION` disagree.
 
-`.github/workflows/cycle-runner-image-refresh.yml` runs weekly (Mon 07:00 UTC,
-or on demand):
+`.github/workflows/cycle-runner-image-refresh.yml` bumps all three. It runs
+weekly (Mon 07:00 UTC, or on demand):
 
 1. compare `npm view @anthropic-ai/claude-code version` against the pin — equal, stop
 2. build the candidate; `claude-cli-contract` runs as a build step, so a
@@ -158,8 +185,8 @@ whole class is unreachable rather than merely fixed, and
 ## The CLI contract
 
 `claude-cli-contract.sh` runs as a **build step**. It asserts every flag
-`run.sh` and `triage-run.sh` pass to `claude` still exists in `claude --help`,
-so a renamed or removed flag fails the build instead of a 2am tick. `--max-turns`
+`run.sh`, `triage-run.sh` and `po_chat.py` pass to `claude` still exists in
+`claude --help`, so a renamed or removed flag fails the build instead of a 2am tick. `--max-turns`
 is deliberately absent from the list: it does not exist, was assumed once, and
 the run failed — `doctor.sh` carries the same note.
 

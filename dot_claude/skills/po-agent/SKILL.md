@@ -1,6 +1,6 @@
 ---
 name: po-agent
-description: Product-owner / scrum-master helpers for the SB team's Linear cycles — cycle state as one versioned JSON document (planned vs adhoc, carry-in, at-risk, waiting on a human, not ready, velocity, capacity, a capacity-bound plan) and the one script that writes an approved cycle plan. Driven through the /cycle command (review, plan); read directly by the standup, runner feed and chat. Use when reviewing or planning a cycle, or when something needs cycle numbers.
+description: Product-owner / scrum-master helpers for the SB team's Linear cycles — cycle state as one versioned JSON document (planned vs adhoc, carry-in, at-risk, waiting on a human, not ready, velocity, capacity, a capacity-bound plan), the one script that writes an approved cycle plan, and the Telegram chat with the PO (po_chat.py). Driven through the /cycle command (review, plan); read directly by the standup, runner feed and chat. Use when reviewing or planning a cycle, when something needs cycle numbers, or when posting a PO question to Telegram.
 allowed-tools: Bash, Read
 ---
 
@@ -10,7 +10,8 @@ Driven through `/cycle review` and `/cycle plan` (`~/.claude/commands/cycle.md`)
 which hold the conversation rules. This file is the reference for the two scripts
 and, above all, the JSON schema every reader depends on.
 
-Two scripts, one rule each:
+Two scripts, one rule each (and `scripts/po_chat.py`, the Telegram chat, which
+drives both: see [po_chat.py](#po_chatpy)):
 
 - `scripts/cycle_state.py` is **read-only** and prints exactly one JSON document.
   The numbers are all in it. A reader quotes fields; it never re-derives a number.
@@ -169,3 +170,82 @@ python3 $S/cycle_apply.py --changes /tmp/cycle-9-changes.json --confirm  # write
 - The script re-reads each issue first and skips fields that already match, so a
   second run is a no-op and a failed run can be re-run. Malformed input, an
   unknown issue or an unknown cycle refuses the batch before any write.
+
+## po_chat.py
+
+The PO, over Telegram (SB-1089). It runs as the `po-chat` Deployment
+(`k3s/cycle-runner/po-chat.yaml`).
+
+```bash
+python3 $S/po_chat.py consume     # for ever: answer the gatekeeper inbox (the Deployment runs this)
+
+# Ask a question from the pod, where the question file lands on the PVC the
+# chat reads. It refuses to run anywhere else (PO_CHAT_POD), because elsewhere
+# the user's reply would be silently dropped.
+kubectl exec deploy/po-chat --namespace cycle-runner -- \
+  python3 /work/dotfiles/dot_claude/skills/po-agent/scripts/po_chat.py ask SB-12 "Estimate SB-12? 1/2/3/5/8"
+```
+
+`consume` reads the gatekeeper inbox, never Telegram: `listen.py` is the one
+`getUpdates` reader. Each message goes through these steps, in order:
+
+1. **A reply to a PO question.** The answer goes through the runner's
+   `scan_log_clean` (gitleaks, fail closed), then is posted as a comment on the
+   ticket, carrying `gate.py`'s echo marker: `PO question (Telegram): …` followed
+   by `Answer: …`. Each question is answered once. An answer the scan does not
+   pass reaches nothing at all — not Linear, not the chat log, not the PO. A
+   message that isn't a Telegram reply never becomes a comment, and a reply to a
+   question never touches a pending proposal.
+2. **A proposal is pending.** A plain `yes` (also `y`, `yes please`, `apply`,
+   optionally ending in `.` or `!`) applies exactly the dry-run file with
+   `cycle_apply.py --confirm`. `--confirm` appears in one function,
+   `apply_pending`, and it is reached only when all of this holds: the dry run
+   was **delivered** (`pending.json` is written after the send, with that
+   message's `message_id` and `sent_at`), the yes was sent **after** it and
+   within 30 minutes, by Telegram's own clock, it is not a reply to some other
+   message, and the file still hashes to what was shown. Any other message,
+   including `no`, discards the proposal, says "Nothing written." and goes on to
+   the PO with a note. A message older than the proposal (a redelivery) leaves
+   it alone.
+3. **The daily budget.** If today's spend (Eastern) is at `PO_CHAT_DAILY_USD`,
+   the bot says so and doesn't call `claude`. A call whose cost cannot be read —
+   a timeout, a kill, unreadable output, a SIGTERM after it started — is charged
+   the per-message cap.
+4. **`claude -p`.** One session per cycle, `--resume`d until the cycle number
+   changes, the system prompt changes, or it reaches `PO_CHAT_MAX_TURNS`. The
+   prompt, on **stdin**, holds the live `cycle_state.py --cycle current` JSON, or
+   a note that it is unchanged, with the day counts. There is no fallback to
+   another cycle: if `--cycle current` fails, the bot says so and calls nobody.
+   The system prompt is `chat.md` (the adapter) then `commands/cycle.md` (the
+   rules), both read on every call. The model has no tools and no MCP servers,
+   skills or settings, so its only output is JSON: `{reply, changes, ask}`,
+   with `changes` schema-checked as a `cycle_apply.py` changes file. A missing
+   `structured_output` is an error, never prose. A non-null `changes` is dry-run
+   and kept pending for a LATER message. A non-null `ask` is posted as a
+   question when its ticket resolves.
+
+State is under `$GATEKEEPER_STATE/po-chat/`:
+
+| path | holds |
+|---|---|
+| `sessions/cycle-<N>.json` | `{session_id, created_at, turns, last_state_sha, prompt_sha}`. `last_state_sha` ignores fields only the clock moves, so a day that changed nothing is not resent |
+| `pending.json`, `pending-changes.json` | `{changes, sha256, proposed_at, cycle, message_id, sent_at, expires_at}` and the exact file dry-run. Written only once the dry run has been delivered |
+| `questions/<telegram message_id>.json` | `{ticket, issue_id, url, question, asked_at, message_id, answered_update_id}` |
+| `ledger/<YYYY-MM-DD ET>.json` | `{spent_usd, calls}` |
+| `log/<YYYY-MM-DD ET>.jsonl` | `{ts, update_id, dir, text, cost, session_id, latency_s}` per message in and out |
+| `notes.json` | what the PO hears on its next successful turn (a change applied, a question answered) |
+| `attempts/<update_id>`, `heartbeat`, `work/` | crash retries (dropped after 2), the liveness probe, claude's cwd |
+
+| env | default | |
+|---|---|---|
+| `PO_CHAT_MODEL` | `sonnet` | `--model` |
+| `PO_CHAT_MSG_USD` | `0.75` | `--max-budget-usd` per call. Over it, the cost is charged and the bot says so |
+| `PO_CHAT_DAILY_USD` | `10` | a day's spend, Eastern |
+| `PO_CHAT_MAX_TURNS` | `30` | turns before a session is rotated, so its history cannot grow past the per-message cap |
+| `PO_CHAT_POD` | set by the Deployment | `ask` refuses to run without it |
+| `CLAUDE_CONFIG_DIR` | set by the Deployment | a config dir of the chat's own, so no plugin leaks in (SB-991) |
+
+Also needs `LINEAR_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` (`cycle-runner/scripts/env.sh`)
+and the two Telegram vars (`gatekeeper/scripts/env.sh`). Exit codes: `0` stopped,
+`75` dotfiles@main moved (the container loop fetches and re-runs it), and
+anything else is a crash.

@@ -36,6 +36,9 @@ class FakeTransport:
         # Same, for getUpdates: a 409 (TelegramConflict) or Telegram being
         # unreachable, as the listener sees it (SB-951).
         self.fail_get_updates: Exception | None = None
+        # sendChatAction calls, and a way to make them fail (SB-1089).
+        self.actions: list[tuple[str, str]] = []
+        self.fail_action: Exception | None = None
 
     def send_message(
         self,
@@ -71,6 +74,11 @@ class FakeTransport:
         if self.fail_answer is not None:
             raise self.fail_answer
         self.answered.append((callback_query_id, text))
+
+    def send_chat_action(self, chat_id: str, action: str = "typing") -> None:
+        if self.fail_action is not None:
+            raise self.fail_action
+        self.actions.append((chat_id, action))
 
     def get_me(self) -> dict:
         return {"id": 1, "is_bot": True, "username": "gatekeeper_bot"}

@@ -86,6 +86,14 @@ class Validate(unittest.TestCase):
             {"issues": [{"identifier": "SB-1", "cancel": True, "estimate": 3}]},
             {"cycle": {"number": 9, "planning": "done"}},
             {"cycle": {"planning": "planned"}},
+            # SB-1089: the chat hands this file whatever the model produced.
+            {"issues": [{"identifier": "SB-1"}], "stamp": {"number": 9}},
+            {"cycle": {"number": 9, "planning": "planned", "state": "active"}},
+            {"issues": ["SB-1"]},
+            {},
+            {"issues": []},
+            {"cycle": None, "issues": []},
+            [],
         ]
         for changes in bad:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -333,6 +341,27 @@ class Main(unittest.TestCase):
         self.assertIn("REFUSING", rc)
         self.assertIn("255", rc)
         self.assertEqual(self.fake.mutations, [])
+
+    # NEGATIVE: an unknown key refuses the batch, with a message naming it,
+    # before Linear is read at all (SB-1089).
+    def test_an_unknown_top_level_key_refuses_before_any_read(self):
+        rc, _ = self._run({"issues": _changes(), "allow_active_cycle_move": True}, "--confirm")
+        self.assertIn("REFUSING", rc)
+        self.assertIn("unknown top-level key(s) ['allow_active_cycle_move']", rc)
+        self.assertEqual(self.fake.mutations, [])
+
+    def test_an_empty_change_set_is_refused_not_a_silent_no_op(self):
+        rc, _ = self._run({"issues": []})
+        self.assertIn("REFUSING", rc)
+        self.assertIn("the change set is empty", rc)
+
+    def test_a_change_file_that_is_not_json_is_refused(self):
+        path = f"{self.dir}/changes.json"
+        with open(path, "w") as f:
+            f.write("{not json")
+        with self.assertRaises(SystemExit) as ctx:
+            ca.main(["--changes", path])
+        self.assertIn("REFUSING", str(ctx.exception.code))
 
     # NEGATIVE: an issue Linear does not have refuses the batch.
     def test_an_unknown_issue_refuses_before_any_write(self):

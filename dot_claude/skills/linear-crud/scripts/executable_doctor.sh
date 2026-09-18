@@ -481,6 +481,53 @@ else
   infof "kubectl not installed, skipping the gatekeeper-listener check"
 fi
 
+# The PO chat (SB-1089): consumes the inbox the listener writes and answers as
+# the PO. Not running is a FAILURE, for the same reason: messages are recorded
+# and silently never answered, with every other check green.
+#
+# A non-zero LAST EXIT is a WARN. Self-update exits 75, but the container's own
+# loop handles that and never exits with it, so any non-zero exit the kubelet
+# saw is a crash or a kill. restartCount alone is not a warning, as above.
+if command -v "$KUBECTL" >/dev/null 2>&1; then
+  if pc="$("$KUBECTL" get deploy po-chat -n cycle-runner \
+          -o jsonpath='{.status.readyReplicas}{"\t"}{.spec.replicas}{"\t"}{.spec.template.spec.containers[0].image}' 2>/dev/null)"; then
+    pc_ready="$(printf '%s' "$pc" | cut -f1)"
+    pc_desired="$(printf '%s' "$pc" | cut -f2)"
+    pc_image="$(printf '%s' "$pc" | cut -f3)"
+    pc_pods="$("$KUBECTL" get pod -l app=po-chat -n cycle-runner \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[0].restartCount}{"\t"}{.status.containerStatuses[0].lastState.terminated.reason}{"\t"}{.status.containerStatuses[0].lastState.terminated.exitCode}{"\n"}{end}' 2>/dev/null)"
+    pc_restart_count="$(printf '%s\n' "$pc_pods" | awk -F'\t' '$2 ~ /^[0-9]+$/ {n += $2} END {print n + 0}')"
+    pc_crashes="$(printf '%s\n' "$pc_pods" | awk -F'\t' '$4 != "" && $4 != "0" {
+        print "     " $1 "  last exit " $4 " (" ($3 == "" ? "?" : $3) ")" }')"
+
+    # readyReplicas is ABSENT, not 0, when nothing is ready.
+    case "$pc_ready" in ''|*[!0-9]*) pc_ready=0 ;; esac
+    if [ "$pc_ready" -lt 1 ]; then
+      failf "po-chat is not running (${pc_ready}/${pc_desired:-?} ready) — Telegram messages are recorded but nobody answers them" \
+        "run: kubectl -n cycle-runner describe deploy po-chat; kubectl -n cycle-runner logs deploy/po-chat"
+    elif [ "$pc_restart_count" -gt 0 ]; then
+      ok "po-chat running (${pc_ready}/${pc_desired} ready; ${pc_restart_count} restart(s) over its life)"
+    else
+      ok "po-chat running (${pc_ready}/${pc_desired} ready)"
+    fi
+
+    if [ -n "$pc_crashes" ]; then
+      warnf "po-chat exited non-zero" \
+        "self-update never exits the container, so this is a crash or a kill — kubectl -n cycle-runner logs --previous deploy/po-chat:$(printf '%s' "$pc_crashes" | head -3 | tr '\n' '~' | sed 's/~/\n     /g')"
+    fi
+
+    if [ -n "${cj_image:-}" ] && [ -n "$pc_image" ] && [ "$pc_image" != "$cj_image" ]; then
+      warnf "po-chat runs $pc_image but the CronJob runs $cj_image" \
+        "apply the manifests from the same commit: kubectl apply -f k3s/cycle-runner/cronjob.yaml -f k3s/cycle-runner/po-chat.yaml"
+    fi
+  else
+    failf "no po-chat Deployment in the cluster — Telegram messages are recorded but nobody answers them" \
+      "run: kubectl apply -f k3s/cycle-runner/po-chat.yaml  (after the change is merged to main — it clones main)"
+  fi
+else
+  infof "kubectl not installed, skipping the po-chat check"
+fi
+
 echo "── chezmoi sync ──────────────────────────"
 # The actual root-cause fix for PR #37 silently reverting PR #35: that
 # happened because `chezmoi re-add` was run on a machine whose ~/.claude was

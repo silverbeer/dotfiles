@@ -48,7 +48,7 @@ that need a human least.
 |---|---|---|---|---|
 | 1 | [x] cycle-report tells the truth | [SB-626](https://linear.app/silverbeer/issue/SB-626) | 3 | — |
 | 2 | [x] `/cycle` in the terminal | [SB-1087](https://linear.app/silverbeer/issue/SB-1087) | 5 | 1 |
-| 7 | [ ] Telegram long-poll listener | [SB-951](https://linear.app/silverbeer/issue/SB-951) | 5 | — |
+| 7 | [x] Telegram long-poll listener | [SB-951](https://linear.app/silverbeer/issue/SB-951) | 5 | — |
 | 8 | [ ] Chat with the PO from Telegram | [SB-1089](https://linear.app/silverbeer/issue/SB-1089) | 8 | 2, 7 |
 | ◆ | [ ] **Checkpoint A:** plan cycle 9 by hand with `/cycle` | — | — | 2, on 2026-09-20 |
 | 3 | [ ] Daily standup to Telegram | [SB-1088](https://linear.app/silverbeer/issue/SB-1088) | 3 | 2, A |
@@ -573,3 +573,37 @@ code or the ticket. Keep entries short; date and ticket each one.
   ENTRYPOINT, so tini is named explicitly. `cronjob.yaml` had the same override
   without tini; fixed in SB-1095, and check-k3s-manifests.sh now requires tini
   first in every container command of every manifest (a new po-chat.yaml too).
+- 2026-09-18 · SB-951 — **Step 7 ticked.** A real Approve tap was acknowledged on
+  the phone within seconds (gate `ea7eb4ac` on the throwaway SB-1094), and the
+  listener has since run 24h with 0 restarts and no 409. Smoke recipe, for next
+  time: open the gate **inside the pod** (`kubectl exec deploy/gatekeeper-listener
+  --namespace cycle-runner -- … gate.py open --kind plan --ticket SB-N --body f`),
+  because gate state lives on the PVC — a gate opened on the Mac is invisible to
+  the listener. Afterwards run `gate.py poll --once` in the pod to claim the
+  handoff, or the next tick resumes work on the throwaway ticket.
+- 2026-09-18 · SB-1089 — **The chat is one more Deployment, `po-chat`**, not a
+  second container in the listener: the listener never holds the claude token,
+  and a chat OOM or rollout cannot take the Telegram reader down with it. It is
+  the **only** inbox consumer. Files under `$STATE/po-chat/`: `sessions/cycle-<N>.json`
+  (one claude session per cycle, rotated when the prompt sha or 30 turns change),
+  `pending.json` (a proposal, live only once its dry run was delivered),
+  `questions/<tg_message_id>.json`, `ledger/<date ET>.json`, `log/<date>.jsonl`.
+- 2026-09-18 · SB-1089 — **Consent is enforced in code, not by the model.** The
+  model has no tools; it can only return `changes`, which is dry-run and held
+  pending. A write needs a plain yes that arrived **after** the dry run was
+  delivered, is not a reply to some other message, and matches the proposal's
+  sha. `--confirm` lives in exactly one function and a test asserts it. The
+  runner-facing rule from SB-1087 still holds: `cycle_apply.py` refuses to move
+  work out of a running cycle, and chat may never pass
+  `--allow-active-cycle-move`.
+- 2026-09-18 · SB-1089 — **Gate replies are routed by what they reply to.** A
+  Telegram reply only decides or annotates the gate whose own DM it replies to;
+  everything else reaches the chat inbox. Before this, a reply beginning
+  `approve` decided the newest awaiting gate — a merge gate included.
+- 2026-09-18 · SB-1089 — **For the standup (SB-1088) and runner status
+  (SB-1100):** ask a question with `po_chat.py ask SB-N "…"`, which must run
+  **inside the pod** (`PO_CHAT_POD=1`; it refuses elsewhere, because the reply is
+  matched against the PVC's question records). An answer is gitleaks-scanned,
+  carries `gate.ECHO_MARKER` so `check_linear` does not echo it back, and is
+  posted once. /cycle and the standup do not post their open questions
+  automatically yet.

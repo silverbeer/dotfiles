@@ -396,6 +396,12 @@ if [[ "$out" == *"kubectl not installed, skipping the gatekeeper-listener check"
 else
   bad "kubectl-absent listener case did not report as expected: $out"
 fi
+if [[ "$out" == *"kubectl not installed, skipping the po-chat check"* \
+      && "$out" != *"po-chat is not running"* && "$out" != *"no po-chat Deployment"* ]]; then
+  ok "no kubectl -> the po-chat check is info too"
+else
+  bad "kubectl-absent po-chat case did not report as expected: $out"
+fi
 
 # 4b. healthy: scheduled, not suspended.
 kubectl_stub 'case "$*" in
@@ -717,6 +723,88 @@ if [[ "$out" == *"gatekeeper-listener runs ghcr.io/silverbeer/cycle-runner:claud
   ok "a listener image that differs from the CronJob -> warn, names both"
 else
   bad "listener-image-drift case did not report as expected: $out"
+fi
+
+default_kubectl
+
+# ------------------------------------- 4i. the PO chat (SB-1089)
+#
+# Consumes the inbox the listener writes. Not running is a FAILURE: messages
+# are recorded and never answered, and every other check stays green.
+
+po_chat_stub() {  # READY DESIRED IMAGE POD_ROWS
+  cat >"$bin/kubectl" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"get deploy po-chat -n cycle-runner -o jsonpath"*) printf '%s\\t%s\\t%s' "$1" "$2" "$3" ;;
+  *"get pod -l app=po-chat"*) printf '%b' "$4" ;;
+  *"get cronjob cycle-runner -n cycle-runner -o jsonpath={.spec.jobTemplate"*) printf 'ghcr.io/silverbeer/cycle-runner:claude-2.1.258' ;;
+  *"get cronjob cycle-runner -n cycle-runner -o jsonpath"*) printf "false\\t2026-09-04T11:00:00Z\\t2026-09-04T11:00:12Z" ;;
+  *"get cronjob"*) exit 0 ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$bin/kubectl"
+}
+PO_CHAT_IMAGE=ghcr.io/silverbeer/cycle-runner:claude-2.1.258
+QUIET_CHAT_POD='po-chat-abc\t0\t\t\n'
+
+# 4i1. healthy: 1/1, no restarts, same image as the CronJob.
+po_chat_stub 1 1 "$PO_CHAT_IMAGE" "$QUIET_CHAT_POD"
+out="$(run_doctor)"
+if [[ "$out" == *"po-chat running (1/1 ready)"* && "$out" != *"po-chat exited non-zero"* \
+      && "$out" != *"po-chat runs"* ]]; then
+  ok "a healthy po-chat -> ok, no exit or drift warning"
+else
+  bad "healthy-po-chat case did not report as expected: $out"
+fi
+
+# 4i2. 0 ready (readyReplicas absent).
+po_chat_stub "" 1 "$PO_CHAT_IMAGE" "$QUIET_CHAT_POD"
+out="$(run_doctor)"
+if [[ "$out" == *"po-chat is not running (0/1 ready)"* ]]; then
+  ok "a po-chat with 0/1 ready -> fail"
+else
+  bad "po-chat-not-ready case did not report as expected: $out"
+fi
+
+# 4i3. no Deployment at all -> fail, with the apply command.
+kubectl_stub 'case "$*" in
+  *"get cronjob"*) exit 0 ;;
+  *) exit 1 ;;
+esac'
+out="$(run_doctor)"
+if [[ "$out" == *"no po-chat Deployment in the cluster"* && "$out" == *"kubectl apply -f k3s/cycle-runner/po-chat.yaml"* ]]; then
+  ok "a missing po-chat -> fail, with the apply command"
+else
+  bad "missing-po-chat case did not report as expected: $out"
+fi
+
+# 4i4. a non-zero last exit is a crash or a kill: self-update never exits.
+po_chat_stub 1 1 "$PO_CHAT_IMAGE" 'po-chat-abc\t2\tOOMKilled\t137\n'
+out="$(run_doctor)"
+if [[ "$out" == *"po-chat exited non-zero"* && "$out" == *"po-chat-abc  last exit 137 (OOMKilled)"* ]]; then
+  ok "a po-chat whose last exit was non-zero -> warn, names the exit"
+else
+  bad "po-chat-crash case did not report as expected: $out"
+fi
+
+# 4i5. restarts with a clean last exit are mentioned, not warned about.
+po_chat_stub 1 1 "$PO_CHAT_IMAGE" 'po-chat-abc\t4\tCompleted\t0\n'
+out="$(run_doctor)"
+if [[ "$out" == *"po-chat running (1/1 ready; 4 restart(s) over its life)"* && "$out" != *"po-chat exited non-zero"* ]]; then
+  ok "po-chat restarts with a clean last exit -> ok, no warn"
+else
+  bad "po-chat-clean-restarts case did not report as expected: $out"
+fi
+
+# 4i6. a different image from the CronJob.
+po_chat_stub 1 1 ghcr.io/silverbeer/cycle-runner:claude-2.1.200 "$QUIET_CHAT_POD"
+out="$(run_doctor)"
+if [[ "$out" == *"po-chat runs ghcr.io/silverbeer/cycle-runner:claude-2.1.200 but the CronJob runs ghcr.io/silverbeer/cycle-runner:claude-2.1.258"* ]]; then
+  ok "a po-chat image that differs from the CronJob -> warn, names both"
+else
+  bad "po-chat-image-drift case did not report as expected: $out"
 fi
 
 default_kubectl

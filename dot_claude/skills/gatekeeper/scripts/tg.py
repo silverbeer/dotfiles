@@ -18,6 +18,7 @@ Two things this module refuses to do:
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.error
@@ -64,6 +65,8 @@ class Transport(Protocol):
 
     def answer_callback_query(self, callback_query_id: str, text: str = "") -> None: ...
 
+    def send_chat_action(self, chat_id: str, action: str = "typing") -> None: ...
+
     def get_me(self) -> dict: ...
 
 
@@ -91,6 +94,11 @@ class TelegramTransport:
             raise TelegramError(f"Telegram rejected {method} (HTTP {exc.code}).") from None
         except urllib.error.URLError as exc:
             raise TelegramError(f"Could not reach Telegram: {exc.reason}") from None
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            # The response was cut off, timed out mid-read or was not JSON
+            # (SB-1089). One exception type for callers to catch; the class name
+            # only, since the token is in the URL.
+            raise TelegramError(f"Telegram {method} response failed ({exc.__class__.__name__})") from None
         if not body.get("ok"):
             raise TelegramError(f"Telegram refused {method}: {body.get('description', 'unknown')}")
         return body.get("result")
@@ -165,6 +173,12 @@ class TelegramTransport:
         if text:
             payload["text"] = text
         self._call("answerCallbackQuery", payload, timeout=15)
+
+    def send_chat_action(self, chat_id: str, action: str = "typing") -> None:
+        """"typing…" under the chat title (SB-1089). Telegram clears it after
+        about five seconds or at the next message, so a caller doing slow work
+        repeats it every few seconds."""
+        self._call("sendChatAction", {"chat_id": chat_id, "action": action}, timeout=10)
 
     def get_me(self) -> dict:
         return self._call("getMe", {}, timeout=15) or {}

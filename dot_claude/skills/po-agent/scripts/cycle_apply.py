@@ -18,7 +18,9 @@ changes.json:
        {"identifier": "SB-3", "priority": 2, "estimate": 3},
        {"identifier": "SB-4", "cancel": true}]}
 
-Every key but `identifier` is optional; an absent key is left alone.
+Every key but `identifier` is optional; an absent key is left alone. An
+unknown key, at any level, and a change set with no issues and no cycle stamp
+are refused.
 `"cycle": null` REMOVES the issue from its cycle — needed to drop carry-over,
 because Linear rolls unfinished issues forward at close on its own. A cycle
 change for an issue whose current cycle is still running (started, not yet
@@ -58,6 +60,8 @@ except ImportError:
     sys.exit(f"cycle_apply: missing {LINEAR_CRUD}/cycles.py — the linear-crud skill must be installed")
 
 ISSUE_KEYS = {"identifier", "cycle", "priority", "estimate", "cancel"}
+TOP_KEYS = {"cycle", "issues"}
+STAMP_KEYS = {"number", "planning", "note"}
 
 Q_LIVE = """
 query($n:[Float!]){ issues(filter:{team:{key:{eq:"SB"}}, number:{in:$n}}, first:250){
@@ -75,11 +79,20 @@ mutation($id:String!,$input:IssueUpdateInput!){ issueUpdate(id:$id, input:$input
 
 def validate(changes: dict) -> None:
     """Refuse a malformed change set before anything is read or written."""
+    if not isinstance(changes, dict):
+        raise ValueError("the change set must be a JSON object")
+    unknown = set(changes) - TOP_KEYS
+    if unknown:
+        raise ValueError(f"unknown top-level key(s) {sorted(unknown)} — only `cycle` and `issues`")
     issues = changes.get("issues", [])
     if not isinstance(issues, list):
         raise ValueError("`issues` must be a list")
+    if not issues and changes.get("cycle") is None:
+        raise ValueError("the change set is empty: no `issues` and no `cycle` stamp")
     seen = set()
     for c in issues:
+        if not isinstance(c, dict):
+            raise ValueError(f"each issue change must be an object, not {c!r}")
         k = c.get("identifier")
         if not isinstance(k, str) or not re.fullmatch(r"SB-\d+", k):
             raise ValueError(f"bad identifier: {k!r}")
@@ -101,6 +114,11 @@ def validate(changes: dict) -> None:
             raise ValueError(f"{k}: a canceled issue's estimate is 0, not {c['estimate']}")
     stamp = changes.get("cycle")
     if stamp is not None:
+        if not isinstance(stamp, dict):
+            raise ValueError("`cycle` must be an object or null")
+        unknown = set(stamp) - STAMP_KEYS
+        if unknown:
+            raise ValueError(f"cycle: unknown key(s) {sorted(unknown)}")
         if not _is_int(stamp.get("number")):
             raise ValueError("cycle.number must be a cycle number")
         if stamp.get("planning") not in (None, *cycles.PLANNING_STATUSES):
@@ -224,10 +242,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="allow moving an issue out of a running cycle (only when the user explicitly asks)")
     args = ap.parse_args(argv)
 
-    changes = json.loads(Path(args.changes).read_text())
-    issue_changes = changes.get("issues", [])
     try:
+        changes = json.loads(Path(args.changes).read_text())
         validate(changes)
+        issue_changes = changes.get("issues", [])
         cycle_list = cycles.fetch_cycles()
         by_number = {c["number"]: c for c in cycle_list}
         live = fetch_live([c["identifier"] for c in issue_changes])

@@ -883,47 +883,80 @@ class Gatekeeper:
             inbox.exists(update_id) or any(seen_update(g, update_id) for g in all_gates())
         ):
             return
+        # A Telegram reply names what it answers (SB-1089). A reply to a gate's
+        # own DM is about that gate and no other one: not the newest, and not
+        # whichever gate happens to hold a pending Note. A reply to anything
+        # else, such as a PO question or a proposal, is never a gate answer,
+        # even if it reads "approve: ...". It goes to the inbox untouched.
+        reply_to = (message.get("reply_to_message") or {}).get("message_id")
+        if reply_to is not None:
+            gate = next((g for g in all_gates() if g.get("tg_message_id") == reply_to), None)
+            if gate is None:
+                if update_id is not None:
+                    inbox.record(message, update_id)
+                return
+            if self._claim_note(gate, text, update_id):
+                return
+            decision = parse_decision(text)
+            if decision is None:
+                if update_id is not None:
+                    inbox.record(message, update_id)
+                return
+            if gate["status"] != "awaiting":
+                send_text(
+                    self.transport,
+                    self.chat_id,
+                    f"[{gate['kind']}] {gate['ticket']} is already {gate['status']} — nothing decided",
+                )
+                return
+            self._record_decision(gate, decision, update_id)
+            return
         # A pending 💬 Note claims the next text: it attaches, the gate stays
         # awaiting. Most recent claim wins if several are somehow pending.
         pending = [g for g in awaiting_gates() if g.get("note_pending")]
-        if pending:
-            gate = pending[-1]
-            with gate_lock(gate["gate_id"]):
-                refresh(gate)
-                claimed = gate["status"] == "awaiting" and gate.get("note_pending")
-                if claimed:
-                    gate["note_pending"] = False
-                    gate["note"] = f"{gate['note']}\n{text}" if gate.get("note") else text
-                    if update_id is not None:
-                        gate.setdefault("tg_update_ids", []).append(update_id)
-                    save_gate(gate)
-            if claimed:
-                send_text(self.transport, self.chat_id, f"noted on [{gate['kind']}] {gate['ticket']} — still awaiting")
-                return
+        if pending and self._claim_note(pending[-1], text, update_id):
+            return
         decision = parse_decision(text)
         open_gates = awaiting_gates()
         if decision is not None and open_gates:
             # Free text names no gate; it applies to the most recently opened
             # one. Recorded before it is applied, same as a tap.
-            gate = open_gates[-1]
-            with gate_lock(gate["gate_id"]):
-                refresh(gate)
-                if gate["status"] != "awaiting" or gate.get("pending_decision"):
-                    return
-                gate["pending_decision"] = {
-                    "verb": decision[0],
-                    "note": decision[1],
-                    "source": "telegram",
-                    "update_id": update_id,
-                    "at": now_utc().isoformat(),
-                }
-                save_gate(gate)  # the message is durable from here (SB-951)
-                self.decide(gate, decision[0], decision[1], "telegram", update_id)
+            self._record_decision(open_gates[-1], decision, update_id)
             return
         # Not a gate answer. It used to be dropped; now it is kept for the PO
         # chat (SB-1089), which reads the inbox and never getUpdates.
         if update_id is not None:
             inbox.record(message, update_id)
+
+    def _claim_note(self, gate: dict, text: str, update_id: int | None) -> bool:
+        """Attach `text` as the gate's note if it is waiting for one."""
+        with gate_lock(gate["gate_id"]):
+            refresh(gate)
+            claimed = gate["status"] == "awaiting" and gate.get("note_pending")
+            if claimed:
+                gate["note_pending"] = False
+                gate["note"] = f"{gate['note']}\n{text}" if gate.get("note") else text
+                if update_id is not None:
+                    gate.setdefault("tg_update_ids", []).append(update_id)
+                save_gate(gate)
+        if claimed:
+            send_text(self.transport, self.chat_id, f"noted on [{gate['kind']}] {gate['ticket']} — still awaiting")
+        return bool(claimed)
+
+    def _record_decision(self, gate: dict, decision: tuple[str, str | None], update_id: int | None) -> None:
+        with gate_lock(gate["gate_id"]):
+            refresh(gate)
+            if gate["status"] != "awaiting" or gate.get("pending_decision"):
+                return
+            gate["pending_decision"] = {
+                "verb": decision[0],
+                "note": decision[1],
+                "source": "telegram",
+                "update_id": update_id,
+                "at": now_utc().isoformat(),
+            }
+            save_gate(gate)  # the message is durable from here (SB-951)
+            self.decide(gate, decision[0], decision[1], "telegram", update_id)
 
     # ------------------------------------------------------------- linear
 

@@ -11,7 +11,8 @@
 #   2. the `stats` jq program against a fixture             (bash, inline)
 #   3. `linear.sh pack` output schema inside a temp git repo (bash, inline)
 #   4-6. board.py graph helpers, linear_api.warn_if_capped,
-#        apply.py plan() idempotence, po-agent's cycle_state.py / cycle_apply.py
+#        apply.py plan() idempotence, po-agent's cycle_state.py / cycle_apply.py /
+#        po_chat.py
 #                                                   (.github/tests/linear_crud)
 #
 # linear.sh is sourced: it returns before its dispatcher when BASH_SOURCE != $0,
@@ -36,10 +37,14 @@ tests_dir="$REPO/.github/tests/linear_crud"
 # ------------------------------------------------------------ scratch setup
 
 SKILLS="$WORK/skills"
-rm -rf "$SKILLS"; mkdir -p "$SKILLS"
+rm -rf "$SKILLS" "$WORK/commands"; mkdir -p "$SKILLS" "$WORK/commands"
 # po-agent imports cycle-runner's pick.py (gate labels, board graph helpers),
-# so both come along.
-cp -R "$skills_src/linear-crud" "$skills_src/backlog-groom" "$skills_src/po-agent" "$skills_src/cycle-runner" "$SKILLS/"
+# so both come along. po_chat.py (SB-1089) also imports the gatekeeper's inbox,
+# gate and tg, its tests reuse the gatekeeper's fakes, and it reads
+# commands/cycle.md beside skills/ at call time, as ~/.claude lays it out.
+cp -R "$skills_src/linear-crud" "$skills_src/backlog-groom" "$skills_src/po-agent" "$skills_src/cycle-runner" \
+  "$skills_src/gatekeeper" "$SKILLS/"
+cp "$REPO/dot_claude/commands/cycle.md" "$WORK/commands/cycle.md"
 SCRIPTS="$SKILLS/linear-crud/scripts"
 LINEAR_SH="$SCRIPTS/linear.sh"
 REPOS_JSON="$SKILLS/linear-crud/repos.json"
@@ -496,7 +501,9 @@ else
   sed 's/^/    | /' "$WORK/py.out" >&2
 fi
 py_ran="$(sed -nE 's/^Ran ([0-9]+) tests?.*/\1/p' "$WORK/py.out")"
-[ "${py_ran:-0}" -ge 200 ] || bad "python: expected at least 200 tests to run, unittest reported '${py_ran:-none}' — discovery broken?"
+# Close under the suite's size, so that losing test_po_chat.py alone (42 of 312
+# at SB-1089), which guards "no Linear write without a yes", is caught too.
+[ "${py_ran:-0}" -ge 280 ] || bad "python: expected at least 280 tests to run, unittest reported '${py_ran:-none}' — discovery broken?"
 
 # ---------------------------------------------------------------- verdict
 

@@ -18,8 +18,9 @@ set -euo pipefail
 DIR="$REPO/k3s/cycle-runner"
 CJ="$DIR/cronjob.yaml"
 LS="$DIR/listener.yaml"
+PC="$DIR/po-chat.yaml"
 
-for f in "$CJ" "$LS" "$DIR/namespace.yaml" "$DIR/pvc.yaml" "$DIR/bootstrap.sh"; do
+for f in "$CJ" "$LS" "$PC" "$DIR/namespace.yaml" "$DIR/pvc.yaml" "$DIR/bootstrap.sh"; do
   [ -r "$f" ] || die "missing $f"
 done
 
@@ -94,8 +95,8 @@ has '^[[:space:]]*claimName:[[:space:]]*cycle-runner-home[[:space:]]*$' \
 dockerfile_ver="$(sed -n 's/^ARG CLAUDE_VERSION=\(.*\)$/\1/p' "$DIR/Dockerfile" | head -1)"
 [ -n "$dockerfile_ver" ] || bad "could not read CLAUDE_VERSION out of the Dockerfile"
 
-# Every image: line in BOTH files, so neither the initContainer nor the
-# listener can quietly diverge from the tick.
+# Every image: line in every manifest, so neither the initContainer, the
+# listener nor the PO chat can quietly diverge from the tick.
 #
 # The count is asserted first. This loop already went green while iterating
 # ZERO times, because the extractor used \S — a GNU shorthand BSD sed does not
@@ -108,8 +109,11 @@ n_images="$(grep -cE '^[[:space:]]*image:' "$CJ" || true)"
 n_images="$(grep -cE '^[[:space:]]*image:' "$LS" || true)"
 [ "${n_images:-0}" -ge 1 ] \
   || bad "found $n_images image: lines in listener.yaml — expected at least 1; has the extractor gone stale?"
+n_images="$(grep -cE '^[[:space:]]*image:' "$PC" || true)"
+[ "${n_images:-0}" -ge 1 ] \
+  || bad "found $n_images image: lines in po-chat.yaml — expected at least 1; has the extractor gone stale?"
 
-for manifest in "$CJ" "$LS"; do
+for manifest in "$CJ" "$LS" "$PC"; do
   name="$(basename "$manifest")"
   while read -r img; do
     [ -z "$img" ] && continue
@@ -161,6 +165,41 @@ if grep -vE '^[[:space:]]*#' "$LS" | grep -qE '(key|path):[[:space:]]*(claude-to
   bad "listener.yaml mounts claude-token or gh-token — the listener needs only the two Telegram files and the Linear key"
 fi
 
+# ------------------------------------------------ the PO chat (SB-1089)
+#
+# One consumer of the inbox, with single-writer state (pending proposals,
+# sessions, the budget ledger), running claude in a config dir of its own so no
+# interactive plugin leaks in (SB-991).
+pc_has() {  # PATTERN MESSAGE
+  grep -qE -- "$1" "$PC" || bad "$2"
+}
+
+pc_has '^[[:space:]]*replicas:[[:space:]]*1[[:space:]]*$' \
+  "po-chat.yaml does not set 'replicas: 1' — two chat pods race on pending.json, the sessions and the budget ledger (SB-1089)"
+pc_has '^[[:space:]]*type:[[:space:]]*Recreate[[:space:]]*$' \
+  "po-chat.yaml has no 'strategy: type: Recreate' — a rolling update runs two chat pods over the same pending proposal (SB-1089)"
+pc_has '^[[:space:]]*claimName:[[:space:]]*cycle-runner-home[[:space:]]*$' \
+  "po-chat.yaml does not mount the cycle-runner-home PVC — it would never see the inbox the listener writes"
+pc_has '^[[:space:]]*secretName:[[:space:]]*cycle-runner[[:space:]]*$' \
+  "po-chat.yaml does not mount the cycle-runner Secret — env.sh would find no claude or Telegram token"
+pc_has '^[[:space:]]*value:[[:space:]]*/secrets[[:space:]]*$' \
+  "po-chat.yaml does not point CYCLE_RUNNER_SECRETS_DIR at the Secret mount — env.sh would find no claude or Telegram token"
+pc_has '^[[:space:]]*-[[:space:]]*name:[[:space:]]*CLAUDE_CONFIG_DIR[[:space:]]*$' \
+  "po-chat.yaml does not set CLAUDE_CONFIG_DIR — claude would load the runner's ~/.claude, and interactive plugins leak into the chat (SB-991)"
+pc_has '^[[:space:]]*cpu:[[:space:]]*[0-9]+m?[[:space:]]*$' \
+  "po-chat.yaml has no cpu request — an always-on pod needs a real one on a node this full (SB-981)"
+# The memory limit sits under `limits:`, the only memory line after it.
+if ! sed -n '/^[[:space:]]*limits:[[:space:]]*$/,$p' "$PC" | grep -qE '^[[:space:]]*memory:[[:space:]]*[0-9]+[MG]i[[:space:]]*$'; then
+  bad "po-chat.yaml has no memory limit — a leak in a pod that runs claude all day should kill the pod, not the node"
+fi
+
+# Exactly the three files it reads: claude-token for the PO, the two Telegram
+# files for replies. Never gh-token: the chat pushes nothing.
+pc_items="$(grep -vE '^[[:space:]]*#' "$PC" | sed -nE 's/^[[:space:]]*-[[:space:]]*key:[[:space:]]*([^[:space:]]+).*/\1/p' | sort | tr '\n' ' ')"
+if [ "$pc_items" != "claude-token telegram-chat-id telegram-token " ]; then
+  bad "po-chat.yaml mounts Secret items '${pc_items% }' — expected exactly claude-token, telegram-token and telegram-chat-id, and never gh-token"
+fi
+
 # Anything that looks like a credential literal in a manifest is a hard stop.
 if grep -nE '^[[:space:]]*(value|password|token):[[:space:]]*["'"'"']?(gh[pousr]_|sk-|xox|ey[JI])' "$DIR"/*.yaml; then
   bad "a credential literal appears in a k3s manifest — these are tracked in a PUBLIC repo"
@@ -193,3 +232,4 @@ done
 [ "$rc" -eq 0 ] || die "k3s/cycle-runner manifests do not hold their invariants"
 note "cycle-runner CronJob holds its invariants (Forbid, deadlines, backoffLimit 0, Secret, PVC, no op, tini)"
 note "gatekeeper listener holds its invariants (1 replica, Recreate, PVC, Secret, cpu request, Telegram files only)"
+note "PO chat holds its invariants (1 replica, Recreate, PVC, Secret, CLAUDE_CONFIG_DIR, cpu request, memory limit, three Secret files)"

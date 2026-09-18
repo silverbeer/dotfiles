@@ -75,6 +75,51 @@ class SilentPayloadTests(unittest.TestCase):
             self.assertNotIn("disable_notification", captured)
 
 
+class ChatActionTests(unittest.TestCase):
+    """SB-1089: "typing…" while the PO chat waits on `claude -p`."""
+
+    def test_the_payload_names_the_chat_and_the_action(self):
+        calls = []
+
+        def fake_call(method, payload, timeout=15):
+            calls.append((method, payload))
+            return True
+
+        t = tg.TelegramTransport(FAKE_TOKEN)
+        with mock.patch.object(t, "_call", fake_call):
+            t.send_chat_action("42")
+        self.assertEqual(calls, [("sendChatAction", {"chat_id": "42", "action": "typing"})])
+
+    def test_a_response_cut_off_mid_read_is_a_telegram_error(self):
+        """A reply that fails after the request went out is still one exception
+        type for callers (SB-1089), and never carries the token."""
+        import http.client
+
+        class Cut:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                raise http.client.IncompleteRead(b"{")
+
+        t = tg.TelegramTransport(FAKE_TOKEN)
+        for failure in (Cut(), TimeoutError("timed out")):
+            with self.subTest(failure=type(failure).__name__):
+                side = {"side_effect": failure} if isinstance(failure, Exception) else {"return_value": failure}
+                with mock.patch("urllib.request.urlopen", **side):
+                    with self.assertRaises(tg.TelegramError) as ctx:
+                        t.send_chat_action("42")
+                self.assertNotIn(FAKE_TOKEN, str(ctx.exception))
+
+    def test_the_fake_records_it(self):
+        transport = FakeTransport()
+        transport.send_chat_action("42", "typing")
+        self.assertEqual(transport.actions, [("42", "typing")])
+
+
 class LinkKeyboardTests(unittest.TestCase):
     """Entities make a URL clickable; a URL button makes it tappable. Different
     guarantee: the button carries its target in the markup, so no offset, no

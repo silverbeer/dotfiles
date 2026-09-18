@@ -50,6 +50,13 @@ test_the_check_passes_on_the_current_tree() {
   assert_out 'ok   a listener that crashed -> warn, says crashed, not 409'
   assert_out 'ok   restarts with a clean last exit -> ok, mentions the count, no warn'
   assert_out 'ok   a listener image that differs from the CronJob -> warn, names both'
+  assert_out 'ok   no kubectl -> the po-chat check is info too'
+  assert_out 'ok   a healthy po-chat -> ok, no exit or drift warning'
+  assert_out 'ok   a po-chat with 0/1 ready -> fail'
+  assert_out 'ok   a missing po-chat -> fail, with the apply command'
+  assert_out 'ok   a po-chat whose last exit was non-zero -> warn, names the exit'
+  assert_out 'ok   po-chat restarts with a clean last exit -> ok, no warn'
+  assert_out 'ok   a po-chat image that differs from the CronJob -> warn, names both'
   assert_out 'ok   a loaded cycle-runner agent -> fail, with the unload command'
   assert_out 'ok   no agent and no plist -> ok, the CronJob is the only scheduler'
   assert_out 'ok   an unloaded leftover plist -> warn, with the rm'
@@ -269,6 +276,41 @@ test_listener_warning_keyed_on_restart_count_is_rejected() {
   export REPO="$src"
   assert_fail check-doctor.sh
   assert_out 'listener-clean-restarts case did not report as expected'
+}
+
+# NEGATIVE: a po-chat with nothing ready stops failing (SB-1089). Messages are
+# recorded and never answered, and nothing else says so.
+test_a_po_chat_not_ready_that_stops_failing_is_rejected() {
+  need_bin bash python3
+  src="$(copy_source)"
+  edit 's|if \[ "\$pc_ready" -lt 1 \]; then|if false; then|' "$src/$DOCTOR"
+  grep -q 'pc_ready" -lt 1' "$src/$DOCTOR" && fail "fixture did not defeat the not-ready branch"
+  export REPO="$src"
+  assert_fail check-doctor.sh
+  assert_out 'po-chat-not-ready case did not report as expected'
+}
+
+# NEGATIVE: a crash stops warning. A Deployment that keeps coming back to 1/1
+# hides it completely.
+test_po_chat_unclean_exits_that_stop_warning_are_rejected() {
+  need_bin bash python3
+  src="$(copy_source)"
+  edit 's|if \[ -n "\$pc_crashes" \]; then|if false; then|' "$src/$DOCTOR"
+  grep -q 'if \[ -n "\$pc_crashes" \]' "$src/$DOCTOR" && fail "fixture did not defeat the unclean-exit branch"
+  export REPO="$src"
+  assert_fail check-doctor.sh
+  assert_out 'po-chat-crash case did not report as expected'
+}
+
+# NEGATIVE: image drift stops warning.
+test_po_chat_image_drift_that_stops_warning_is_rejected() {
+  need_bin bash python3
+  src="$(copy_source)"
+  edit 's|\[ "\$pc_image" != "\$cj_image" \]|false|' "$src/$DOCTOR"
+  grep -q '"\$pc_image" != "\$cj_image"' "$src/$DOCTOR" && fail "fixture did not defeat the drift comparison"
+  export REPO="$src"
+  assert_fail check-doctor.sh
+  assert_out 'po-chat-image-drift case did not report as expected'
 }
 
 run_tests
