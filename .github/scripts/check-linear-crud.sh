@@ -501,7 +501,7 @@ else
   sed 's/^/    | /' "$WORK/py.out" >&2
 fi
 py_ran="$(sed -nE 's/^Ran ([0-9]+) tests?.*/\1/p' "$WORK/py.out")"
-# Close under the suite's size, so that losing test_po_chat.py alone (42 of 312
+# Close under the suite's size, so that losing test_po_chat.py alone (65 of 338
 # at SB-1089), which guards "no Linear write without a yes", is caught too.
 [ "${py_ran:-0}" -ge 280 ] || bad "python: expected at least 280 tests to run, unittest reported '${py_ran:-none}' — discovery broken?"
 

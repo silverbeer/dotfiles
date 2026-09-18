@@ -786,7 +786,10 @@ class Conversation(ChatTestCase):
         self.assertIn("couldn't process your message", self.texts[-1])
         self.assertFalse(attempts.exists())
 
-    def test_sigterm_during_the_call_requeues_the_message_and_charges_the_cap(self):
+    # A message we abandon for retry is not charged: the process that answers it
+    # pays for that call. Charging here too would let a rollout loop, or a
+    # liveness kill, spend the day's budget on messages nobody ever answered.
+    def test_sigterm_during_the_call_requeues_the_message_without_charging(self):
         def stopped(kind):
             if kind == "claude":
                 self.chat.stopping = True
@@ -796,7 +799,18 @@ class Conversation(ChatTestCase):
         self.assertTrue((inbox.inbox_dir() / "new" / f"{uid}.json").exists())
         self.assertEqual(self.texts, [])
         self.assertFalse((pc.chat_dir() / "attempts" / str(uid)).exists(), "a stop counted as a failed attempt")
-        self.assertEqual(self.ledger()["spent_usd"], 0.75)
+        self.assertFalse((pc.chat_dir() / "ledger").exists(), "an abandoned message was charged")
+
+    def test_a_timeout_we_caused_by_stopping_is_not_charged_either(self):
+        def stopped(kind):
+            if kind == "claude":
+                self.chat.stopping = True
+                raise subprocess.TimeoutExpired("claude", 150)
+
+        self.runner.before = stopped
+        uid = self.message("one")
+        self.assertTrue((inbox.inbox_dir() / "new" / f"{uid}.json").exists())
+        self.assertFalse((pc.chat_dir() / "ledger").exists())
 
     # SIGTERM before the child exists: nothing was spent, and the message is
     # still there for the next process.
@@ -807,6 +821,40 @@ class Conversation(ChatTestCase):
         self.assertEqual(self.runner.of("claude"), [])
         self.assertFalse((pc.chat_dir() / "ledger").exists())
         self.assertFalse((pc.chat_dir() / "attempts" / str(uid)).exists())
+
+
+class OwnMessages(ChatTestCase):
+    """The chat records its own message ids where gate.py reads them, so a reply
+    to a question or a dry run is never taken as a gate answer (SB-1089)."""
+
+    def test_every_message_the_chat_sends_is_recorded_for_the_listener(self):
+        self.message("hi")
+        sent = json.loads((pc.chat_dir() / "outbox.json").read_text())
+        self.assertEqual(sent, [1])
+        self.message("again")
+        self.assertEqual(json.loads((pc.chat_dir() / "outbox.json").read_text()), [1, 2])
+
+    def test_the_record_is_bounded(self):
+        path = pc.chat_dir() / "outbox.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(list(range(-pc.OUTBOX_LIMIT, 0))))
+        self.message("hi")
+        kept = json.loads(path.read_text())
+        self.assertEqual(len(kept), pc.OUTBOX_LIMIT)
+        self.assertEqual(kept[-1], 1)
+
+    # A long dry run is chunked, and the yes comes back on whichever chunk the
+    # user was reading — not necessarily the last.
+    def test_a_yes_replying_to_an_earlier_chunk_of_the_dry_run_confirms(self):
+        import tg
+
+        with mock.patch.object(tg, "MAX_MESSAGE", 60):
+            self.runner.claude.append(_done(_claude_json("Estimate SB-1 at 3? " * 20, changes=CHANGES)))
+            self.message("estimate SB-1 at 3")
+        shown_on = json.loads(self.pending().read_text())["message_ids"]
+        self.assertGreater(len(shown_on), 1, "the fixture did not chunk the dry run")
+        self.message("yes", reply_to=shown_on[0])
+        self.assertEqual(len(self.runner.of("confirm")), 1)
 
 
 class Loop(ChatTestCase):

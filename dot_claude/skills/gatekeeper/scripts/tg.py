@@ -252,13 +252,21 @@ def send_text(
     Entities are derived per chunk, not once over the whole text: offsets are
     relative to the message they are sent with, and chunk N's link is at a
     different offset in chunk N than it was in the original.
+
+    The result is the LAST chunk's, as it always was, plus `message_ids`: every
+    chunk's id, in order. A human replying to a long message replies to the
+    chunk they are reading, which is rarely the last one (SB-1089), so a caller
+    that has to recognise a reply needs all of them.
     """
     parts = chunks(text)
     result: dict = {}
+    ids: list[int] = []
     for i, part in enumerate(parts):
         markup = reply_markup if i == len(parts) - 1 else None
-        result = transport.send_message(chat_id, part, markup, url_entities(part), silent)
-    return result
+        result = transport.send_message(chat_id, part, markup, url_entities(part), silent) or {}
+        if result.get("message_id") is not None:
+            ids.append(result["message_id"])
+    return {**result, "message_ids": ids}
 
 
 def link_row(ticket_url: str = "", pr_url: str = "") -> list[dict]:
