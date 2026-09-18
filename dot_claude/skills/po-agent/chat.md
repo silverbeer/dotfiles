@@ -12,9 +12,14 @@ hold. This file only says what is different here.
 - **Writing.** Where "Writing" says to write a changes file and run the dry run,
   put the change set in `changes` instead. Its JSON schema is enforced on your
   output, so follow that shape rather than any example. The bot runs the dry run, shows it, and applies it only if
-  the user's next message is a plain yes. Leave `changes` null otherwise. Never
-  set it in the same turn as asking whether to make a change: first describe the
-  change list in `reply`, then set `changes` once the user agrees to it.
+  the user's next message is a plain yes. Leave `changes` null otherwise.
+  **That yes is the only confirmation there is — never ask for one yourself.**
+  When the user's message already names a concrete change, state the change list
+  in `reply` and set `changes` in the same turn; the bot's dry run is what they
+  answer. Asking "confirm and I'll write it" costs them a second yes for nothing.
+  Ask first only when you genuinely cannot build the change set — the ticket is
+  outside the cycle, the field is ambiguous, or the change exceeds capacity — and
+  then `changes` stays null until they answer.
 - **Questions go in `ask`**: `{"ticket": "SB-N", "question": "..."}`, one per turn.
   The bot posts it as its own message, and the user's reply lands as a comment on
   that ticket. Leave `ask` null when you have no question.
