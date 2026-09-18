@@ -310,6 +310,27 @@ test_a_po_chat_pointed_at_another_secret_is_rejected() {
   assert_out 'po-chat.yaml does not mount the cycle-runner Secret'
 }
 
+# NEGATIVE: the pod is killed before a Linear write in flight can finish.
+# po_chat.py does not interrupt `cycle_apply.py --confirm` on SIGTERM, on
+# purpose, so the grace period is the only thing letting it finish.
+test_a_po_chat_grace_period_shorter_than_a_write_is_rejected() {
+  src="$(copy_source)"
+  edit 's/terminationGracePeriodSeconds: 150/terminationGracePeriodSeconds: 30/' "$src/$PC"
+  grep -q 'terminationGracePeriodSeconds: 30' "$src/$PC" || fail "fixture did not shorten the grace period"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'SIGKILLed mid-write'
+}
+
+# ...and it must fail loudly rather than pass vacuously if the constant moves.
+test_a_po_chat_grace_check_that_cannot_read_the_timeout_fails() {
+  src="$(copy_source)"
+  edit 's/^APPLY_TIMEOUT_SECONDS = 120/APPLY_TIMEOUT = 120/' "$src/dot_claude/skills/po-agent/scripts/po_chat.py"
+  export REPO="$src"
+  assert_fail check-k3s-manifests.sh
+  assert_out 'could not read APPLY_TIMEOUT_SECONDS'
+}
+
 test_a_po_chat_without_a_memory_limit_is_rejected() {
   src="$(copy_source)"
   edit 's/memory: 1Gi/memory: ""/' "$src/$PC"

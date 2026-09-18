@@ -34,6 +34,7 @@ os.environ.setdefault("GATEKEEPER_QUIET_END", "0")
 
 import gate  # noqa: E402
 import inbox  # noqa: E402
+import tg  # noqa: E402
 from fakes import FakeLinear, FakeTransport  # noqa: E402
 from tg import TelegramError  # noqa: E402
 
@@ -170,8 +171,15 @@ class ReplyRoutingTests(GateTestCase):
     def inbox_ids(self):
         return sorted(int(p.stem) for p in (inbox.inbox_dir() / "new").glob("*.json"))
 
+    def po_chat_sent(self, *message_ids):
+        """Pretend the PO chat sent these messages: a question, or a dry run."""
+        outbox = gate.state_dir() / "po-chat"
+        outbox.mkdir(parents=True, exist_ok=True)
+        (outbox / "outbox.json").write_text(json.dumps(list(message_ids)))
+
     def test_approve_replying_to_a_po_question_leaves_an_awaiting_merge_gate_untouched(self):
         g = self.open_gate(kind="merge")
+        self.po_chat_sent(999)
         self.reply("approve: x", reply_to=999, update_id=700)
         self.assertEqual(gate.load_gate(g["gate_id"])["status"], "awaiting")
         self.assertIsNone(gate.load_gate(g["gate_id"]).get("pending_decision"))
@@ -180,6 +188,7 @@ class ReplyRoutingTests(GateTestCase):
     def test_a_pending_note_does_not_capture_a_reply_to_another_message(self):
         g = self.open_gate()
         self.callback(g, "note", cq_id="cb-note")
+        self.po_chat_sent(999)
         self.reply("3, it's small", reply_to=999, update_id=701)
         loaded = gate.load_gate(g["gate_id"])
         self.assertTrue(loaded["note_pending"])
@@ -202,6 +211,46 @@ class ReplyRoutingTests(GateTestCase):
         self.assertEqual(gate.load_gate(older["gate_id"])["note"], "check the migration")
         self.assertIsNone(gate.load_gate(newer["gate_id"])["note"])
 
+    # A reply to a message NEITHER side recorded — the runner's daily reminder
+    # covers several parked gates in one message, so it belongs to no single
+    # one. Before replies were routed at all, that decided the newest gate;
+    # losing that would make the reminder unanswerable.
+    def test_a_reply_to_a_message_nobody_recorded_still_decides_the_newest_gate(self):
+        older = self.open_gate(kind="plan")
+        newer = self.open_gate(kind="merge")
+        self.reply("approve", reply_to=999999, update_id=705)
+        self.assertEqual(gate.load_gate(newer["gate_id"])["status"], "approved")
+        self.assertEqual(gate.load_gate(older["gate_id"])["status"], "awaiting")
+
+    # ...but a reply to one of the PO chat's own messages never decides a gate,
+    # however much it reads like an answer.
+    def test_a_reply_to_a_po_chat_message_never_decides_a_gate(self):
+        g = self.open_gate(kind="merge")
+        self.po_chat_sent(4242)
+        self.reply("approve: looks right", reply_to=4242, update_id=706)
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "awaiting")
+        self.assertEqual(self.inbox_ids(), [706])
+
+    # A long message is chunked, and the human replies to the chunk they are
+    # reading. Every chunk belongs to the gate, not just the last one.
+    def test_a_reply_to_any_chunk_of_a_chunked_message_decides_that_gate(self):
+        with mock.patch.object(tg, "MAX_MESSAGE", 120):
+            g = self.open_gate(body="a long proposal. " * 40)
+        ids = gate.load_gate(g["gate_id"])["tg_message_ids"]
+        self.assertGreater(len(ids), 1, "the fixture did not chunk the DM")
+        self.assertEqual(gate.load_gate(g["gate_id"])["tg_message_id"], ids[-1])
+        self.reply("approve", reply_to=ids[0], update_id=707)
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "approved")
+
+    # Gates opened before SB-1089 have no tg_message_ids at all.
+    def test_a_gate_recorded_before_the_ids_existed_still_matches_its_dm(self):
+        g = self.open_gate()
+        stored = gate.load_gate(g["gate_id"])
+        del stored["tg_message_ids"]
+        gate.save_gate(stored)
+        self.reply("approve", reply_to=stored["tg_message_id"], update_id=708)
+        self.assertEqual(gate.load_gate(g["gate_id"])["status"], "approved")
+
     def test_a_decision_replying_to_a_resolved_gate_decides_nothing(self):
         g = self.open_gate()
         self.callback(g, "reject", cq_id="cb-r")
@@ -210,6 +259,35 @@ class ReplyRoutingTests(GateTestCase):
         self.assertEqual(gate.load_gate(g["gate_id"])["status"], "rejected")
         self.assertEqual(gate.load_gate(other["gate_id"])["status"], "awaiting")
         self.assertIn("already rejected — nothing decided", self.transport.texts[-1])
+
+
+class NoteClaimTests(GateTestCase):
+    """A 💬 Note claims the next plain message. Bounded, so a claim the human
+    never filled cannot swallow something unrelated days later (SB-1089)."""
+
+    def test_the_note_prompt_says_how_long_it_waits(self):
+        g = self.open_gate()
+        self.callback(g, "note", cq_id="cb-note")
+        self.assertIn("within 30 minutes", self.transport.texts[-1])
+
+    def test_a_note_claim_left_unfilled_expires_instead_of_swallowing_a_later_message(self):
+        g = self.open_gate()
+        self.callback(g, "note", cq_id="cb-note")
+        with self.later(minutes=31):
+            self.gk._handle_message(
+                {"message_id": 90, "chat": {"id": 42, "type": "private"}, "from": {"id": 42},
+                 "date": 1789000000, "text": "what's at risk this cycle?"}, 709)
+        loaded = gate.load_gate(g["gate_id"])
+        self.assertIsNone(loaded["note"], "an expired note claim swallowed an unrelated message")
+        self.assertFalse(loaded["note_pending"])
+        self.assertEqual(sorted(int(p.stem) for p in (inbox.inbox_dir() / "new").glob("*.json")), [709])
+
+    def test_a_note_claim_inside_the_window_is_still_filled(self):
+        g = self.open_gate()
+        self.callback(g, "note", cq_id="cb-note")
+        with self.later(minutes=29):
+            self.message("check the migration")
+        self.assertEqual(gate.load_gate(g["gate_id"])["note"], "check the migration")
 
 
 class ParkedReminderTests(GateTestCase):

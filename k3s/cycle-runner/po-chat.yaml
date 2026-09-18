@@ -36,10 +36,13 @@ spec:
       labels:
         app: po-chat
     spec:
-      # SIGTERM terminates a `claude` call in flight and requeues its message.
-      # Anything else in hand (a Linear write, a comment) finishes first, and
-      # those take seconds.
-      terminationGracePeriodSeconds: 30
+      # Longer than po_chat.py's APPLY_TIMEOUT_SECONDS (120), and it has to be.
+      # SIGTERM terminates a `claude` call in flight and requeues its message,
+      # but a `cycle_apply.py --confirm` is deliberately NOT interrupted: it is
+      # mid-write to Linear. A grace period shorter than that timeout means the
+      # kubelet SIGKILLs the pod part way through the batch, and nothing is left
+      # to tell the user which half was written.
+      terminationGracePeriodSeconds: 150
 
       containers:
         - name: chat
@@ -155,8 +158,9 @@ spec:
             - name: PO_CHAT_POD
               value: "1"
           # A process that is up but wedged answers nothing. po_chat.py writes
-          # the heartbeat every loop (at most every 2s when idle) and every 4s
-          # while it waits on claude. The initial delay covers the clone.
+          # the heartbeat every loop (at most every 2s when idle) and every 20s
+          # (HEARTBEAT_EVERY_SECONDS) for the whole of a message, including the
+          # slow steps that are not claude. The initial delay covers the clone.
           livenessProbe:
             exec:
               command:

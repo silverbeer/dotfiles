@@ -90,6 +90,15 @@ RETRY_FIRST_SECONDS = 30
 RETRY_MAX_SECONDS = 15 * 60
 RETRY_GIVE_UP_HOURS = 24
 
+# A 💬 Note claims the sender's next plain message. Bounded (SB-1089): a claim
+# that is never filled — the human answered something else, or forgot — used to
+# sit for the life of the gate and swallow an unrelated message days later.
+NOTE_PENDING_TTL = timedelta(minutes=30)
+
+# How many of our own message ids to keep per gate. Far more than a gate ever
+# produces; the cap only stops an unbounded file if something loops.
+MAX_TG_MESSAGE_IDS = 50
+
 
 def state_dir() -> Path:
     return Path(os.environ.get("GATEKEEPER_STATE", "") or Path.home() / ".local/state/cycle-runner")
@@ -326,6 +335,45 @@ def refresh(gate: dict) -> dict:
     return gate
 
 
+def po_chat_message_ids() -> set[int]:
+    """Message ids the PO chat sent (SB-1089): its questions, its dry runs, its
+    replies. A reply to one of those is a conversation with the PO and must
+    never decide a gate, however much it reads like "approve".
+
+    A file on the shared state dir, not an import: the chat is a separate
+    process, and a missing or unreadable file simply means no ids."""
+    try:
+        ids = json.loads((state_dir() / "po-chat" / "outbox.json").read_text())
+    except (OSError, ValueError):
+        return set()
+    return {i for i in ids if isinstance(i, int)} if isinstance(ids, list) else set()
+
+
+def note_claim_expired(gate: dict, now: datetime | None = None) -> bool:
+    """True once a 💬 Note claim has gone unfilled for NOTE_PENDING_TTL. A gate
+    claimed before SB-1089 has no stamp, so it is treated as expired."""
+    stamp = gate.get("note_pending_at")
+    if not stamp:
+        return True
+    try:
+        return (now or now_utc()) - datetime.fromisoformat(stamp) >= NOTE_PENDING_TTL
+    except ValueError:
+        return True
+
+
+def gate_message_ids(gate: dict) -> set[int]:
+    """Every Telegram message of ours that is ABOUT this gate: the DM's chunks,
+    the note prompt, the stuck notice. A reply to any of them is an answer to
+    this gate and to no other one.
+
+    Gates opened before SB-1089 have no `tg_message_ids`, so the single
+    `tg_message_id` they do have is still honoured."""
+    ids = {i for i in (gate.get("tg_message_ids") or []) if isinstance(i, int)}
+    if isinstance(gate.get("tg_message_id"), int):
+        ids.add(gate["tg_message_id"])
+    return ids
+
+
 def seen_update(gate: dict, update_id: int | None) -> bool:
     """True if this gate already recorded Telegram update `update_id`. Telegram
     redelivers anything not acked, and a redelivery must be a no-op."""
@@ -542,6 +590,10 @@ class Gatekeeper:
             # holds; the reason given for it did not.
             sent = send_text(self.transport, self.chat_id, text, keyboard, silent=in_quiet_hours())
             gate["tg_message_id"] = sent.get("message_id")
+            # Every chunk, not just the last: a long proposal is split, and the
+            # reply comes back on whichever chunk the human was reading
+            # (SB-1089). `tg_message_id` stays the last one for close_gate_dm.
+            self.remember_message(gate, sent)
             save_gate(gate)
         except Exception as e:
             print(
@@ -550,6 +602,16 @@ class Gatekeeper:
                 file=sys.stderr,
             )
         return gate
+
+    @staticmethod
+    def remember_message(gate: dict, sent: dict) -> None:
+        """Record every message id `send_text` produced as belonging to `gate`."""
+        ids = list(gate.get("tg_message_ids") or [])
+        new = sent.get("message_ids") or ([sent["message_id"]] if sent.get("message_id") is not None else [])
+        for i in new:
+            if isinstance(i, int) and i not in ids:
+                ids.append(i)
+        gate["tg_message_ids"] = ids[-MAX_TG_MESSAGE_IDS:]
 
     # ------------------------------------------------------------ decide
 
@@ -769,12 +831,16 @@ class Gatekeeper:
             gate["handoff"] = "pending"
             save_gate(gate)
         set_gate_label(gate["ticket"], "needs-human")
-        send_text(
+        sent = send_text(
             self.transport,
             self.chat_id,
             f"🛑 stuck: [{gate['kind']}] {gate['ticket']} gate {gate['gate_id']} unanswered for {hours:.0f}h — "
             f"resolve with `gate.py resolve {gate['gate_id']} approve|reject --source cli`",
         )
+        with gate_lock(gate["gate_id"]):
+            refresh(gate)
+            self.remember_message(gate, sent)
+            save_gate(gate)
         # The buttons go even though nobody answered: they no longer work, and
         # leaving them invites a tap that silently does nothing.
         self.close_gate_dm(gate, f"🛑 needs a human — unanswered for {hours:.0f}h")
@@ -847,13 +913,20 @@ class Gatekeeper:
                 return
             if verb == "note":
                 gate["note_pending"] = True
+                gate["note_pending_at"] = now_utc().isoformat()
                 if update_id is not None:
                     gate.setdefault("tg_update_ids", []).append(update_id)
                 save_gate(gate)
                 self._answer_quietly(cq, "send your note")
-                send_text(
-                    self.transport, self.chat_id, f"💬 reply with your note for [{gate['kind']}] {gate['ticket']}"
+                sent = send_text(
+                    self.transport, self.chat_id,
+                    f"💬 reply with your note for [{gate['kind']}] {gate['ticket']} — "
+                    f"within {int(NOTE_PENDING_TTL.total_seconds() // 60)} minutes, or reply to this message",
                 )
+                with gate_lock(gate_id):
+                    refresh(gate)
+                    self.remember_message(gate, sent)
+                    save_gate(gate)
                 return
             # Record FIRST, acknowledge second, apply third (SB-951). The
             # record is what makes the tap durable: if Linear is down, decide()
@@ -890,27 +963,34 @@ class Gatekeeper:
         # even if it reads "approve: ...". It goes to the inbox untouched.
         reply_to = (message.get("reply_to_message") or {}).get("message_id")
         if reply_to is not None:
-            gate = next((g for g in all_gates() if g.get("tg_message_id") == reply_to), None)
-            if gate is None:
+            gate = next((g for g in all_gates() if reply_to in gate_message_ids(g)), None)
+            if gate is not None:
+                if self._claim_note(gate, text, update_id):
+                    return
+                decision = parse_decision(text)
+                if decision is None:
+                    if update_id is not None:
+                        inbox.record(message, update_id)
+                    return
+                if gate["status"] != "awaiting":
+                    send_text(
+                        self.transport,
+                        self.chat_id,
+                        f"[{gate['kind']}] {gate['ticket']} is already {gate['status']} — nothing decided",
+                    )
+                    return
+                self._record_decision(gate, decision, update_id)
+                return
+            if reply_to in po_chat_message_ids():
+                # The PO chat's own question or dry run. "approve" there is
+                # talking to the PO, not answering a gate.
                 if update_id is not None:
                     inbox.record(message, update_id)
                 return
-            if self._claim_note(gate, text, update_id):
-                return
-            decision = parse_decision(text)
-            if decision is None:
-                if update_id is not None:
-                    inbox.record(message, update_id)
-                return
-            if gate["status"] != "awaiting":
-                send_text(
-                    self.transport,
-                    self.chat_id,
-                    f"[{gate['kind']}] {gate['ticket']} is already {gate['status']} — nothing decided",
-                )
-                return
-            self._record_decision(gate, decision, update_id)
-            return
+            # Neither side recorded that message — the runner's daily reminder
+            # for parked gates is one message covering several tickets, so it
+            # belongs to no single gate. Fall through and treat this as plain
+            # text, which is what it was before replies were routed at all.
         # A pending 💬 Note claims the next text: it attaches, the gate stays
         # awaiting. Most recent claim wins if several are somehow pending.
         pending = [g for g in awaiting_gates() if g.get("note_pending")]
@@ -929,10 +1009,19 @@ class Gatekeeper:
             inbox.record(message, update_id)
 
     def _claim_note(self, gate: dict, text: str, update_id: int | None) -> bool:
-        """Attach `text` as the gate's note if it is waiting for one."""
+        """Attach `text` as the gate's note if it is still waiting for one.
+
+        A claim older than NOTE_PENDING_TTL is dropped rather than filled: the
+        human moved on, and swallowing whatever they say next — hours later,
+        about something else — is worse than losing the note."""
         with gate_lock(gate["gate_id"]):
             refresh(gate)
             claimed = gate["status"] == "awaiting" and gate.get("note_pending")
+            if claimed and note_claim_expired(gate):
+                gate["note_pending"] = False
+                save_gate(gate)
+                print(f"gate: {gate['gate_id']} ({gate['ticket']}) note claim expired unfilled", file=sys.stderr)
+                return False
             if claimed:
                 gate["note_pending"] = False
                 gate["note"] = f"{gate['note']}\n{text}" if gate.get("note") else text

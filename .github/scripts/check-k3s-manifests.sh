@@ -193,6 +193,23 @@ if ! sed -n '/^[[:space:]]*limits:[[:space:]]*$/,$p' "$PC" | grep -qE '^[[:space
   bad "po-chat.yaml has no memory limit — a leak in a pod that runs claude all day should kill the pod, not the node"
 fi
 
+# The pod must outlive a `cycle_apply.py --confirm` that is mid-write. po_chat.py
+# deliberately does not interrupt that child (APPLY_TIMEOUT_SECONDS 120), so a
+# shorter grace period means the kubelet SIGKILLs the pod part way through a
+# batch of Linear writes, with nothing left to say which half landed.
+grace="$(sed -nE 's/^[[:space:]]*terminationGracePeriodSeconds:[[:space:]]*([0-9]+).*/\1/p' "$PC" | head -1)"
+apply_timeout="$(sed -nE 's/^APPLY_TIMEOUT_SECONDS[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' \
+  "$REPO/dot_claude/skills/po-agent/scripts/po_chat.py" | head -1)"
+if [ -z "$grace" ]; then
+  bad "po-chat.yaml sets no terminationGracePeriodSeconds — a write in flight would be killed at the 30s default"
+elif [ -z "$apply_timeout" ]; then
+  bad "could not read APPLY_TIMEOUT_SECONDS out of po_chat.py — has it been renamed?"
+elif [ "$grace" -le "$apply_timeout" ]; then
+  bad "po-chat.yaml's terminationGracePeriodSeconds=$grace is not greater than po_chat.py's APPLY_TIMEOUT_SECONDS=$apply_timeout — a cycle_apply --confirm would be SIGKILLed mid-write"
+else
+  note "po-chat grace period ${grace}s outlives a ${apply_timeout}s cycle_apply --confirm"
+fi
+
 # Exactly the three files it reads: claude-token for the PO, the two Telegram
 # files for replies. Never gh-token: the chat pushes nothing.
 pc_items="$(grep -vE '^[[:space:]]*#' "$PC" | sed -nE 's/^[[:space:]]*-[[:space:]]*key:[[:space:]]*([^[:space:]]+).*/\1/p' | sort | tr '\n' ' ')"

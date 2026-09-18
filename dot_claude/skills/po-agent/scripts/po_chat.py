@@ -102,6 +102,9 @@ PENDING_TTL_SECONDS = 30 * 60
 # for ever: a poison message must not wedge the chat.
 MAX_ATTEMPTS = 2
 LEDGER_TZ = "America/New_York"
+# Our own recent message ids, kept for gate.py. Bounded, and far more than a
+# day of conversation.
+OUTBOX_LIMIT = 500
 SENT_TELEGRAM_ERRORS = (TelegramError, OSError, http.client.HTTPException)
 
 # A plain yes, and nothing else. "yes but drop SB-4" is not consent to the list
@@ -414,7 +417,24 @@ class Chat:
 
     def say(self, update_id: int | None, text: str, **extra) -> dict:
         self.chat_log(update_id, "out", text, **extra)
-        return send_text(self.transport, self.chat_id, text)
+        sent = send_text(self.transport, self.chat_id, text)
+        self.remember_outbound(sent)
+        return sent
+
+    def remember_outbound(self, sent: dict) -> None:
+        """Record our own message ids where gate.py can see them. A reply to one
+        of these is a conversation with the PO, and the listener must not read
+        it as an answer to whichever gate happens to be open (SB-1089)."""
+        ids = sent.get("message_ids") or ([sent["message_id"]] if sent.get("message_id") is not None else [])
+        if not ids:
+            return
+        path = self.dir / "outbox.json"
+        known = [i for i in (self._read(path) or []) if isinstance(i, int)]
+        known.extend(i for i in ids if isinstance(i, int) and i not in known)
+        try:
+            self._write(path, known[-OUTBOX_LIMIT:])
+        except OSError as exc:
+            log(f"could not record our own message ids: {exc}")
 
     # ------------------------------------------------------------ notes
     # What the PO has to hear on its next turn: a change applied or discarded,
@@ -529,8 +549,11 @@ class Chat:
             return
         date = sent.get("date")
         sent_at = int(date) if isinstance(date, int) else int(self.now().timestamp())
-        self._write(self.pending_path, {**proposal, "message_id": message_id, "sent_at": sent_at,
-                                        "expires_at": sent_at + PENDING_TTL_SECONDS})
+        # Every chunk: a long dry run is split, and the yes comes back on
+        # whichever chunk the user was reading.
+        ids = [i for i in (sent.get("message_ids") or [message_id]) if isinstance(i, int)]
+        self._write(self.pending_path, {**proposal, "message_id": message_id, "message_ids": ids,
+                                        "sent_at": sent_at, "expires_at": sent_at + PENDING_TTL_SECONDS})
 
     def apply_pending(self, changes_file: Path) -> subprocess.CompletedProcess:
         """THE ONLY PLACE `--confirm` IS PASSED. It is reached from exactly one
@@ -551,7 +574,8 @@ class Chat:
         if date <= pending["sent_at"]:
             return False  # sent before the proposal it would answer: a replay, or crossed in flight
         reply_to = rec.get("reply_to_message_id")
-        in_reply = reply_to is None or reply_to == pending["message_id"]
+        shown_on = [i for i in (pending.get("message_ids") or [pending["message_id"]]) if isinstance(i, int)]
+        in_reply = reply_to is None or reply_to in shown_on
         expired = date >= int(pending.get("expires_at") or 0)
         try:
             intact = _sha256(self.changes_path.read_bytes()) == pending.get("sha256")
@@ -814,18 +838,21 @@ class Chat:
             try:
                 res = self.call_claude(prompt, session_id, new, appended)
             except subprocess.TimeoutExpired:
+                if self.stopping:
+                    # We killed it ourselves, and the message goes back to the
+                    # inbox. The next process pays for the call that answers it;
+                    # charging here too would let a rollout loop, or a liveness
+                    # kill, spend the day's budget on messages nobody answered.
+                    raise _Requeue() from None
                 # Cost unknown: charge the cap, or repeated timeouts would
                 # bypass the daily budget entirely.
                 self.charge(cap)
-                if self.stopping:
-                    raise _Requeue() from None
                 log(f"update {update_id}: claude timed out after {CLAUDE_TIMEOUT_SECONDS}s")
                 self.say(update_id, f"⏱ The PO took longer than {CLAUDE_TIMEOUT_SECONDS}s, so I stopped it. "
                                     "Nothing was written. Try again, or ask something narrower.")
                 return
             if self.stopping:
-                self.charge(cap)
-                raise _Requeue()
+                raise _Requeue()  # requeued, not answered: the retry pays for it
             blob = (res.stdout or "") + (res.stderr or "")
             if not new and res.returncode != 0 and "No conversation found" in blob:
                 log(f"session {session_id} for cycle {cycle} is gone — starting a new one")
