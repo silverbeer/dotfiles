@@ -56,7 +56,7 @@ spec:
             # times a day and are what the runner delivers. Cloning at tick
             # time means a tick runs the merged code.
             - name: bootstrap
-              image: ghcr.io/silverbeer/cycle-runner:claude-2.1.258
+              image: ghcr.io/silverbeer/cycle-runner:claude-2.1.278
               imagePullPolicy: IfNotPresent
               # `command` replaces the image ENTRYPOINT, so tini has to be named
               # here or it never runs (SB-1095). See the main container.
@@ -104,7 +104,7 @@ spec:
               #
               # The weekly refresh workflow bumps this line and the Dockerfile's
               # ARG together; check-k3s-manifests.sh fails if they disagree.
-              image: ghcr.io/silverbeer/cycle-runner:claude-2.1.258
+              image: ghcr.io/silverbeer/cycle-runner:claude-2.1.278
               imagePullPolicy: IfNotPresent
               # tini as pid 1 reaps what `claude` spawns (the Dockerfile's reason for
               # its ENTRYPOINT). `command` replaces that ENTRYPOINT, so it is named

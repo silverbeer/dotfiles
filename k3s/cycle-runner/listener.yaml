@@ -49,7 +49,7 @@ spec:
           # Same pin as cronjob.yaml. The weekly refresh workflow bumps both
           # files together, check-k3s-manifests.sh fails if they disagree, and
           # doctor.sh warns if the running Deployment and CronJob differ.
-          image: ghcr.io/silverbeer/cycle-runner:claude-2.1.258
+          image: ghcr.io/silverbeer/cycle-runner:claude-2.1.278
           imagePullPolicy: IfNotPresent
           # The code comes from a fresh clone on every container start, NOT
           # from the PVC's ~/.claude: bootstrap.sh deletes and re-copies the
