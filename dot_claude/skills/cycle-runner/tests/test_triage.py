@@ -583,3 +583,29 @@ class ApplyTests(unittest.TestCase, GqlPatchMixin):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ----------------------------------------------------------------- render_summary
+
+
+class RenderSummaryTests(unittest.TestCase):
+    """SB-1120. The DM gets the shape of the batch, not its first five entries."""
+
+    def test_counts_driven_guesses_and_untouched(self):
+        drafts = [
+            {"id": "SB-1", "title": "a", "driven": "agent-supervised", "type": "bug"},
+            {"id": "SB-2", "title": "b", "driven": "agent-supervised", "estimate": 2},
+            {"id": "SB-3", "title": "c", "driven": "human"},
+            {"id": "SB-4", "title": "d"},
+        ]
+        out = triage.render_summary(drafts)
+        self.assertIn("**4 issue(s) need triage.**", out)
+        self.assertIn("- driven: agent-supervised 2 · human 1", out)
+        self.assertIn("type guessed from the title: 1", out)
+        self.assertIn("estimate defaulted, no signal to size from: 1", out)
+        self.assertIn("only the state is stale: 1", out)
+        self.assertNotIn("SB-1", out)
+
+    def test_fits_one_dm(self):
+        drafts = [{"id": f"SB-{n}", "title": "t", "driven": "agent-supervised", "type": "bug"} for n in range(500)]
+        self.assertLess(len(triage.render_summary(drafts)), 1500)

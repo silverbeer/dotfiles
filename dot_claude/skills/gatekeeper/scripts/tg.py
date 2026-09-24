@@ -215,6 +215,131 @@ def url_entities(text: str) -> list[dict]:
     ]
 
 
+# Markdown, the small subset gate bodies actually use (SB-1120). Bodies are
+# written for Linear, so a DM that sends them verbatim shows `###`, `**` and
+# backticks literally and keeps the ~80-column source wrapping, which breaks
+# sentences mid-phrase on a phone. Only unambiguous markers are rendered:
+# single `*` and `_` are left alone, because snake_case and globs are common
+# and a wrong guess italicises half a message.
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
+_LIST_RE = re.compile(r"^(\s*)([-*+]|\d+[.)])\s+")
+_FENCE_RE = re.compile(r"^\s*```")
+_INLINE_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*|`([^`\n]+)`")
+
+
+def unwrap_markdown(text: str) -> str:
+    """Join hard-wrapped lines back into their paragraph or list item.
+
+    A line continues the one above unless it starts a block of its own (blank,
+    heading, list item, fence, table row, quote) or the one above ends a block
+    (heading, table row, a Markdown hard break). Fenced code is untouched.
+    """
+    out: list[str] = []
+    in_fence = False
+    can_join = False
+    for line in text.split("\n"):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            out.append(line)
+            can_join = False
+            continue
+        if in_fence:
+            out.append(line)
+            continue
+        stripped = line.strip()
+        starts_block = (
+            not stripped or bool(_HEADING_RE.match(line)) or bool(_LIST_RE.match(line)) or stripped[0] in "|>"
+        )
+        if can_join and not starts_block:
+            out[-1] = f"{out[-1].rstrip()} {stripped}"
+        else:
+            out.append(line.rstrip() if not line.endswith("  ") else line)
+        can_join = (
+            bool(stripped)
+            and not _HEADING_RE.match(line)
+            and stripped[0] != "|"
+            and not line.endswith("  ")
+        )
+    return "\n".join(out)
+
+
+def render_markdown(text: str) -> tuple[str, list[dict]]:
+    """Plain text plus Telegram entities for `text`, line by line.
+
+    Headings and `**bold**` become `bold` entities, backticks `code`, fenced
+    blocks `pre`, and list markers a bullet. Anything unmatched (a lone `**`,
+    an odd backtick) stays literal, so no input can make the message invalid
+    — the failure mode `parse_mode` has and entities do not.
+
+    `url` entities are added over the result, except inside code: Telegram
+    forbids entities inside `code`/`pre`, and one bad entity rejects the whole
+    message.
+    """
+    buf = ""
+    entities: list[dict] = []
+    code_spans: list[tuple[int, int]] = []
+    fence_start: int | None = None
+
+    def add(kind: str, start: int) -> None:
+        length = _utf16_len(buf) - start
+        if length > 0:
+            entities.append({"type": kind, "offset": start, "length": length})
+            if kind in ("code", "pre"):
+                code_spans.append((start, start + length))
+
+    def inline(s: str, bold_ok: bool) -> None:
+        nonlocal buf
+        pos = 0
+        for m in _INLINE_RE.finditer(s):
+            buf += s[pos : m.start()]
+            start = _utf16_len(buf)
+            if m.group(1) is not None:
+                buf += m.group(1)
+                if bold_ok:
+                    add("bold", start)
+            else:
+                buf += m.group(2)
+                add("code", start)
+            pos = m.end()
+        buf += s[pos:]
+
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        last = i == len(lines) - 1
+        if _FENCE_RE.match(line):
+            if fence_start is None:
+                fence_start = _utf16_len(buf)
+            else:
+                buf = buf.removesuffix("\n")
+                add("pre", fence_start)
+                fence_start = None
+                if not last:
+                    buf += "\n"
+            continue
+        if fence_start is not None:
+            buf += line
+        elif h := _HEADING_RE.match(line):
+            start = _utf16_len(buf)
+            inline(line[h.end() :].rstrip(), bold_ok=False)
+            add("bold", start)
+        elif li := _LIST_RE.match(line):
+            marker = li.group(2)
+            buf += li.group(1) + ("• " if marker in "-*+" else f"{marker} ")
+            inline(line[li.end() :], bold_ok=True)
+        else:
+            inline(line, bold_ok=True)
+        if not last:
+            buf += "\n"
+    if fence_start is not None:  # unclosed fence: close it at the end
+        add("pre", fence_start)
+
+    for e in url_entities(buf):
+        if not any(s < e["offset"] + e["length"] and e["offset"] < end for s, end in code_spans):
+            entities.append(e)
+    entities.sort(key=lambda e: (e["offset"], -e["length"]))
+    return buf, entities
+
+
 def chunks(text: str) -> list[str]:
     """Split into sendable messages, preferring a line boundary.
 
@@ -243,7 +368,12 @@ def chunks(text: str) -> list[str]:
 
 
 def send_text(
-    transport: Transport, chat_id: str, text: str, reply_markup: dict | None = None, silent: bool = False
+    transport: Transport,
+    chat_id: str,
+    text: str,
+    reply_markup: dict | None = None,
+    silent: bool = False,
+    markdown: bool = False,
 ) -> dict:
     """Send `text` in as many messages as it takes; the keyboard rides on the
     last one so the buttons sit under the end of the proposal. Returns the last
@@ -257,13 +387,28 @@ def send_text(
     chunk's id, in order. A human replying to a long message replies to the
     chunk they are reading, which is rarely the last one (SB-1089), so a caller
     that has to recognise a reply needs all of them.
+
+    `markdown=True` renders each chunk with render_markdown() (SB-1120).
+    Chunks are cut from the SOURCE on line boundaries and rendering never
+    joins lines, so no marker spans two chunks. If Telegram still refuses a
+    rendered chunk, it is resent as it was before rendering existed: a DM that
+    reads plainly beats one that never arrives.
     """
     parts = chunks(text)
     result: dict = {}
     ids: list[int] = []
     for i, part in enumerate(parts):
         markup = reply_markup if i == len(parts) - 1 else None
-        result = transport.send_message(chat_id, part, markup, url_entities(part), silent) or {}
+        if markdown:
+            plain, entities = render_markdown(part)
+            try:
+                result = transport.send_message(chat_id, plain, markup, entities, silent) or {}
+            except TelegramConflict:
+                raise
+            except TelegramError:
+                result = transport.send_message(chat_id, part, markup, url_entities(part), silent) or {}
+        else:
+            result = transport.send_message(chat_id, part, markup, url_entities(part), silent) or {}
         if result.get("message_id") is not None:
             ids.append(result["message_id"])
     return {**result, "message_ids": ids}
