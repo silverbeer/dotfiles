@@ -40,6 +40,7 @@ human to catch before approving.
 from __future__ import annotations
 
 import argparse
+import collections
 import datetime
 import json
 import os
@@ -205,6 +206,33 @@ def render_review(today: str, drafts: list[dict], issues_by_id: dict[str, dict])
     return "\n".join(out)
 
 
+def render_summary(drafts: list[dict]) -> str:
+    """The Telegram side of the gate: counts, not the list (SB-1120).
+
+    review.md goes to Linear in full; its first 1500 characters used to be the
+    DM, which for a big sweep was five entries and a fragment — nothing to
+    decide on. The decision is about the shape of the batch and the guesses in
+    it, so that is what the phone gets.
+    """
+    changed = [d for d in drafts if len(d) > 2]
+    untouched = len(drafts) - len(changed)
+    driven = collections.Counter(d["driven"] for d in changed if "driven" in d)
+    typed = sum(1 for d in changed if "type" in d)
+    sized = sum(1 for d in changed if "estimate" in d)
+
+    out = [f"**{len(drafts)} issue(s) need triage.** Nothing has been written to Linear.", ""]
+    if driven:
+        out.append("- driven: " + " · ".join(f"{k} {n}" for k, n in sorted(driven.items())))
+    if typed:
+        out.append(f"- type guessed from the title: {typed} (check these)")
+    if sized:
+        out.append(f"- estimate defaulted, no signal to size from: {sized} (check these)")
+    if untouched:
+        out.append(f"- already triaged, only the state is stale: {untouched} (move by hand)")
+    out += ["", "Every proposed change is listed on the ticket. Approve or reject the whole batch."]
+    return "\n".join(out)
+
+
 def cmd_propose(args: argparse.Namespace) -> int:
     today = args.today or datetime.date.today().isoformat()
     issues = [i for i in fetch(args.team) if needs_triage(i)]
@@ -213,6 +241,8 @@ def cmd_propose(args: argparse.Namespace) -> int:
     issues_by_id = {i["identifier"]: i for i in issues}
 
     Path(args.out_review).write_text(render_review(today, drafts, issues_by_id))
+    if getattr(args, "out_summary", None):
+        Path(args.out_summary).write_text(render_summary(drafts))
     Path(args.out_apply).write_text(
         json.dumps({"generated_for": today, "team": args.team, "changes": drafts}, indent=2)
     )
@@ -309,6 +339,7 @@ def main() -> int:
     p.add_argument("--team", default="SB")
     p.add_argument("--out-review", required=True)
     p.add_argument("--out-apply", required=True)
+    p.add_argument("--out-summary", help="short Telegram summary for the gate DM (gate.py open --summary)")
     p.add_argument("--today", help="YYYY-MM-DD, for reproducible output (default: system date)")
     p.set_defaults(func=cmd_propose)
 

@@ -73,7 +73,7 @@ test_test_count_below_the_floor_fails() {
   rm -f "$src"/dot_claude/skills/gatekeeper/tests/test_inbox.py
   export REPO="$src"
   assert_fail check-gatekeeper.sh
-  assert_out 'expected at least 141 tests to run'
+  assert_out 'expected at least 160 tests to run'
 }
 
 # NEGATIVE: the runner's poll starts reading Telegram again (SB-951). One

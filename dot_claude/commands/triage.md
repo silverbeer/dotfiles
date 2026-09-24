@@ -38,7 +38,8 @@ does.
 ```bash
 mkdir -p "$RUN_SCRATCH"
 python3 ~/.claude/skills/cycle-runner/scripts/triage.py propose \
-  --out-review "$RUN_SCRATCH/review.md" --out-apply "$RUN_SCRATCH/apply.json"
+  --out-review "$RUN_SCRATCH/review.md" --out-apply "$RUN_SCRATCH/apply.json" \
+  --out-summary "$RUN_SCRATCH/summary.md"
 ```
 
 Read `$RUN_SCRATCH/apply.json`. If its `.changes` array is empty — nothing in
@@ -76,7 +77,7 @@ sweep" ticket, so every week's proposal lands as a comment on SB-624 itself:
 ```bash
 bash ~/.claude/skills/linear-crud/scripts/linear.sh pack SB-624 | tee "$RUN_SCRATCH/pack.json" >/dev/null
 python3 ~/.claude/skills/gatekeeper/scripts/gate.py open --kind triage \
-  --ticket SB-624 --body "$RUN_SCRATCH/review.md" \
+  --ticket SB-624 --body "$RUN_SCRATCH/review.md" --summary "$RUN_SCRATCH/summary.md" \
   --session-id "$SESSION_ID" --run-id "$RUN_ID" \
   --link "$(jq -r '.issue.url // empty' "$RUN_SCRATCH/pack.json")" \
   | tee "$RUN_SCRATCH/gate_open.json" | jq -r .gate_id > "$RUN_SCRATCH/gate_id"

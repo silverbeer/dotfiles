@@ -63,6 +63,8 @@ from tg import (  # noqa: E402
     Transport,
     approve_keyboard,
     links_keyboard,
+    render_markdown,
+    unwrap_markdown,
     parse_callback,
     send_text,
 )
@@ -541,7 +543,9 @@ class Gatekeeper:
 
     # -------------------------------------------------------------- open
 
-    def open_gate(self, kind: str, ticket: str, body: str, session_id: str, run_id: str, link: str) -> dict:
+    def open_gate(
+        self, kind: str, ticket: str, body: str, session_id: str, run_id: str, link: str, summary: str | None = None
+    ) -> dict:
         gate_id = secrets.token_hex(4)  # 8 hex chars: callback_data must stay ≤ 64 bytes
         issue = issue_info(ticket)
         marker = f"<!-- sb-agent:{kind}:{run_id}:{session_id} -->"
@@ -567,7 +571,7 @@ class Gatekeeper:
         # already live, so a DM failure below must not orphan the gate — it
         # stays resolvable via the Linear channel, and `poll` can find it.
         save_gate(gate)
-        text = telegram_text(kind, ticket, issue["title"], body, link or issue["url"], issue["url"])
+        text = telegram_text(kind, ticket, issue["title"], body, link or issue["url"], issue["url"], summary)
         # A `blocked` gate asks nothing, so it gets no verbs — but it still
         # gets the link buttons, because "go and look" IS the ask (SB-982).
         pr_link = link if link and link != issue["url"] else ""
@@ -588,7 +592,7 @@ class Gatekeeper:
             # editMessageText at all — which is why a resolved gate keeps its
             # Approve buttons forever (SB-988). The conclusion above still
             # holds; the reason given for it did not.
-            sent = send_text(self.transport, self.chat_id, text, keyboard, silent=in_quiet_hours())
+            sent = send_text(self.transport, self.chat_id, text, keyboard, silent=in_quiet_hours(), markdown=True)
             gate["tg_message_id"] = sent.get("message_id")
             # Every chunk, not just the last: a long proposal is split, and the
             # reply comes back on whichever chunk the human was reading
@@ -1113,7 +1117,32 @@ class Gatekeeper:
 # ------------------------------------------------------------------ wiring
 
 
-def telegram_text(kind: str, ticket: str, title: str, body: str, link: str, issue_url: str = "") -> str:
+def trim_blocks(text: str, limit: int) -> str:
+    """At most `limit` characters of `text`, cut between lines, never inside
+    one (SB-1120). A fixed slice used to end the DM on "### SB-58…". What was
+    left out is counted, so the reader knows the rest is on the ticket."""
+    if len(text) <= limit:
+        return text
+    lines = text.split("\n")
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > limit:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    if not kept:  # one paragraph longer than the limit: cut at a word
+        head = lines[0][:limit].rsplit(" ", 1)[0]
+        return f"{head}…\n\n… the rest is on the ticket."
+    dropped = sum(1 for line in lines[len(kept) :] if line.strip())
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return "\n".join(kept) + f"\n\n… {dropped} more line(s) on the ticket."
+
+
+def telegram_text(
+    kind: str, ticket: str, title: str, body: str, link: str, issue_url: str = "", summary: str | None = None
+) -> str:
     """The DM for one gate.
 
     The ticket link is ALWAYS present (SB-954). `pr` and `merge` gates pass the
@@ -1122,10 +1151,12 @@ def telegram_text(kind: str, ticket: str, title: str, body: str, link: str, issu
     read the PR, decide on the ticket. It also matters for answering: the
     buttons depend on the listener being up (SB-951), while a Linear comment
     is read by the runner either way, so the message offers both.
+
+    The result is Markdown SOURCE: open_gate sends it with markdown=True, so
+    the phone gets it rendered (SB-1120). `summary`, when given, replaces the
+    body in the DM only — the Linear comment always carries the full body.
     """
-    summary = body.strip()
-    if len(summary) > SUMMARY_CHARS:
-        summary = summary[:SUMMARY_CHARS].rstrip() + "…"
+    shown = trim_blocks(unwrap_markdown(summary if summary is not None else body).strip(), SUMMARY_CHARS)
 
     ticket_url = issue_url or link
     trailer = [f"Ticket: {ticket_url}"]
@@ -1135,7 +1166,7 @@ def telegram_text(kind: str, ticket: str, title: str, body: str, link: str, issu
     if kind != "blocked":
         trailer.append("Approve with the buttons, or comment `approve` on the ticket.")
 
-    return f"[{kind}] {ticket} — {title}\n\n{summary}\n\n" + "\n".join(trailer)
+    return f"**[{kind}] {ticket} — {title}**\n\n{shown}\n\n" + "\n".join(trailer)
 
 
 def gatekeeper_from_env() -> Gatekeeper:
@@ -1153,8 +1184,18 @@ def gatekeeper_from_env() -> Gatekeeper:
 
 def cmd_open(args: argparse.Namespace) -> int:
     body = sys.stdin.read() if args.body == "/dev/stdin" else Path(args.body).read_text()
+    summary = Path(args.summary).read_text() if args.summary else None
     if args.dry_run:
         # No network at all: no Linear lookup (so no real title), no Telegram.
+        text = telegram_text(
+            args.kind,
+            args.ticket,
+            "(title not fetched)",
+            body,
+            args.link or "(issue url)",
+            "(issue url)",
+            summary,
+        )
         print(
             json.dumps(
                 {
@@ -1162,14 +1203,9 @@ def cmd_open(args: argparse.Namespace) -> int:
                     "kind": args.kind,
                     "ticket": args.ticket,
                     "marker": f"<!-- sb-agent:{args.kind}:{args.run_id}:{args.session_id} -->",
-                    "telegram": telegram_text(
-                        args.kind,
-                        args.ticket,
-                        "(title not fetched)",
-                        body,
-                        args.link or "(issue url)",
-                        "(issue url)",
-                    ),
+                    "telegram": text,
+                    # What the phone shows: formatting markers become entities.
+                    "telegram_rendered": render_markdown(text)[0],
                     "keyboard": args.kind != "blocked",
                 },
                 indent=2,
@@ -1177,7 +1213,7 @@ def cmd_open(args: argparse.Namespace) -> int:
         )
         return 0
     gk = gatekeeper_from_env()
-    gate = gk.open_gate(args.kind, args.ticket, body, args.session_id, args.run_id, args.link)
+    gate = gk.open_gate(args.kind, args.ticket, body, args.session_id, args.run_id, args.link, summary)
     print(json.dumps({"status": "awaiting", "gate_id": gate["gate_id"]}))
     return 0
 
@@ -1249,6 +1285,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--kind", required=True, choices=KINDS)
     p.add_argument("--ticket", required=True)
     p.add_argument("--body", required=True, help="file with the full proposal (markdown)")
+    p.add_argument(
+        "--summary",
+        help="file with a short DM summary (markdown); replaces the head of --body in Telegram only",
+    )
     p.add_argument("--session-id", default="")
     p.add_argument("--run-id", default="")
     p.add_argument("--link", default="", help="deep link for the DM (default: the issue url)")

@@ -258,6 +258,89 @@ class EntitiesOnSendTests(unittest.TestCase):
         )
 
 
+class UnwrapMarkdownTests(unittest.TestCase):
+    """SB-1120. Bodies are hard-wrapped for Linear; Telegram keeps every
+    newline, so the source wrap broke sentences mid-phrase on a phone."""
+
+    def test_joins_a_wrapped_paragraph(self):
+        self.assertEqual(tg.unwrap_markdown("approve or reject the\nwhole thing"), "approve or reject the whole thing")
+
+    def test_joins_a_wrapped_list_item_but_not_the_next_item(self):
+        src = "- driven: agent-supervised (needs estimate<=2\n  and adhoc|chore)\n- trigger: Todo"
+        self.assertEqual(
+            tg.unwrap_markdown(src), "- driven: agent-supervised (needs estimate<=2 and adhoc|chore)\n- trigger: Todo"
+        )
+
+    def test_keeps_headings_blank_lines_tables_and_fences(self):
+        src = "# Title\nline one\n\n| a | b |\n| 1 | 2 |\n```\ncode\nmore\n```"
+        self.assertEqual(tg.unwrap_markdown(src), src)
+
+    def test_a_hard_break_is_kept(self):
+        self.assertEqual(tg.unwrap_markdown("Ticket: x  \nPR: y").count("\n"), 1)
+
+
+class RenderMarkdownTests(unittest.TestCase):
+    """SB-1120. Markers become entities; nothing can make the message invalid."""
+
+    def test_heading_bold_and_code_become_entities(self):
+        text, ents = tg.render_markdown("## Plan\nuse **care** and `gate.py`")
+        self.assertEqual(text, "Plan\nuse care and gate.py")
+        self.assertIn({"type": "bold", "offset": 0, "length": 4}, ents)
+        self.assertIn({"type": "bold", "offset": 9, "length": 4}, ents)
+        self.assertIn({"type": "code", "offset": 18, "length": 7}, ents)
+
+    def test_list_markers_become_bullets(self):
+        text, _ = tg.render_markdown("- one\n* two\n1. three")
+        self.assertEqual(text, "• one\n• two\n1. three")
+
+    def test_unmatched_markers_stay_literal(self):
+        for src in ("a ** b", "snake_case_name", "one ` tick", "glob *.py"):
+            text, ents = tg.render_markdown(src)
+            self.assertEqual(text, src)
+            self.assertEqual(ents, [])
+
+    def test_fence_becomes_pre_without_its_markers(self):
+        text, ents = tg.render_markdown("before\n```bash\nls -la\n```\nafter")
+        self.assertEqual(text, "before\nls -la\nafter")
+        self.assertIn({"type": "pre", "offset": 7, "length": 6}, ents)
+
+    def test_urls_are_linked_but_never_inside_code(self):
+        text, ents = tg.render_markdown("see https://a.io/x and `https://b.io/y`")
+        urls = [e for e in ents if e["type"] == "url"]
+        self.assertEqual(len(urls), 1)
+        self.assertEqual(text[urls[0]["offset"] : urls[0]["offset"] + urls[0]["length"]], "https://a.io/x")
+
+    def test_offsets_are_utf16_after_an_emoji(self):
+        text, ents = tg.render_markdown("🎫 **bold**")
+        self.assertEqual(text, "🎫 bold")
+        self.assertEqual(ents, [{"type": "bold", "offset": 3, "length": 4}])
+
+
+class MarkdownSendTests(unittest.TestCase):
+    def test_markdown_send_carries_no_markers(self):
+        transport = FakeTransport()
+        tg.send_text(transport, "1", "### Head\n**b** `c`", markdown=True)
+        self.assertEqual(transport.sent[0][1], "Head\nb c")
+        self.assertEqual({e["type"] for e in transport.entities[0]}, {"bold", "code"})
+
+    def test_a_refused_render_is_resent_plain(self):
+        class Picky(FakeTransport):
+            def send_message(self, chat_id, text, reply_markup=None, entities=None, silent=False):
+                if entities and any(e["type"] == "bold" for e in entities):
+                    raise tg.TelegramError("Telegram refused sendMessage: can't parse entities")
+                return super().send_message(chat_id, text, reply_markup, entities, silent)
+
+        transport = Picky()
+        tg.send_text(transport, "1", "**b**", markdown=True)
+        self.assertEqual(transport.sent[-1][1], "**b**")
+
+    def test_a_conflict_is_never_swallowed(self):
+        transport = FakeTransport()
+        transport.fail_send = tg.TelegramConflict("409")
+        with self.assertRaises(tg.TelegramConflict):
+            tg.send_text(transport, "1", "**b**", markdown=True)
+
+
 class ApproveKeyboardTests(unittest.TestCase):
     def test_shape_and_callback_data(self):
         kb = tg.approve_keyboard("a1b2c3d4")

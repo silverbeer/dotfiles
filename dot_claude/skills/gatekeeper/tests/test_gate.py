@@ -418,6 +418,43 @@ class TelegramTextTests(unittest.TestCase):
         self.assertIn(f"Ticket: {self.TICKET_URL}", text)
 
 
+class ReadableDmTests(GateTestCase):
+    """SB-1120. The SB-624 triage DM showed raw `###`/`**`, source line wraps,
+    and ended on "### SB-58…"."""
+
+    TICKET_URL = "https://linear.app/silverbeer/issue/SB-624"
+
+    def test_truncation_cuts_between_lines_and_counts_the_rest(self):
+        body = "\n".join(f"- SB-{n}: a proposed change with some words" for n in range(200))
+        text = gate.telegram_text("triage", "SB-624", "t", body, self.TICKET_URL, self.TICKET_URL)
+        summary = text.split("\n\n")[1]
+        for line in summary.split("\n"):
+            self.assertTrue(line.endswith("words"), line)
+        self.assertRegex(text, r"… \d+ more line\(s\) on the ticket\.")
+        self.assertIn(f"Ticket: {self.TICKET_URL}", text)
+
+    def test_one_huge_paragraph_is_cut_at_a_word(self):
+        body = "word " * 1000
+        text = gate.telegram_text("plan", "SB-1", "t", body, self.TICKET_URL, self.TICKET_URL)
+        self.assertIn("word…", text)
+
+    def test_summary_replaces_the_body_in_the_dm_only(self):
+        g = self.gk.open_gate("triage", "SB-1", "FULL LIST", "s1", "r1", "", summary="**3** need triage")
+        [comment] = [c["body"] for c in self.linear.comments]
+        self.assertIn("FULL LIST", comment)
+        sent = self.transport.sent[0][1]
+        self.assertNotIn("FULL LIST", sent)
+        self.assertIn("3 need triage", sent)
+        self.assertEqual(g["status"], "awaiting")
+
+    def test_the_dm_is_rendered(self):
+        self.open_gate(body="## Plan\n- touch **gate.py**\n  and `tg.py`")
+        sent = self.transport.sent[0][1]
+        for marker in ("##", "**", "`"):
+            self.assertNotIn(marker, sent)
+        self.assertIn("• touch gate.py and tg.py", sent)
+
+
 class CallbackAnswerFailureTests(GateTestCase):
     """SB-950. A callback query id expires about a minute after the tap; this
     poller runs on a 30-minute tick, so `answerCallbackQuery` nearly always
