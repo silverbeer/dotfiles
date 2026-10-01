@@ -175,5 +175,13 @@
     ],
     "ghRepo": "todo",
     "epicGlobs": []
+  },
+  {
+    "label": "CR",
+    "dirGlobs": [
+      "cycle-runner"
+    ],
+    "ghRepo": "cycle-runner",
+    "epicGlobs": []
   }
 ]
