@@ -105,6 +105,16 @@
     ]
   },
   {
+    "label": "MTI",
+    "dirGlobs": [
+      "mt-ios"
+    ],
+    "ghRepo": "mt-ios",
+    "epicGlobs": [
+      "mt ios*"
+    ]
+  },
+  {
     "label": "TRD",
     "dirGlobs": [
       "trd*",
