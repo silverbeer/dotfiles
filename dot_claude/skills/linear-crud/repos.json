@@ -60,7 +60,9 @@
     ],
     "ghRepo": "missing-table",
     "epicGlobs": [
-      "*paper*"
+      "*paper*",
+      "mt — *",
+      "*mt-mcp*"
     ],
     "note": "*paper* spans MT + STK; MT is the deadline half",
     "worktreeLink": [
