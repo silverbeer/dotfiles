@@ -26,12 +26,13 @@ export PATH="/opt/homebrew/share/google-cloud-sdk/bin:$PATH"
 alias k='kubectl'
 export RESUME_DATA_DIR="{{ .chezmoi.homeDir }}/iCloud/resume-data"
 
-# trd's portfolio DB (every real account) lives in iCloud so both Macs share it.
+# trd's portfolio DB (every real account) lives LOCALLY on the Mac mini, never in
+# iCloud: real account data does not leave this machine (2026-10-24).
 # Without this, a bare `trd` falls back to ~/.trd and silently creates an empty
 # database there (SB-1366) — "No accounts", with the real data untouched but
-# invisible. Guarded so a machine without the iCloud folder keeps the default.
-if [ -f "{{ .chezmoi.homeDir }}/iCloud/trd/trd.duckdb" ]; then
-  export TRD_HOME="{{ .chezmoi.homeDir }}/iCloud/trd"
+# invisible. Guarded so a machine without the local portfolio keeps the default.
+if [ -f "{{ .chezmoi.homeDir }}/.trd-portfolio/trd.duckdb" ]; then
+  export TRD_HOME="{{ .chezmoi.homeDir }}/.trd-portfolio"
 fi
 
 # trd engines. Each engine has its own DuckDB, deliberately separate from the
