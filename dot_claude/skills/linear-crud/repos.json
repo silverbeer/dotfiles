@@ -205,5 +205,15 @@
     ],
     "ghRepo": "cycle-runner",
     "epicGlobs": []
+  },
+  {
+    "label": "AGT",
+    "dirGlobs": [
+      "sb-agents"
+    ],
+    "ghRepo": "sb-agents",
+    "epicGlobs": [
+      "agt — *"
+    ]
   }
 ]
