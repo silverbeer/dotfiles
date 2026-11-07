@@ -114,6 +114,26 @@ SKILL.md, "The delivery loop"). **Merge your own green PRs; don't wait to be ask
 The integration is one-way: GitHub events drive Linear, never the reverse.
 Changing a status in Linear does nothing in GitHub.
 
+### Clean up the moment a PR merges
+
+Disk is a managed resource here — the mac mini runs agents, k3s and many
+worktrees at once. A merge is not done until its leftovers are gone:
+
+```bash
+gh pr merge <N> --squash --delete-branch      # remote branch goes with the merge
+git worktree remove <path>                    # if the work was in a worktree
+git branch -D <branch>                        # squash merges need -D, not -d
+```
+
+- Check `git status --porcelain` is empty before removing a worktree. Anything
+  in it is unsaved work: stop and say so rather than forcing.
+- Only remove worktrees **you** created this session. Leave cycle-runner's
+  (`~/.local/state/cycle-runner/worktrees`), `locked` ones, and anything a
+  running process may own.
+- A branch whose PR was **closed without merging** is not cleanup — ask.
+- `jt` (janitor) is the sweeper for what slips through; prefer fixing the
+  habit to relying on the sweep.
+
 ## Unplanned work is the norm
 
 Every project here is **pre-user**. Requests arrive daily and take precedence
