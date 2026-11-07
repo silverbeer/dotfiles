@@ -69,6 +69,16 @@ bash scripts/linear.sh branch SB-42        # checkout silverbeer/sb-42-<slug>
 ```
 See "The delivery loop" below for what the name does and does not trigger.
 
+### Worktree — `/linear worktree SB-N` / `worktree-done SB-N`
+```bash
+bash scripts/linear.sh worktree SB-42        # print (create if needed) ~/.local/state/cycle-runner/worktrees/sb-42
+bash scripts/linear.sh worktree-done SB-42   # after the PR merged: remove the tree + local branch
+```
+`worktree-done` refuses (exit 3, nothing removed) on real uncommitted work, when no
+merged PR is found, or when the tree has commits the PR lacks. Build artefacts
+(`.venv`, `node_modules`, caches) don't block it. The cycle-runner calls it after its
+own merge; `jt git prune` sweeps whatever is left (SB-1580/1581).
+
 ### Create — `/linear new <free text>`
 Infer a concise title, a short markdown description, and the `type` from the conversation. Detect `repo` from cwd (or pass `--epic` to derive it). Then **show the user the proposed title + labels + epic and confirm**, then file:
 

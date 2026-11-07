@@ -427,6 +427,62 @@ else
   bad "worktree: failed: $(head -2 "$WORK/wt.err")"
 fi
 
+# ------------------------- 3d. worktree-done: removed after merge, never forced (SB-1581)
+
+note "3d. worktree-done (SB-1581)"
+wtd_run() {  # GH_OID -- run worktree-done with a gh stub answering GH_OID
+  local oid="$1" gbin="$WORK/wtd-bin"
+  mkdir -p "$gbin"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s"\n' "$oid" >"$gbin/gh"; chmod +x "$gbin/gh"
+  ( cd "$wt_primary" && PATH="$gbin:$PATH" HOME="$wt_home" GATEKEEPER_STATE="$WORK/wtstate" \
+      bash "$LINEAR_SH" worktree-done SB-1 )
+}
+if [ -n "${wt:-}" ] && [ -d "$wt" ]; then
+  wt_branch="$(git -C "$wt" branch --show-current)"
+  wt_head="$(git -C "$wt" rev-parse HEAD)"
+
+  if wtd_run "" 2>"$WORK/wtd.err"; then
+    bad "worktree-done: removed a tree with no merged PR"
+  elif [ -d "$wt" ] && grep -q "no merged PR" "$WORK/wtd.err"; then
+    ok "worktree-done: keeps the tree when no merged PR is found"
+  else
+    bad "worktree-done: unexpected result without a merged PR: $(head -2 "$WORK/wtd.err")"
+  fi
+
+  printf 'real work\n' >"$wt/notes.md"
+  if wtd_run "$wt_head" 2>"$WORK/wtd.err"; then
+    bad "worktree-done: removed a tree holding uncommitted work"
+  elif [ -f "$wt/notes.md" ] && grep -q "uncommitted work" "$WORK/wtd.err"; then
+    ok "worktree-done: refuses on real uncommitted work and leaves it in place"
+  else
+    bad "worktree-done: unexpected result on uncommitted work: $(head -2 "$WORK/wtd.err")"
+  fi
+  rm -f "$wt/notes.md"
+
+  # Beside tracked files, as in a real repo. (A wholly untracked parent dir is
+  # collapsed by git to one line and counts as work — the safe direction.)
+  mkdir -p "$wt/.venv/lib" "$wt/node_modules/pkg"
+  printf 'x\n' >"$wt/.venv/lib/x"; printf 'x\n' >"$wt/node_modules/pkg/x"
+  if wtd_run "$wt_head" 2>"$WORK/wtd.err" && [ ! -d "$wt" ]; then
+    ok "worktree-done: merged + only build artefacts -> tree removed"
+  else
+    bad "worktree-done: did not remove a merged tree with only artefacts: $(head -2 "$WORK/wtd.err")"
+  fi
+  if git -C "$wt_primary" rev-parse --verify --quiet "refs/heads/$wt_branch" >/dev/null; then
+    bad "worktree-done: local branch $wt_branch survived"
+  else
+    ok "worktree-done: local branch deleted"
+  fi
+
+  if wtd_run "$wt_head" 2>/dev/null; then
+    ok "worktree-done: second call is a no-op"
+  else
+    bad "worktree-done: not idempotent"
+  fi
+else
+  bad "worktree-done: 3c did not leave a worktree to test with"
+fi
+
 # ----------------------------------------------- 4-6. python unit tests
 
 note "3d. linear-gql.sh forces HTTP/1.1"

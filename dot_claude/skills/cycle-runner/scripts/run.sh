@@ -273,6 +273,17 @@ handle_merge_gate() {
   # and this is called from inside the same `while read` loop.
   if gh pr merge "$pr_url" --squash --delete-branch </dev/null; then
     note "merged $pr_url for $ticket — 'Fixes $ticket' in the PR body moves Linear to Done automatically"
+    # SB-1581: the run's worktree and local branch go with the merge. A refusal
+    # (real uncommitted work, extra commits) leaves them for `jt git prune` to
+    # report as REVIEW — never forced.
+    if [[ -n "$LINEAR_SCRIPTS" ]]; then
+      local wt_out
+      if wt_out="$(bash "$LINEAR_SCRIPTS/linear.sh" worktree-done "$ticket" </dev/null 2>&1)"; then
+        note "${wt_out:-worktree-done $ticket: ok}"
+      else
+        note "worktree-done for $ticket left things in place (jt git prune will list them): $wt_out"
+      fi
+    fi
     say "Merged $ticket — $(ticket_title "$ticket")" \
         "CI was green. Linear closes the ticket automatically." \
         "$pr_url"
