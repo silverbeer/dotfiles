@@ -19,6 +19,8 @@
 #         [--driven human|agent-supervised|agent-auto] [--label L ...] [--estimate N]
 #   worktree SB-N               print (creating if needed) an isolated worktree for
 #                               the issue's repo — never touches ~/gitrepos/<repo>
+#   worktree-done SB-N          after the PR merged: remove that worktree + its local
+#                               branch (refuses on real uncommitted work)
 #   branch SB-N [--from-head]   checkout silverbeer/sb-n-<slug> off origin/<default>
 #                               (sb-n token links the PR; --from-head uses local HEAD)
 #   list  [--all] [--repo R] [--epic E]   my issues (open by default), TSV
@@ -593,6 +595,63 @@ cmd_worktree() {
   printf '%s\n' "$wt"
 }
 
+# Untracked names that are rebuilt on demand, never work. Mirrors `jt git`'s
+# default `artifacts` list (janitor, SB-1580) — keep the two in step.
+WORKTREE_ARTIFACTS_RE='^\?\? (.*/)?(\.venv|node_modules|__pycache__|\.pytest_cache|\.ruff_cache|\.mypy_cache|\.coverage|htmlcov|html-report|test-results\.json|dist|build)(/.*)?$'
+
+# Remove an issue's worktree and local branch once its PR has merged (SB-1581).
+# The runner calls this right after its own `gh pr merge`; `jt git prune` is
+# the nightly sweep for anything that slips past. Safe to call twice.
+#
+# Refuses — leaving everything in place — when the tree holds real uncommitted
+# work, when no merged PR is found for the branch, or when the tree has commits
+# the merged PR does not contain. Build artefacts (.venv, node_modules, …) are
+# not work and do not block removal.
+cmd_worktree_done() {
+  local key="${1:-}"
+  [ -n "$key" ] || die "usage: worktree-done SB-123"
+  local wt
+  wt="$(worktree_root)/$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')"
+  if [ ! -d "$wt" ]; then
+    echo "  no worktree for $key — nothing to do" >&2
+    return 0
+  fi
+
+  local common primary branch head
+  common="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+    || die "worktree-done: $wt is not a git worktree"
+  primary="$(dirname "$common")"
+  branch="$(git -C "$wt" branch --show-current)"
+  head="$(git -C "$wt" rev-parse HEAD)"
+
+  local work
+  work="$(git -C "$wt" status --porcelain --untracked-files=normal | grep -Ev "$WORKTREE_ARTIFACTS_RE" || true)"
+  if [ -n "$work" ]; then
+    echo "  keeping $wt — uncommitted work:" >&2
+    printf '%s\n' "$work" | sed 's/^/    /' >&2
+    return 3
+  fi
+
+  local merged_oid
+  merged_oid="$(cd "$primary" && gh pr list --head "$branch" --state merged --limit 1 \
+    --json headRefOid --jq '.[0].headRefOid // empty' </dev/null 2>/dev/null || true)"
+  if [ -z "$merged_oid" ]; then
+    echo "  keeping $wt — no merged PR found for $branch" >&2
+    return 3
+  fi
+  if [ "$head" != "$merged_oid" ] \
+     && ! git -C "$primary" merge-base --is-ancestor "$head" "$merged_oid" 2>/dev/null; then
+    echo "  keeping $wt — it has commits the merged PR does not" >&2
+    return 3
+  fi
+
+  # --force only gets past the untracked build artefacts checked above.
+  git -C "$primary" worktree remove --force "$wt" || die "worktree-done: could not remove $wt"
+  git -C "$primary" branch -D "$branch" >/dev/null 2>&1 || true
+  git -C "$primary" worktree prune
+  echo "  removed $wt and branch $branch" >&2
+}
+
 # Branch name for an issue: silverbeer/sb-<n>-<title-slug>. Shared by branch
 # and pack so the two can never disagree.
 branch_name_for() {
@@ -717,6 +776,7 @@ case "$sub" in
   new)               cmd_new "$@" ;;
   branch)            cmd_branch "$@" ;;
   worktree)          cmd_worktree "$@" ;;
+  worktree-done)     cmd_worktree_done "$@" ;;
   pack)              cmd_pack "$@" ;;
   list)              cmd_list "$@" ;;
   view)              cmd_view "$@" ;;

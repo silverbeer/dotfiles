@@ -117,22 +117,41 @@ Changing a status in Linear does nothing in GitHub.
 ### Clean up the moment a PR merges
 
 Disk is a managed resource here — the mac mini runs agents, k3s and many
-worktrees at once. A merge is not done until its leftovers are gone:
+worktrees at once. A merge is not done until its leftovers are gone. Three
+layers, each catching what the last missed:
+
+1. **GitHub** deletes the remote branch: always `gh pr merge --delete-branch`.
+2. **Whoever merged** removes their own worktree and local branch, right then.
+3. **`jt git prune`** (janitor) sweeps every repo under `~/gitrepos` nightly at
+   03:30 via launchd. Rules and diagrams: `~/gitrepos/janitor/docs/git-hygiene.md`.
 
 ```bash
-gh pr merge <N> --squash --delete-branch      # remote branch goes with the merge
-git worktree remove <path>                    # if the work was in a worktree
-git branch -D <branch>                        # squash merges need -D, not -d
+gh pr merge <N> --squash --delete-branch          # 1
+git worktree remove <path>                        # 2 — if the work was in a worktree
+git branch -D <branch>                            # 2 — squash merges need -D
+linear.sh worktree-done SB-N                      # 2 — same, for a linear.sh worktree
 ```
 
-- Check `git status --porcelain` is empty before removing a worktree. Anything
-  in it is unsaved work: stop and say so rather than forcing.
-- Only remove worktrees **you** created this session. Leave cycle-runner's
-  (`~/.local/state/cycle-runner/worktrees`), `locked` ones, and anything a
-  running process may own.
-- A branch whose PR was **closed without merging** is not cleanup — ask.
-- `jt` (janitor) is the sweeper for what slips through; prefer fixing the
-  habit to relying on the sweep.
+**When to run which `jt` command** — these are triggers, not suggestions:
+
+| Moment | Run |
+|---|---|
+| You merged your own PR | step 2 above, directly. Then `jt git audit --repo .` to confirm nothing of yours is left |
+| Before `/handoff` or ending a session that made branches/worktrees | `jt git audit --repo .`; remove your own leftovers; mention REVIEW items |
+| User asks to clean up branches / worktrees / disk | `jt --dry-run git prune`, show the summary, then `jt --yes git prune` |
+| `jt doctor` shows **Git hygiene ⚠**, or disk is low | `jt git schedule status`, then `jt git audit` and `jt --yes git prune` |
+| New machine, or `jt git schedule status` says not loaded | `jt git schedule install` |
+
+- `jt git prune` only deletes **PRUNE** items (PR merged on GitHub, nothing
+  committed after; worktree unlocked and clean except build artefacts). It is
+  safe to run without asking. **REVIEW** items — closed-unmerged PRs, commits
+  after merge, uncommitted changes — are never yours to delete: list them for
+  the user.
+- Removing a worktree by hand: `git status --porcelain` must be empty apart
+  from build artefacts (`.venv`, `node_modules`, caches). Anything else is
+  unsaved work — stop and say so; never `--force` past it.
+- By hand, only remove worktrees **you** created this session. Leave `locked`
+  ones and anything a running process may own; `jt` handles the rest by rule.
 
 ## Unplanned work is the norm
 
