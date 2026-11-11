@@ -52,3 +52,6 @@ if [[ -r $_op_token && ( -n $CLAUDECODE || ! -o interactive ) ]]; then
   export OP_SERVICE_ACCOUNT_TOKEN="$(<$_op_token)"
 fi
 unset _op_token
+
+# Rust (rustup): put cargo on PATH; guarded for machines without Rust
+if [[ -r "$HOME/.cargo/env" ]]; then . "$HOME/.cargo/env"; fi
