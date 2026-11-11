@@ -10,14 +10,14 @@ split ownership is how branches end up misnamed and tickets end up stuck.
 | # | Phase | Who | Gate |
 |---|-------|-----|------|
 | 1 | Fetch + restate | you | — |
-| 2 | Branch | you | ✋ confirm |
+| 2 | Branch | you | — |
 | 3 | Plan | `Plan` / `Explore` agent | ✋ **approve plan** |
 | 4 | Implement | `dev-engineer` | — |
 | 5 | Test | `qe-engineer` | — |
 | 6 | Review | `/code-review` | — |
 | 7 | Fix findings | `dev-engineer` | — |
 | 8 | Ship | you (`/cppp`) | ✋ confirm before PR |
-| 9 | Merge + close | you | ✋ confirm merge |
+| 9 | Merge + close | you | — |
 
 ### 1. Fetch and restate
 
@@ -40,6 +40,8 @@ wastes the whole chain. If the ticket has no estimate, propose one (1/2/3/5/8).
 
 ### 2. Branch
 
+Just do it — no confirmation. Branching is cheap and reversible.
+
 ```bash
 git checkout main && git pull
 bash ~/.claude/skills/linear-crud/scripts/linear.sh branch SB-<n>
@@ -49,7 +51,12 @@ Use `linear.sh branch`, **not** a hand-rolled `git checkout -b` — it guarantee
 the `sb-<n>` token Linear keys on. What that does and does not trigger: linear-crud
 SKILL.md, "The delivery loop".
 
-Working tree must be clean first. If it isn't, stop and show `git status`.
+Stop and show `git status` only if:
+
+- tracked files have changes (`pack`'s `git.dirty` is true), or
+- the branch already exists.
+
+Untracked files don't count.
 
 ### 3. Plan — gate
 
@@ -129,10 +136,10 @@ accepted. Then run `/cppp`.
   linear-crud SKILL.md, "The delivery loop", for what fires when
 - Never `git add .`; stage only what belongs to this ticket
 
-### 9. Merge and close — gate
+### 9. Merge and close
 
-Wait for CI. Green own PR → merge it (confirm with the user first; per the house
-rules you don't wait to be asked, but you do say what you're about to do).
+Wait for CI. When your own PR is green, merge it without asking. Say what you're
+merging, then do it. A red PR goes back to phase 7, not to the user.
 
 After merge: if reality differed from the estimate, revise it on the ticket. The
 drift is the signal — a ticket that came in at 2 and cost 8 is worth recording.
