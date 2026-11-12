@@ -141,6 +141,8 @@ linear.sh worktree-done SB-N                      # 2 — same, for a linear.sh 
 | User asks to clean up branches / worktrees / disk | `jt --dry-run git prune`, show the summary, then `jt --yes git prune` |
 | `jt doctor` shows **Git hygiene ⚠**, or disk is low | `jt git schedule status`, then `jt git audit` and `jt --yes git prune` |
 | New machine, or `jt git schedule status` says not loaded | `jt git schedule install` |
+| `jt doctor` shows **k3s build cache ⚠** or **k3s upkeep ⚠** | `jt k3s schedule status`, then `jt --yes k3s maintain` (prunes dangling images + BuildKit cache, trims the VM) |
+| New machine with Rancher Desktop, or `jt k3s schedule status` says not loaded | `jt k3s schedule install` (weekly, Sunday 04:00) |
 
 - `jt git prune` only deletes **PRUNE** items (PR merged on GitHub, nothing
   committed after; worktree unlocked and clean except build artefacts). It is
