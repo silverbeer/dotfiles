@@ -99,6 +99,14 @@ If the request included a pasted image, attach it now — `new` doesn't do this 
 linear issue attach SB-42 /path/to/pasted-image.png
 ```
 
+**Description budget.** The ticket is read by an agent picking it up cold, so state
+the outcome, not the conversation that produced it:
+- 1 sentence of problem or goal, then bullets: acceptance criteria, or the concrete
+  changes. Name files/commands in backticks.
+- No "Background", "Overview" or "Notes" sections, no restating the title, no
+  speculative "future work" — file that as its own ticket.
+- Around 10 lines. Longer design belongs in `docs/` linked from the ticket.
+
 **Always set an estimate** — `--estimate N`, Fibonacci 1/2/3/5/8; `0` for superseded/duplicate/won't-do. Why, and how to reset one: `REFERENCE.md` → "Estimates".
 
 ### List — `/linear list [--all] [--epic E]`
