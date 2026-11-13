@@ -1,51 +1,72 @@
 Create a commit and pull request following standard GitOps conventions.
 
-## Creating a Commit
+## Branch first
+
+- Never commit directly to `main`. Check: `git branch --show-current`
+- Ticketed work: `bash ~/.claude/skills/linear-crud/scripts/linear.sh branch SB-N`
+  — the branch name must carry `sb-N` or the Linear integration ignores the PR.
+- No ticket yet: file an `adhoc` one first (linear-crud "Create"); work here is
+  tracked in Linear. Only fall back to `feat/…`, `fix/…`, `chore/…` in repos
+  outside the SB workflow.
+
+## Creating a commit
 
 1. Run `git status` and `git diff` to understand what changed
 2. Stage only relevant files — never `git add .` or `git add -A` blindly
-3. Check recent commits with `git log --oneline -5` to match the repo's commit style
-4. Write a conventional commit message:
-   - `feat:` — new feature
-   - `fix:` — bug fix
-   - `refactor:` — restructuring without behavior change
-   - `chore:` — maintenance, deps, config
-   - `docs:` — documentation only
-   - `test:` — adding or fixing tests
-   - `ci:` — CI/CD pipeline changes
-5. Always append co-authorship:
+3. Check `git log --oneline -5` to match the repo's commit style
+4. Write a conventional commit message (`feat:` `fix:` `refactor:` `chore:`
+   `docs:` `test:` `ci:`), with `(SB-N)` at the end of the subject when ticketed
+5. End with the co-author trailer **from the harness attribution reminder** —
+   it carries the live model name, e.g.
    ```
-   Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+   Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
    ```
+   Never copy a model name from this file or an old commit. With no reminder in
+   context, use `Claude <model name from your system prompt>`; if that is
+   unknown too, plain `Claude`.
 6. Use a HEREDOC for the commit message to preserve formatting
 
-## Creating a PR
+## Creating the PR
 
-1. Push the branch: `git push -u origin <branch-name>`
-2. Create PR with `gh pr create` using this body structure:
+1. `git push -u origin <branch>`
+2. `gh pr create` (non-draft — that moves the ticket to In Progress) with this body:
    ```
    ## Summary
-   - <bullet points of what changed and why>
+   - <why, then what — one line each>
 
    ## Test plan
-   - [ ] <what to verify>
+   - [ ] <a check that will actually be run>
 
-   🤖 Generated with Claude Code
+   Fixes SB-N
+
+   <PR attribution line from the harness reminder>
    ```
-3. Return the PR URL to the user
+3. Return the PR URL
 
-## Branch hygiene
+### PR body budget
 
-- Never commit directly to `main` — always use a feature branch
-- Branch naming: `feat/description`, `fix/description`, `chore/description`
-- Check current branch before starting: `git branch --show-current`
-- If on main, create a branch first: `git checkout -b feat/your-feature`
+Reviewers read the diff; the body says what the diff can't.
 
-## After PR is merged
+- Summary: at most 3 bullets. Lead with *why*. Don't narrate the diff file by file.
+- Test plan: only checks someone will run. No "verify it works".
+- No headings beyond these two, no "Changes"/"Overview"/"Notes" sections, no restating the title.
+- Ask before adding anything longer — a design note belongs in the ticket or `docs/`.
 
-- Do NOT manually trigger builds or deployments
-- Each project has its own CI/CD pipeline — check the project's CLAUDE.md for specifics
-- If the user asks about deployment status, check the project-specific deployment commands
+## Merge and clean up
+
+Merge your own green PRs; don't wait to be asked.
+
+```bash
+gh pr checks <N> --watch                       # when CI exists
+gh pr merge <N> --squash --delete-branch       # merge → ticket auto-moves to Done
+git switch main && git pull --ff-only
+git branch -D <branch>                         # squash merges need -D
+linear.sh worktree-done SB-N                   # instead, if work was in a linear.sh worktree
+jt git audit --repo .                          # confirm nothing of yours is left
+```
+
+- Do NOT manually trigger builds or deployments — each project's CI/CD handles
+  it; see the project's CLAUDE.md.
 
 ## Safety rules
 

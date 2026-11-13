@@ -214,7 +214,9 @@ the reason — never silently dropped just because no one's there to object.
 ### 8. Ship — gate (`pr`)
 
 Do **not** run `/cppp` — its confirm-before-push framing is for a human at the
-keyboard. Inline the same steps it documents:
+keyboard. Inline the same steps it documents. Take the `Co-Authored-By` trailer
+and PR attribution line from the harness attribution reminder (it carries the
+live model name); keep the PR body within cppp's "PR body budget":
 
 ```bash
 git status --porcelain           # confirm only ticket-scoped files are dirty
@@ -222,7 +224,7 @@ git add <specific files>         # never `git add .`
 git commit -m "$(cat <<'EOF'
 feat: <summary> (SB-<n>)
 
-Co-Authored-By: Claude <noreply@anthropic.com>
+Co-Authored-By: Claude <model> <noreply@anthropic.com>
 EOF
 )"
 git push -u origin "$(git branch --show-current)"
