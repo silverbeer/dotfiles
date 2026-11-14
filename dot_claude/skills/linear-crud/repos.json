@@ -215,5 +215,15 @@
     "epicGlobs": [
       "agt — *"
     ]
+  },
+  {
+    "label": "OBS",
+    "dirGlobs": [
+      "sb-observability"
+    ],
+    "ghRepo": "sb-observability",
+    "epicGlobs": [
+      "obs — *"
+    ]
   }
 ]
