@@ -55,3 +55,9 @@ unset _op_token
 
 # Rust (rustup): put cargo on PATH; guarded for machines without Rust
 if [[ -r "$HOME/.cargo/env" ]]; then . "$HOME/.cargo/env"; fi
+
+# ~/.local/bin (claude, rex, CodeRabbit) for every shell, not just interactive
+# ones: `rex run`, `ssh host cmd` and scripts read only this file, and without it
+# `exec claude` fails with "not found". .zshrc re-prepends it so it still wins
+# over the system dirs that macOS path_helper puts first in login shells.
+[[ ":$PATH:" == *":$HOME/.local/bin:"* ]] || export PATH="$HOME/.local/bin:$PATH"
