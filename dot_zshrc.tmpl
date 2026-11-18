@@ -57,6 +57,23 @@ fi
 # that tool (SB-392) silently took zsh completions with it — keep it standalone.
 autoload -Uz compinit && compinit
 
+# rcl REPO [HOST] — start Claude in ~/gitrepos/REPO on a Rex host (default
+# mini), in a new Rex session named REPO. It keeps running on the host when this
+# machine sleeps; open it from the Rex sidebar, or /remote-control from a phone.
+rcl() {
+  local repo=${1:?usage: rcl REPO [HOST]} host=${2:-mini} s
+  s=$(rex -S "$host" new "$repo") || return
+  if ! rex -S "$host" run -s "$s" --focus=false --wait -- \
+      sh -c 'test -d "$HOME/gitrepos/$1"' sh "$repo" &>/dev/null; then
+    echo "rcl: ~/gitrepos/$repo not found on $host" >&2
+    rex -S "$host" kill "$s" >/dev/null
+    return 1
+  fi
+  rex -S "$host" run -s "$s" --label claude >/dev/null -- \
+    sh -c 'cd "$HOME/gitrepos/$1" && exec claude' sh "$repo" || return
+  echo "claude running in $repo on $host (session ${s#session:})"
+}
+
 # Prompt (config: ~/.config/starship.toml). Shows repo, branch, dirty state and
 # the Linear ticket parsed from the branch name. Keep this last — starship's
 # init must run after anything that touches PROMPT.
