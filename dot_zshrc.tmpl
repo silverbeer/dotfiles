@@ -43,6 +43,24 @@ fi
 alias trde='TRD_HOME={{ .chezmoi.homeDir }}/.trd-engine trd'   # swing: 25 names, 10 x $100, 1d
 alias trdd='TRD_HOME={{ .chezmoi.homeDir }}/.trd-day trd'      # day: 20 names, 5 x $10, 15:55 flat
 
+# trd --notify needs TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID, which live in
+# ~/.config/trd/live.env (chmod 600) — the file the launchd jobs load. Without
+# this, `trd engine close X --notify` in a terminal queues the order and sends
+# nothing (SB-1743). Sourced in a SUBSHELL for the one command, so the token never
+# stays in the terminal's environment. Skipped in agent shells (CLAUDECODE=1):
+# an agent running `trd ... --notify` must not reach Telegram by accident.
+# The aliases above expand to `trd`, so they go through this too.
+if [[ -z "${CLAUDECODE:-}" ]]; then
+  trd() {
+    (
+      [[ -r "{{ .chezmoi.homeDir }}/.config/trd/live.env" ]] && {
+        set -a; source "{{ .chezmoi.homeDir }}/.config/trd/live.env"; set +a
+      }
+      command trd "$@"
+    )
+  }
+fi
+
 export APP_ENV={{ dig "appEnv" "prod" . }}
 
 # missing-table backend venv on PATH. Guarded because this file is shared with a
